@@ -1349,6 +1349,13 @@ func (de *endpoint) startDiscoPingLocked(ep epAddr, now mono.Time, purpose disco
 			de.probeUDPLifetime.lastTxID = txid
 		}
 		go de.sendDiscoPing(ep, epDisco.key, txid, s, logLevel)
+
+		if purpose != pingCLI && ep.isDirect() {
+			for _, source := range de.c.sourcePathProbeSources(ep.ap.Addr().Is4()) {
+				probeTxID := stun.NewTxID()
+				go de.c.sendSourcePathDiscoPing(source, ep, de.publicKey, epDisco.key, probeTxID, s, logLevel)
+			}
+		}
 	}
 
 }

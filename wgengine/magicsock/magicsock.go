@@ -192,6 +192,9 @@ type Conn struct {
 
 	receiveBatchPool sync.Pool
 
+	sourcePath   sourcePathState
+	sourceProbes sourcePathProbeManager
+
 	// closeDisco4 and closeDisco6 are io.Closers to shut down the raw
 	// disco packet receivers. If nil, no raw disco receiver is
 	// running for the given family.
@@ -1707,6 +1710,12 @@ func (c *Conn) receiveIPv6() conn.ReceiveFunc {
 // mkReceiveFunc creates a ReceiveFunc reading from ruc.
 // The provided healthItem and metrics are updated if non-nil.
 func (c *Conn) mkReceiveFunc(ruc *RebindingUDPConn, healthItem *health.ReceiveFuncStats, directPacketMetric, peerRelayPacketMetric, directBytesMetric, peerRelayBytesMetric *expvar.Int) conn.ReceiveFunc {
+	return c.mkReceiveFuncWithSource(ruc, healthItem, directPacketMetric, peerRelayPacketMetric, directBytesMetric, peerRelayBytesMetric, func() sourceRxMeta {
+		return primarySourceRxMeta
+	})
+}
+
+func (c *Conn) mkReceiveFuncWithSource(ruc *RebindingUDPConn, healthItem *health.ReceiveFuncStats, directPacketMetric, peerRelayPacketMetric, directBytesMetric, peerRelayBytesMetric *expvar.Int, rxMeta func() sourceRxMeta) conn.ReceiveFunc {
 	// epCache caches an epAddr->endpoint for hot flows.
 	var epCache epAddrEndpointCache
 
@@ -1742,7 +1751,7 @@ func (c *Conn) mkReceiveFunc(ruc *RebindingUDPConn, healthItem *health.ReceiveFu
 					continue
 				}
 				ipp := msg.Addr.(*net.UDPAddr).AddrPort()
-				if ep, size, isGeneveEncap, ok := c.receiveIP(msg.Buffers[0][:msg.N], ipp, &epCache); ok {
+				if ep, size, isGeneveEncap, ok := c.receiveIPWithSource(msg.Buffers[0][:msg.N], ipp, &epCache, rxMeta()); ok {
 					if isGeneveEncap {
 						if peerRelayPacketMetric != nil {
 							peerRelayPacketMetric.Add(1)
@@ -1790,12 +1799,19 @@ func looksLikeInitiationMsg(b []byte) bool {
 // ok is whether this read should be reported up to wireguard-go (our
 // caller).
 func (c *Conn) receiveIP(b []byte, ipp netip.AddrPort, cache *epAddrEndpointCache) (_ conn.Endpoint, size int, isGeneveEncap bool, ok bool) {
+	return c.receiveIPWithSource(b, ipp, cache, primarySourceRxMeta)
+}
+
+func (c *Conn) receiveIPWithSource(b []byte, ipp netip.AddrPort, cache *epAddrEndpointCache, rxMeta sourceRxMeta) (_ conn.Endpoint, size int, isGeneveEncap bool, ok bool) {
 	var ep *endpoint
 	size = len(b)
 
 	var geneve packet.GeneveHeader
 	pt, isGeneveEncap := packetLooksLike(b)
 	src := epAddr{ap: ipp}
+	if !rxMeta.isPrimary() && pt == packetLooksLikeWireGuard {
+		return nil, 0, false, false
+	}
 	if isGeneveEncap {
 		err := geneve.Decode(b)
 		if err != nil {
@@ -1816,7 +1832,7 @@ func (c *Conn) receiveIP(b []byte, ipp netip.AddrPort, cache *epAddrEndpointCach
 		// have yet to open the encrypted disco payload to determine the
 		// [disco.MessageType], but we assert it should be handshake-related.
 		shouldByRelayHandshakeMsg := geneve.Control == true
-		c.handleDiscoMessageWithSource(b, src, shouldByRelayHandshakeMsg, key.NodePublic{}, discoRXPathUDP, primarySourceRxMeta)
+		c.handleDiscoMessageWithSource(b, src, shouldByRelayHandshakeMsg, key.NodePublic{}, discoRXPathUDP, rxMeta)
 		return nil, 0, false, false
 	case packetLooksLikeSTUNBinding:
 		c.netChecker.ReceiveSTUNPacket(b, ipp)
@@ -2045,10 +2061,17 @@ const (
 // SourceSocketID identifies the local socket path that received a packet.
 type SourceSocketID uint32
 
-const primarySourceSocketID SourceSocketID = 0
+type sourceGeneration uint64
+
+const (
+	primarySourceSocketID SourceSocketID = iota
+	sourceIPv4SocketID
+	sourceIPv6SocketID
+)
 
 type sourceRxMeta struct {
-	socketID SourceSocketID
+	socketID   SourceSocketID
+	generation sourceGeneration
 }
 
 var primarySourceRxMeta = sourceRxMeta{socketID: primarySourceSocketID}
@@ -2168,7 +2191,6 @@ func (c *Conn) handleDiscoMessage(msg []byte, src epAddr, shouldBeRelayHandshake
 }
 
 func (c *Conn) handleDiscoMessageWithSource(msg []byte, src epAddr, shouldBeRelayHandshakeMsg bool, derpNodeSrc key.NodePublic, via discoRXPath, rxMeta sourceRxMeta) {
-	_ = rxMeta
 	sender := key.DiscoPublicFromRaw32(mem.B(msg[len(disco.Magic):discoHeaderLen]))
 
 	c.mu.Lock()
@@ -2286,6 +2308,9 @@ func (c *Conn) handleDiscoMessageWithSource(msg []byte, src epAddr, shouldBeRela
 		c.handlePingLocked(dm, src, di, derpNodeSrc)
 	case *disco.Pong:
 		metricRecvDiscoPong.Add(1)
+		if c.sourceProbes.handlePongLocked(dm, sender, src, rxMeta) {
+			return
+		}
 		// There might be multiple nodes for the sender's DiscoKey.
 		// Ask each to handle it, stopping once one reports that
 		// the Pong's TxID was theirs.
@@ -3405,7 +3430,9 @@ func (c *connBind) Open(ignoredPort uint16) ([]conn.ReceiveFunc, uint16, error) 
 		return nil, 0, errors.New("magicsock: connBind already open")
 	}
 	c.closed = false
-	fns := []conn.ReceiveFunc{c.receiveIPv4(), c.receiveIPv6(), c.receiveDERP}
+	fns := []conn.ReceiveFunc{c.receiveIPv4(), c.receiveIPv6()}
+	fns = append(fns, c.sourcePathReceiveFuncs()...)
+	fns = append(fns, c.receiveDERP)
 	if runtime.GOOS == "js" {
 		fns = []conn.ReceiveFunc{c.receiveDERP}
 	}
@@ -3435,6 +3462,7 @@ func (c *connBind) Close() error {
 	// Unblock all outstanding receives.
 	c.pconn4.Close()
 	c.pconn6.Close()
+	c.closeSourcePathSockets()
 	if c.closeDisco4 != nil {
 		c.closeDisco4.Close()
 	}
@@ -3491,6 +3519,7 @@ func (c *Conn) Close() error {
 	// They will frequently have been closed already by a call to connBind.Close.
 	c.pconn6.Close()
 	c.pconn4.Close()
+	c.closeSourcePathSockets()
 	if c.closeDisco4 != nil {
 		c.closeDisco4.Close()
 	}
@@ -3733,6 +3762,9 @@ func (c *Conn) rebind(curPortFate currentPortFate) error {
 	}
 	if err := c.bindSocket(&c.pconn4, "udp4", curPortFate); err != nil {
 		return fmt.Errorf("magicsock: Rebind IPv4 failed: %w", err)
+	}
+	if err := c.rebindSourcePathSockets(); err != nil {
+		c.logf("magicsock: srcsel: auxiliary socket setup failed: %v", err)
 	}
 	if c.portMapper != nil {
 		c.portMapper.SetLocalPort(c.LocalPort())
