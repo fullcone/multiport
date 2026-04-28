@@ -21,7 +21,7 @@ IPv4 and IPv6 are both in scope:
 - Local tree: `C:\other_project\fullcone`
 - Branch: `phase1-srcsel-source-metadata`
 - PR: `https://github.com/fullcone/multiport/pull/1`
-- Phase 2 commit: pending
+- Phase 2 implementation commit: `faed25451`
 
 ## Feature Gate
 
@@ -110,6 +110,11 @@ Results:
 
 ## Codex Review
 
-Pending. The review request should focus on whether auxiliary IPv4/IPv6 disco
-probe TxIDs can mutate endpoint state, peer endpoint maps, or preferred-address
-selection.
+Requested on PR #1:
+
+- Request comment:
+  `https://github.com/fullcone/multiport/pull/1#issuecomment-4337377316`
+- Requested focus: whether auxiliary IPv4/IPv6 disco probe TxIDs can mutate
+  endpoint state, peer endpoint maps, or preferred-address selection.
+- First 60 second poll: no Phase 2 Codex response observed.
+- Second 60 second poll: no Phase 2 Codex response observed.
