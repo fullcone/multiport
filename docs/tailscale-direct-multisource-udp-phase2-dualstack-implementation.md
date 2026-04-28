@@ -175,3 +175,7 @@ Requested on PR #1:
   `disco.SourcePathProbe`, do not add candidate endpoints or best-address
   state, and prune expired pending TxIDs.
 - First 60 second follow-up poll: no new Codex response observed.
+- Later follow-up poll observed Codex response:
+  `https://github.com/fullcone/multiport/pull/1#issuecomment-4337667402`
+- Follow-up Codex response result: no major issues found for the Phase 2
+  feedback fix.
