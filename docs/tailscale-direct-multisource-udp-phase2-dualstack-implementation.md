@@ -169,3 +169,9 @@ Requested on PR #1:
 - This fix addresses both findings by adding `disco.SourcePathProbe`, replying
   to it without endpoint-discovery side effects, and pruning expired pending
   auxiliary probe TxIDs.
+- Follow-up request after the fix:
+  `https://github.com/fullcone/multiport/pull/1#issuecomment-4337646399`
+- Follow-up request focus: verify IPv4 and IPv6 auxiliary probes use
+  `disco.SourcePathProbe`, do not add candidate endpoints or best-address
+  state, and prune expired pending TxIDs.
+- First 60 second follow-up poll: no new Codex response observed.
