@@ -72,6 +72,7 @@ func (pm *sourcePathProbeManager) addLocked(tx sourcePathProbeTx) {
 	if pm.pending == nil {
 		pm.pending = make(map[stun.TxID]sourcePathProbeTx)
 	}
+	pm.pruneExpiredLocked(tx.at)
 	pm.pending[tx.txid] = tx
 }
 
@@ -87,6 +88,14 @@ func (pm *sourcePathProbeManager) samplesLenLocked() int {
 	return len(pm.samples)
 }
 
+func (pm *sourcePathProbeManager) pruneExpiredLocked(now mono.Time) {
+	for txid, tx := range pm.pending {
+		if now.Sub(tx.at) >= pingTimeoutDuration {
+			delete(pm.pending, txid)
+		}
+	}
+}
+
 func (pm *sourcePathProbeManager) handlePongLocked(pong *disco.Pong, sender key.DiscoPublic, src epAddr, rxMeta sourceRxMeta) bool {
 	if rxMeta.isPrimary() {
 		return false
@@ -96,12 +105,16 @@ func (pm *sourcePathProbeManager) handlePongLocked(pong *disco.Pong, sender key.
 	if !ok {
 		return false
 	}
+	now := mono.Now()
+	if now.Sub(tx.at) >= pingTimeoutDuration {
+		delete(pm.pending, txid)
+		return true
+	}
 	if tx.source != rxMeta || tx.dstDisco != sender {
 		return false
 	}
 	delete(pm.pending, txid)
 
-	now := mono.Now()
 	pm.samples = append(pm.samples, sourcePathProbeSample{
 		txid:     txid,
 		dst:      tx.dst,
@@ -125,7 +138,7 @@ func (c *Conn) sendSourcePathDiscoPing(source sourceRxMeta, dst epAddr, dstKey k
 
 	size = min(size, MaxDiscoPingSize)
 	padding := max(size-discoPingSize, 0)
-	msg := &disco.Ping{
+	msg := &disco.SourcePathProbe{
 		TxID:    [12]byte(txid),
 		NodeKey: c.publicKeyAtomic.Load(),
 		Padding: padding,
@@ -179,7 +192,7 @@ func (c *Conn) sendSourcePathDiscoPing(source sourceRxMeta, dst epAddr, dstKey k
 		c.dlogf("[v1] magicsock: disco: %v->%v (%v, %v, source=%d) sent %v len %v\n", c.discoAtomic.Short(), dstDisco.ShortString(), node, derpStr(dst.String()), source.socketID, disco.MessageSummary(msg), len(pkt))
 	}
 	metricSentDiscoUDP.Add(1)
-	metricSentDiscoPing.Add(1)
+	metricSentDiscoSourcePathProbe.Add(1)
 	if size != 0 {
 		metricSentDiscoPeerMTUProbes.Add(1)
 		metricSentDiscoPeerMTUProbeBytes.Add(int64(pingSizeToPktLen(size, dst)))

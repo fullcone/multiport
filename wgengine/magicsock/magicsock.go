@@ -2027,6 +2027,8 @@ func (c *Conn) sendDiscoMessage(dst epAddr, dstKey key.NodePublic, dstDisco key.
 			metricSentDiscoPing.Add(1)
 		case *disco.Pong:
 			metricSentDiscoPong.Add(1)
+		case *disco.SourcePathProbe:
+			metricSentDiscoSourcePathProbe.Add(1)
 		case *disco.CallMeMaybe:
 			metricSentDiscoCallMeMaybe.Add(1)
 		case *disco.CallMeMaybeVia:
@@ -2306,6 +2308,9 @@ func (c *Conn) handleDiscoMessageWithSource(msg []byte, src epAddr, shouldBeRela
 	case *disco.Ping:
 		metricRecvDiscoPing.Add(1)
 		c.handlePingLocked(dm, src, di, derpNodeSrc)
+	case *disco.SourcePathProbe:
+		metricRecvDiscoSourcePathProbe.Add(1)
+		c.handleSourcePathProbeLocked(dm, src, di)
 	case *disco.Pong:
 		metricRecvDiscoPong.Add(1)
 		if c.sourceProbes.handlePongLocked(dm, sender, src, rxMeta) {
@@ -2619,6 +2624,62 @@ func (c *Conn) handlePingLocked(dm *disco.Ping, src epAddr, di *discoInfo, derpN
 	ipDst := src
 	discoDest := di.discoKey
 	go c.sendDiscoMessage(ipDst, dstKey, discoDest, &disco.Pong{
+		TxID: dm.TxID,
+		Src:  src.ap,
+	}, discoVerboseLog)
+}
+
+// handleSourcePathProbeLocked replies to a source-path probe without admitting
+// the probe's source address as a candidate endpoint. Auxiliary sockets do not
+// accept WireGuard traffic, so treating their ports as ordinary endpoints can
+// blackhole peer data until endpoint discovery recovers.
+func (c *Conn) handleSourcePathProbeLocked(dm *disco.SourcePathProbe, src epAddr, di *discoInfo) {
+	isDerp := src.ap.Addr() == tailcfg.DerpMagicIPAddr
+	if src.vni.IsSet() || isDerp {
+		c.logf("[unexpected] got source-path disco probe from %v", src)
+		return
+	}
+	if debugNeverDirectUDP() {
+		return
+	}
+
+	var dstKey key.NodePublic
+	var numNodes int
+	if !dm.NodeKey.IsZero() {
+		if ep, ok := c.peerMap.endpointForNodeKey(dm.NodeKey); ok {
+			epDisco := ep.disco.Load()
+			if epDisco != nil && epDisco.key == di.discoKey {
+				dstKey = dm.NodeKey
+				numNodes = 1
+			}
+		}
+	}
+	if numNodes == 0 {
+		c.peerMap.forEachEndpointWithDiscoKey(di.discoKey, func(ep *endpoint) (keepGoing bool) {
+			numNodes++
+			if numNodes == 1 {
+				dstKey = ep.publicKey
+			}
+			return true
+		})
+	}
+	if numNodes == 0 {
+		c.logf("[unexpected] got source-path disco probe from %v for node not in peers", src)
+		return
+	}
+	if numNodes > 1 {
+		dstKey = key.NodePublic{}
+	}
+
+	if debugDisco() {
+		probeNodeSrcStr := dstKey.ShortString()
+		if numNodes > 1 {
+			probeNodeSrcStr = "[one-of-multi]"
+		}
+		c.dlogf("[v1] magicsock: disco: %v<-%v (%v, %v) got source-path-probe tx=%x padding=%v", c.discoAtomic.Short(), di.discoShort, probeNodeSrcStr, src, dm.TxID[:6], dm.Padding)
+	}
+
+	go c.sendDiscoMessage(src, dstKey, di.discoKey, &disco.Pong{
 		TxID: dm.TxID,
 		Src:  src.ap,
 	}, discoVerboseLog)
@@ -4180,6 +4241,7 @@ var (
 	metricSentDiscoDERP                          = clientmetric.NewCounter("magicsock_disco_sent_derp")
 	metricSentDiscoPing                          = clientmetric.NewCounter("magicsock_disco_sent_ping")
 	metricSentDiscoPong                          = clientmetric.NewCounter("magicsock_disco_sent_pong")
+	metricSentDiscoSourcePathProbe               = clientmetric.NewCounter("magicsock_disco_sent_source_path_probe")
 	metricSentDiscoPeerMTUProbes                 = clientmetric.NewCounter("magicsock_disco_sent_peer_mtu_probes")
 	metricSentDiscoPeerMTUProbeBytes             = clientmetric.NewCounter("magicsock_disco_sent_peer_mtu_probe_bytes")
 	metricSentDiscoCallMeMaybe                   = clientmetric.NewCounter("magicsock_disco_sent_callmemaybe")
@@ -4197,6 +4259,7 @@ var (
 	metricRecvDiscoDERP                                  = clientmetric.NewCounter("magicsock_disco_recv_derp")
 	metricRecvDiscoPing                                  = clientmetric.NewCounter("magicsock_disco_recv_ping")
 	metricRecvDiscoPong                                  = clientmetric.NewCounter("magicsock_disco_recv_pong")
+	metricRecvDiscoSourcePathProbe                       = clientmetric.NewCounter("magicsock_disco_recv_source_path_probe")
 	metricRecvDiscoCallMeMaybe                           = clientmetric.NewCounter("magicsock_disco_recv_callmemaybe")
 	metricRecvDiscoCallMeMaybeVia                        = clientmetric.NewCounter("magicsock_disco_recv_callmemaybevia")
 	metricRecvDiscoCallMeMaybeBadNode                    = clientmetric.NewCounter("magicsock_disco_recv_callmemaybe_bad_node")
