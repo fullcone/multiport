@@ -1816,7 +1816,7 @@ func (c *Conn) receiveIP(b []byte, ipp netip.AddrPort, cache *epAddrEndpointCach
 		// have yet to open the encrypted disco payload to determine the
 		// [disco.MessageType], but we assert it should be handshake-related.
 		shouldByRelayHandshakeMsg := geneve.Control == true
-		c.handleDiscoMessage(b, src, shouldByRelayHandshakeMsg, key.NodePublic{}, discoRXPathUDP)
+		c.handleDiscoMessageWithSource(b, src, shouldByRelayHandshakeMsg, key.NodePublic{}, discoRXPathUDP, primarySourceRxMeta)
 		return nil, 0, false, false
 	case packetLooksLikeSTUNBinding:
 		c.netChecker.ReceiveSTUNPacket(b, ipp)
@@ -2042,6 +2042,17 @@ const (
 	discoRXPathRawSocket discoRXPath = "raw socket"
 )
 
+// SourceSocketID identifies the local socket path that received a packet.
+type SourceSocketID uint32
+
+const primarySourceSocketID SourceSocketID = 0
+
+type sourceRxMeta struct {
+	socketID SourceSocketID
+}
+
+var primarySourceRxMeta = sourceRxMeta{socketID: primarySourceSocketID}
+
 const discoHeaderLen = len(disco.Magic) + key.DiscoPublicRawLen
 
 type packetLooksLikeType int
@@ -2153,6 +2164,11 @@ func packetLooksLike(msg []byte) (t packetLooksLikeType, isGeneveEncap bool) {
 // 'shouldBeRelayHandshakeMsg' will be true if 'msg' was encapsulated
 // by a Geneve header with the control bit set.
 func (c *Conn) handleDiscoMessage(msg []byte, src epAddr, shouldBeRelayHandshakeMsg bool, derpNodeSrc key.NodePublic, via discoRXPath) {
+	c.handleDiscoMessageWithSource(msg, src, shouldBeRelayHandshakeMsg, derpNodeSrc, via, primarySourceRxMeta)
+}
+
+func (c *Conn) handleDiscoMessageWithSource(msg []byte, src epAddr, shouldBeRelayHandshakeMsg bool, derpNodeSrc key.NodePublic, via discoRXPath, rxMeta sourceRxMeta) {
+	_ = rxMeta
 	sender := key.DiscoPublicFromRaw32(mem.B(msg[len(disco.Magic):discoHeaderLen]))
 
 	c.mu.Lock()

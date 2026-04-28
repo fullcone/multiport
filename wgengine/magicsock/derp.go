@@ -725,7 +725,7 @@ func (c *Conn) processDERPReadResult(dm derpReadResult, b []byte) (n int, ep *en
 	pt, isGeneveEncap := packetLooksLike(b[:n])
 	if pt == packetLooksLikeDisco &&
 		!isGeneveEncap { // We should never receive Geneve-encapsulated disco over DERP.
-		c.handleDiscoMessage(b[:n], srcAddr, false, dm.src, discoRXPathDERP)
+		c.handleDiscoMessageWithSource(b[:n], srcAddr, false, dm.src, discoRXPathDERP, primarySourceRxMeta)
 		return 0, nil
 	}
 
