@@ -15,6 +15,7 @@ path behavior changes.
 - Branch: `phase1-srcsel-source-metadata`
 - PR: `https://github.com/fullcone/multiport/pull/1`
 - Code commit: `e9f49eff3 magicsock: thread receive source metadata`
+- Documentation commit: `b01ea9e24 docs: record magicsock source metadata phase 1`
 
 ## Implementation
 
@@ -103,6 +104,20 @@ The PR follows the `C:\netdisk_work_ascii` workflow pattern:
 Initial review request for the code commit:
 
 - `https://github.com/fullcone/multiport/pull/1#issuecomment-4336864938`
+
+Codex response for the code commit:
+
+- `https://github.com/fullcone/multiport/pull/1#issuecomment-4336882910`
+- Result: no major issues reported.
+
+Review request for the documentation commit latest head:
+
+- `https://github.com/fullcone/multiport/pull/1#issuecomment-4336918535`
+
+Codex response for the documentation commit latest head:
+
+- `https://github.com/fullcone/multiport/pull/1#issuecomment-4336948890`
+- Result: no major issues reported.
 
 For each later commit, request a new review with:
 
