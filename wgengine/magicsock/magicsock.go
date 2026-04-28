@@ -1518,6 +1518,23 @@ func (c *Conn) sendUDPBatch(addr epAddr, buffs [][]byte, offset int) (sent bool,
 	return err == nil, err
 }
 
+func (c *Conn) sendUDPBatchFromSource(source sourceRxMeta, addr epAddr, buffs [][]byte, offset int) (sent bool, err error) {
+	if source.isPrimary() {
+		return c.sendUDPBatch(addr, buffs, offset)
+	}
+	if !addr.isDirect() {
+		return false, errSourcePathUnavailable
+	}
+	err = c.sourcePathWriteWireGuardBatchTo(source, addr, buffs, offset)
+	if err != nil {
+		if errGSO, ok := errors.AsType[neterror.ErrUDPGSODisabled](err); ok {
+			c.logf("magicsock: %s", errGSO.Error())
+			err = errGSO.RetryErr
+		}
+	}
+	return err == nil, err
+}
+
 // sendUDP sends UDP packet b to ipp.
 // See sendAddr's docs on the return value meanings.
 func (c *Conn) sendUDP(ipp netip.AddrPort, b []byte, isDisco bool, isGeneveEncap bool) (sent bool, err error) {
@@ -1552,6 +1569,32 @@ func (c *Conn) sendUDP(ipp netip.AddrPort, b []byte, isDisco bool, isGeneveEncap
 					c.metrics.outboundBytesIPv6Total.Add(int64(len(b)))
 				}
 			}
+		}
+	}
+	return
+}
+
+func (c *Conn) sendUDPFromSource(source sourceRxMeta, ipp netip.AddrPort, b []byte, isDisco bool, isGeneveEncap bool) (sent bool, err error) {
+	if source.isPrimary() {
+		return c.sendUDP(ipp, b, isDisco, isGeneveEncap)
+	}
+	if runtime.GOOS == "js" {
+		return false, errNoUDP
+	}
+	if isGeneveEncap {
+		return false, errSourcePathUnavailable
+	}
+	sent, err = c.sendUDPStdFromSource(source, ipp, b)
+	if err != nil {
+		metricSendUDPError.Add(1)
+	} else if sent && !isDisco {
+		switch {
+		case ipp.Addr().Is4():
+			c.metrics.outboundPacketsIPv4Total.Add(1)
+			c.metrics.outboundBytesIPv4Total.Add(int64(len(b)))
+		case ipp.Addr().Is6():
+			c.metrics.outboundPacketsIPv6Total.Add(1)
+			c.metrics.outboundBytesIPv6Total.Add(int64(len(b)))
 		}
 	}
 	return
@@ -1616,6 +1659,25 @@ func (c *Conn) sendUDPStd(addr netip.AddrPort, b []byte) (sent bool, err error) 
 	return err == nil, err
 }
 
+func (c *Conn) sendUDPStdFromSource(source sourceRxMeta, addr netip.AddrPort, b []byte) (sent bool, err error) {
+	if source.isPrimary() {
+		return c.sendUDPStd(addr, b)
+	}
+	if c.onlyTCP443.Load() {
+		return false, nil
+	}
+	_, err = c.sourcePathWriteTo(source, addr, b)
+	if err != nil {
+		switch {
+		case addr.Addr().Is4() && (c.noV4.Load() || neterror.TreatAsLostUDP(err)):
+			return false, nil
+		case addr.Addr().Is6() && (c.noV6.Load() || neterror.TreatAsLostUDP(err)):
+			return false, nil
+		}
+	}
+	return err == nil, err
+}
+
 // sendAddr sends packet b to addr, which is either a real UDP address
 // or a fake UDP address representing a DERP server (see derpmap.go).
 // The provided public key identifies the recipient.
@@ -1666,6 +1728,13 @@ func (c *Conn) sendAddr(addr netip.AddrPort, pubKey key.NodePublic, b []byte, is
 	metricSendDERPErrorQueue.Add(1)
 	// Too many writes queued. Drop packet.
 	return false, errDropDerpPacket
+}
+
+func (c *Conn) sendAddrFromSource(source sourceRxMeta, addr netip.AddrPort, pubKey key.NodePublic, b []byte, isDisco bool, isGeneveEncap bool) (sent bool, err error) {
+	if source.isPrimary() || addr.Addr() == tailcfg.DerpMagicIPAddr {
+		return c.sendAddr(addr, pubKey, b, isDisco, isGeneveEncap)
+	}
+	return c.sendUDPFromSource(source, addr, b, isDisco, isGeneveEncap)
 }
 
 type receiveBatch struct {
@@ -1945,6 +2014,13 @@ func (c *Conn) sendDiscoAllocateUDPRelayEndpointRequest(dst epAddr, dstKey key.N
 // The dstKey should only be non-zero if the dstDisco key
 // unambiguously maps to exactly one peer.
 func (c *Conn) sendDiscoMessage(dst epAddr, dstKey key.NodePublic, dstDisco key.DiscoPublic, m disco.Message, logLevel discoLogLevel) (sent bool, err error) {
+	return c.sendDiscoMessageFromSource(primarySourceRxMeta, dst, dstKey, dstDisco, m, logLevel)
+}
+
+func (c *Conn) sendDiscoMessageFromSource(source sourceRxMeta, dst epAddr, dstKey key.NodePublic, dstDisco key.DiscoPublic, m disco.Message, logLevel discoLogLevel) (sent bool, err error) {
+	if !source.isPrimary() && !dst.isDirect() {
+		return false, errSourcePathUnavailable
+	}
 	isDERP := dst.ap.Addr() == tailcfg.DerpMagicIPAddr
 	if _, isPong := m.(*disco.Pong); isPong && !isDERP && dst.ap.Addr().Is4() {
 		time.Sleep(debugIPv4DiscoPingPenalty())
@@ -2008,7 +2084,7 @@ func (c *Conn) sendDiscoMessage(dst epAddr, dstKey key.NodePublic, dstDisco key.
 	box := di.sharedKey.Seal(m.AppendMarshal(nil))
 	pkt = append(pkt, box...)
 	const isDisco = true
-	sent, err = c.sendAddr(dst.ap, dstKey, pkt, isDisco, dst.vni.IsSet())
+	sent, err = c.sendAddrFromSource(source, dst.ap, dstKey, pkt, isDisco, dst.vni.IsSet())
 	if sent {
 		if logLevel == discoLog || (logLevel == discoVerboseLog && debugDisco()) {
 			node := "?"

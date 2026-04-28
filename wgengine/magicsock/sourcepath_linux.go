@@ -9,14 +9,16 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"strings"
 
 	"github.com/tailscale/wireguard-go/conn"
 	"tailscale.com/envknob"
 )
 
 var (
-	envknobSrcSelEnable     = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_ENABLE")
-	envknobSrcSelAuxSockets = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS")
+	envknobSrcSelEnable          = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_ENABLE")
+	envknobSrcSelAuxSockets      = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS")
+	envknobSrcSelForceDataSource = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE")
 )
 
 func sourcePathAuxSocketCount() int {
@@ -64,6 +66,51 @@ func (c *Conn) sourcePathProbeSources(is4 bool) []sourceRxMeta {
 		return nil
 	}
 	return []sourceRxMeta{c.sourcePath.aux6.rxMeta()}
+}
+
+func sourcePathForcedDataSourceAllowsAddr(addr netip.Addr) bool {
+	switch strings.ToLower(envknobSrcSelForceDataSource()) {
+	case "aux":
+		return true
+	case "aux4", "ipv4", "v4":
+		return addr.Is4()
+	case "aux6", "ipv6", "v6":
+		return addr.Is6()
+	default:
+		return false
+	}
+}
+
+func (c *Conn) sourcePathDataSendSource(dst epAddr) sourceRxMeta {
+	if sourcePathAuxSocketCount() == 0 || !dst.isDirect() || !sourcePathForcedDataSourceAllowsAddr(dst.ap.Addr()) {
+		return primarySourceRxMeta
+	}
+	c.sourcePath.mu.Lock()
+	defer c.sourcePath.mu.Unlock()
+	switch {
+	case dst.ap.Addr().Is4() && c.sourcePath.aux4Bound:
+		return c.sourcePath.aux4.rxMeta()
+	case dst.ap.Addr().Is6() && c.sourcePath.aux6Bound:
+		return c.sourcePath.aux6.rxMeta()
+	default:
+		return primarySourceRxMeta
+	}
+}
+
+func (c *Conn) sourcePathWriteWireGuardBatchTo(source sourceRxMeta, dst epAddr, buffs [][]byte, offset int) error {
+	c.sourcePath.mu.Lock()
+	var ruc *RebindingUDPConn
+	switch {
+	case dst.ap.Addr().Is4() && dst.isDirect() && c.sourcePath.aux4Bound && source == c.sourcePath.aux4.rxMeta():
+		ruc = &c.sourcePath.aux4.pconn
+	case dst.ap.Addr().Is6() && dst.isDirect() && c.sourcePath.aux6Bound && source == c.sourcePath.aux6.rxMeta():
+		ruc = &c.sourcePath.aux6.pconn
+	}
+	c.sourcePath.mu.Unlock()
+	if ruc == nil {
+		return errSourcePathUnavailable
+	}
+	return ruc.WriteWireGuardBatchTo(buffs, dst, offset)
 }
 
 func (c *Conn) sourcePathWriteTo(source sourceRxMeta, dst netip.AddrPort, pkt []byte) (int, error) {

@@ -15,6 +15,12 @@ func (c *Conn) sourcePathReceiveFuncs() []conn.ReceiveFunc { return nil }
 
 func (c *Conn) sourcePathProbeSources(is4 bool) []sourceRxMeta { return nil }
 
+func (c *Conn) sourcePathDataSendSource(dst epAddr) sourceRxMeta { return primarySourceRxMeta }
+
+func (c *Conn) sourcePathWriteWireGuardBatchTo(source sourceRxMeta, dst epAddr, buffs [][]byte, offset int) error {
+	return errSourcePathUnavailable
+}
+
 func (c *Conn) sourcePathWriteTo(source sourceRxMeta, dst netip.AddrPort, pkt []byte) (int, error) {
 	return 0, errSourcePathUnavailable
 }
