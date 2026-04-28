@@ -102,6 +102,21 @@ selection.
   - `aux4` selecting only IPv4 auxiliary sends,
   - `aux6` selecting only IPv6 auxiliary sends,
   - unset forcing preserving primary sends for both families.
+- Adds explicit front-loaded assertions that the source-selection boolean knob,
+  auxiliary socket-count integer knob, source-path auxiliary socket count, and
+  IPv4/IPv6 forcing policy are active before validating selected sockets.
+
+`envknob/envknob.go`
+
+- Updates `Setenv` to refresh registered integer knobs in `regInt`.
+- This is required for tests that mutate an already-registered integer knob
+  after package initialization, such as
+  `TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS`.
+
+`envknob/envknob_test.go`
+
+- Adds `TestSetenvUpdatesRegisteredInt` to prove `RegisterInt` observers see
+  later `envknob.Setenv` updates and clear operations.
 
 ## Safety Properties
 
@@ -136,6 +151,31 @@ Results:
 
 - `go test ./wgengine/magicsock`: passed.
 - `GOOS=linux GOARCH=amd64 go test -c ./wgengine/magicsock`: passed.
+
+Additional runtime/unit validation on 2026-04-29:
+
+```powershell
+gofmt -w envknob\envknob.go envknob\envknob_test.go wgengine\magicsock\sourcepath_linux_test.go
+go test ./envknob
+wsl -d Ubuntu -- bash -lc 'cd /mnt/c/other_project/fullcone && go test ./wgengine/magicsock -run TestSourcePathDataSendSourceForcedAuxDualStack -count=1 -v'
+go test ./wgengine/magicsock ./envknob
+wsl -d Ubuntu -- bash -lc 'cd /mnt/c/other_project/fullcone && go test ./wgengine/magicsock ./envknob'
+```
+
+Results:
+
+- `go test ./envknob`: passed.
+- WSL Ubuntu targeted
+  `TestSourcePathDataSendSourceForcedAuxDualStack`: passed.
+- Windows `go test ./wgengine/magicsock ./envknob`: passed.
+- WSL Ubuntu `go test ./wgengine/magicsock ./envknob`: passed.
+
+The first WSL Linux targeted run exposed that `envknob.Setenv` refreshed
+registered string, boolean, optional-boolean, and duration knobs, but not
+registered integer knobs. Because `TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS` is a
+registered integer knob, the Linux dual-stack test saw an auxiliary socket
+count of `0` after setting the knob to `1`. The `envknob.Setenv` `regInt` fix
+and `TestSetenvUpdatesRegisteredInt` cover this support bug.
 
 Runtime validation still required in a Linux dual-node testbed:
 
@@ -185,8 +225,19 @@ PR startup check on 2026-04-29:
   `https://github.com/fullcone/multiport/pull/1#issuecomment-4337667402`
 - No new actionable Phase 3 review finding is present at this checkpoint.
 
+Phase 3 documentation follow-up review checkpoint on 2026-04-29:
+
+- Later PR refresh observed Codex response:
+  `https://github.com/fullcone/multiport/pull/1#issuecomment-4338125251`
+- Codex reported no major issues for the Phase 3 documentation update.
+- The two older Phase 2 inline threads still appear unresolved in the GitHub UI,
+  but no newer review has contradicted the Phase 2 fixes.
+
 ## Current Status
 
 Phase 3 source-aware data-send plumbing is implemented for IPv4 and IPv6 behind
 a manual debug forcing gate. Codex review found no major Phase 3 code issues.
-It is not yet an automatic path-selection feature.
+The Linux dual-stack source-selection unit path now passes under WSL after the
+registered integer envknob refresh fix. It is not yet an automatic
+path-selection feature, and true dual-node packet-capture validation remains
+pending.

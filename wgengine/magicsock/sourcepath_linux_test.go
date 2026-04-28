@@ -34,6 +34,22 @@ func TestSourcePathDataSendSourceForcedAuxDualStack(t *testing.T) {
 	v4 := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
 	v6 := epAddr{ap: netip.MustParseAddrPort("[2001:db8::1]:41641")}
 
+	if !envknobSrcSelEnable() {
+		t.Fatalf("TS_EXPERIMENTAL_SRCSEL_ENABLE was not enabled")
+	}
+	if got := envknobSrcSelAuxSockets(); got != 1 {
+		t.Fatalf("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS = %d, want 1", got)
+	}
+	if got := sourcePathAuxSocketCount(); got != 1 {
+		t.Fatalf("sourcePathAuxSocketCount() = %d, want 1", got)
+	}
+	if !sourcePathForcedDataSourceAllowsAddr(v4.ap.Addr()) {
+		t.Fatalf("forced source data policy rejected IPv4 address %v", v4.ap.Addr())
+	}
+	if !sourcePathForcedDataSourceAllowsAddr(v6.ap.Addr()) {
+		t.Fatalf("forced source data policy rejected IPv6 address %v", v6.ap.Addr())
+	}
+
 	if got := c.sourcePathDataSendSource(v4); got.socketID != sourceIPv4SocketID {
 		t.Fatalf("forced IPv4 source socket = %d, want %d", got.socketID, sourceIPv4SocketID)
 	}
