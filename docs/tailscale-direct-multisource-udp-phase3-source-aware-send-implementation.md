@@ -149,7 +149,44 @@ Runtime validation still required in a Linux dual-node testbed:
   auxiliary-only send error;
 - confirmation that `lazyEndpoint` remains on the original primary send path.
 
+## Codex Review
+
+Requested on PR #1:
+
+- Phase 3 code review request:
+  `https://github.com/fullcone/multiport/pull/1#issuecomment-4338044687`
+- Requested focus:
+  - IPv4 and IPv6 forced auxiliary data sends use only the matching auxiliary
+    socket.
+  - Auxiliary send errors fall back to primary without calling
+    `maybeRebindOnError` or marking the endpoint bad unless the primary retry
+    fails.
+  - `lazyEndpoint` remains on the original `pconn4` / `pconn6` send path.
+  - `sendDiscoMessage` still defaults to primary and the new source-aware
+    helper does not affect current callers.
+  - `TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE` does not change normal behavior
+    when unset.
+- Initial local polling after the request did not observe a response.
+- Later PR refresh observed Codex response:
+  `https://github.com/fullcone/multiport/pull/1#issuecomment-4338083749`
+- Phase 3 Codex response result: no major issues found for the source-aware
+  data send implementation.
+
+PR startup check on 2026-04-29:
+
+- Two older Phase 2 inline review threads still appear unresolved in the GitHub
+  UI:
+  - `PRRT_kwDOSPBZuM5-NLPH`: auxiliary probes must not advertise non-primary
+    endpoints.
+  - `PRRT_kwDOSPBZuM5-NLPK`: unsatisfied source-path probe TxIDs need expiry.
+- Both findings were addressed by the Phase 2 feedback fix and recorded in
+  `docs/tailscale-direct-multisource-udp-phase2-dualstack-implementation.md`.
+- The follow-up Codex review for that fix reported no major issues:
+  `https://github.com/fullcone/multiport/pull/1#issuecomment-4337667402`
+- No new actionable Phase 3 review finding is present at this checkpoint.
+
 ## Current Status
 
 Phase 3 source-aware data-send plumbing is implemented for IPv4 and IPv6 behind
-a manual debug forcing gate. It is not yet an automatic path-selection feature.
+a manual debug forcing gate. Codex review found no major Phase 3 code issues.
+It is not yet an automatic path-selection feature.
