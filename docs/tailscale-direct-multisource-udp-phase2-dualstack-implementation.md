@@ -22,7 +22,7 @@ IPv4 and IPv6 are both in scope:
 - Branch: `phase1-srcsel-source-metadata`
 - PR: `https://github.com/fullcone/multiport/pull/1`
 - Phase 2 implementation commit: `faed25451`
-- Phase 2 Codex-feedback fix commit: `TBD`
+- Phase 2 Codex-feedback fix commit: `0918a9300`
 
 ## Feature Gate
 
