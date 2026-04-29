@@ -630,6 +630,111 @@ func TestSendUDPBatchFromSourceAuxDualStackLoopback(t *testing.T) {
 	}
 }
 
+func TestLazyEndpointSendIgnoresForcedAuxDataSourceDualStack(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
+	})
+
+	tests := []struct {
+		name            string
+		network         string
+		addr            string
+		socketID        SourceSocketID
+		bindPrimaryConn func(*Conn, nettype.PacketConn)
+		bindAuxConn     func(*Conn, nettype.PacketConn)
+	}{
+		{
+			name:     "ipv4",
+			network:  "udp4",
+			addr:     "127.0.0.1:0",
+			socketID: sourceIPv4SocketID,
+			bindPrimaryConn: func(c *Conn, pc nettype.PacketConn) {
+				c.pconn4.mu.Lock()
+				c.pconn4.setConnLocked(pc, "udp4", 1)
+				c.pconn4.mu.Unlock()
+			},
+			bindAuxConn: func(c *Conn, pc nettype.PacketConn) {
+				c.sourcePath.aux4.setID(sourceIPv4SocketID)
+				c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+				c.sourcePath.aux4.pconn.mu.Lock()
+				c.sourcePath.aux4.pconn.setConnLocked(pc, "udp4", 1)
+				c.sourcePath.aux4.pconn.mu.Unlock()
+				c.sourcePath.aux4Bound = true
+			},
+		},
+		{
+			name:     "ipv6",
+			network:  "udp6",
+			addr:     "[::1]:0",
+			socketID: sourceIPv6SocketID,
+			bindPrimaryConn: func(c *Conn, pc nettype.PacketConn) {
+				c.pconn6.mu.Lock()
+				c.pconn6.setConnLocked(pc, "udp6", 1)
+				c.pconn6.mu.Unlock()
+			},
+			bindAuxConn: func(c *Conn, pc nettype.PacketConn) {
+				c.sourcePath.aux6.setID(sourceIPv6SocketID)
+				c.sourcePath.aux6.generation.Store(uint64(c.sourcePath.generation))
+				c.sourcePath.aux6.pconn.mu.Lock()
+				c.sourcePath.aux6.pconn.setConnLocked(pc, "udp6", 1)
+				c.sourcePath.aux6.pconn.mu.Unlock()
+				c.sourcePath.aux6Bound = true
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dstConn := listenUDPForSourcePathTest(t, tt.network, tt.addr)
+			primaryConn := listenUDPForSourcePathTest(t, tt.network, tt.addr)
+			auxConn := listenUDPForSourcePathTest(t, tt.network, tt.addr)
+
+			var c Conn
+			c.sourcePath.generation = 17
+			tt.bindPrimaryConn(&c, primaryConn)
+			tt.bindAuxConn(&c, auxConn)
+
+			dst := epAddr{ap: udpConnAddrPort(t, dstConn.LocalAddr())}
+			source := c.sourcePathDataSendSource(dst)
+			if source.socketID != tt.socketID {
+				t.Fatalf("forced source socket = %d, want auxiliary socket %d", source.socketID, tt.socketID)
+			}
+
+			payload := []byte("source-path-lazy-" + tt.name)
+			buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
+			copy(buf[packet.GeneveFixedHeaderLength:], payload)
+			if err := c.Send([][]byte{buf}, &lazyEndpoint{src: dst}, packet.GeneveFixedHeaderLength); err != nil {
+				t.Fatalf("Conn.Send returned error: %v", err)
+			}
+
+			if err := dstConn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			got := make([]byte, 128)
+			n, src, err := dstConn.ReadFromUDPAddrPort(got)
+			if err != nil {
+				t.Fatalf("ReadFromUDPAddrPort: %v", err)
+			}
+			if string(got[:n]) != string(payload) {
+				t.Fatalf("received payload %q, want %q", got[:n], payload)
+			}
+			if want := udpConnAddrPort(t, primaryConn.LocalAddr()); src.Port() != want.Port() {
+				t.Fatalf("received source port = %d, want primary port %d", src.Port(), want.Port())
+			}
+			if aux := udpConnAddrPort(t, auxConn.LocalAddr()); src.Port() == aux.Port() {
+				t.Fatalf("received source port = auxiliary port %d, want primary path", aux.Port())
+			}
+		})
+	}
+}
+
 func TestSourcePathWriteWireGuardBatchToRejectsStaleAuxSource(t *testing.T) {
 	dstConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
 	auxConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
