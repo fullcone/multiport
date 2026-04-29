@@ -142,12 +142,31 @@ Runtime proof lines:
 
 Implementation commit:
 
-- Pending until this document is committed and pushed.
+- `83ed931cb87553b06ed6fc31918f10f50075069a`
+  (`magicsock: add source path data send metrics`)
 
 Review request:
 
-- Pending until this document is committed and pushed.
+- PR #1 comment:
+  `https://github.com/fullcone/multiport/pull/1#issuecomment-4342447412`
 
 Review result:
 
-- Pending PR review polling.
+- Pending Codex response after the first 60-second poll.
+
+Polling record on 2026-04-29:
+
+- First 60-second poll after the Phase 6 review request: no Codex response for
+  commit `83ed931cb87553b06ed6fc31918f10f50075069a`; no new actionable review
+  thread appeared.
+
+Current PR feedback state after the first Phase 6 poll:
+
+- Earlier Phase 2 review threads are resolved.
+- Earlier Phase 3 test-fixture review threads are resolved and outdated.
+- The only unresolved thread is the outdated Phase 4B P2
+  `sourcePathSocket.rxMeta` synchronization finding
+  (`PRRT_kwDOSPBZuM5-U8eD`), already fixed by commit
+  `5c6738d84cca8f09d896e82c375a181c97158b8a` and followed by a no-major-issues
+  Codex review.
+- No Phase 6-specific actionable feedback has appeared in the first poll.
