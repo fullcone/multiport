@@ -12,7 +12,10 @@ Branch: `phase1-srcsel-source-metadata`
 
 Pull request: `https://github.com/fullcone/multiport/pull/1`
 
-Final implementation validation head before this doc-only closeout:
+Last production runtime-changing implementation commit:
+`cb3a212859ff647ecef95bf399b940e298b321ac`
+
+Final validation checkout before this doc-only closeout:
 `29af3d194e85d52174649e41e8a77835d6f85992`
 
 This document is the final closeout record for the Linux direct multi-source UDP
@@ -39,6 +42,12 @@ Latest Phase 15 Codex response:
 
 Result: Codex reported no major issues for the Phase 15 checkout identity fix.
 
+Phase 16 Codex review thread addressed by this follow-up:
+
+- `PRRT_kwDOSPBZuM5-cudx`: clarified that the production runtime-changing
+  implementation commit is `cb3a212859ff647ecef95bf399b940e298b321ac`, while
+  `29af3d194e85d52174649e41e8a77835d6f85992` is the validation checkout.
+
 ## Final Package Validation
 
 Command run from the Windows host against the WSL checkout:
@@ -58,9 +67,11 @@ The WSL command printed the host's usual localhost/NAT warning after the
 successful `go test` result. That warning was outside the Go test process and
 did not change the test exit status.
 
-The validated runtime implementation is therefore tied to
-`29af3d194e85d52174649e41e8a77835d6f85992`. This Phase 16 closeout file is a
-documentation-only layer on top of that validated implementation.
+The last production runtime-changing implementation commit is
+`cb3a212859ff647ecef95bf399b940e298b321ac`. The complete PR checkout validated
+by the command above was `29af3d194e85d52174649e41e8a77835d6f85992`, which is a
+documentation/provenance layer on top of that runtime implementation. This
+Phase 16 closeout file is documentation-only.
 
 ## Completed Implementation Phases
 
@@ -186,7 +197,8 @@ The following items are intentionally not implemented in this PR:
 ## Final Assessment
 
 The requested Linux direct multi-source UDP implementation is complete for the
-current PR scope, including both IPv4 and IPv6. The final validated production
-implementation head is `29af3d194e85d52174649e41e8a77835d6f85992`, and no
-current unresolved Codex review blocker was present when this closeout document
-was written.
+current PR scope, including both IPv4 and IPv6. The last production
+runtime-changing implementation commit is
+`cb3a212859ff647ecef95bf399b940e298b321ac`; the checkout validated by the
+recorded command was
+`29af3d194e85d52174649e41e8a77835d6f85992`.
