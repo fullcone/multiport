@@ -41,6 +41,19 @@ First recorded poll after the Phase 14 review request:
   at this poll.
 - Action: recorded the poll result and continued the automatic flow.
 
+Second recorded poll after the Phase 14 review-poll record request:
+
+- Local poll time: `2026-04-29T20:44:22.7702162+08:00`
+- PR head at poll time: `67912ff2cc785f49d0e9c6784d322cc77026396b`
+- Phase 14 implementation review response:
+  `https://github.com/fullcone/multiport/pull/1#issuecomment-4343745510`
+- Phase 14 doc-only review response:
+  `https://github.com/fullcone/multiport/pull/1#issuecomment-4343759953`
+- Result: both Codex responses reported no major issues.
+- All known inline review threads remained resolved.
+- No new current unresolved blocking review thread was present.
+- Action: recorded both review responses and continued the automatic flow.
+
 ## Scope
 
 The source-selection data-send path is intentionally attached to normal
