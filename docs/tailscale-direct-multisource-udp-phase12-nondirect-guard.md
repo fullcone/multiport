@@ -24,6 +24,23 @@ The previous Phase 11 runtime-disable cleanup review request:
 
 All known inline review threads were resolved at the time this phase started. Older review threads that remain in the timeline are either resolved or outdated against the current head.
 
+## Phase 12 Review Tracking
+
+Implementation commit:
+
+- `3f4a04935` - `magicsock: guard srcsel from nondirect paths`
+
+Codex review request:
+
+- Comment: `https://github.com/fullcone/multiport/pull/1#issuecomment-4343400529`
+
+First 60-second poll:
+
+- Timestamp: `2026-04-29T19:51:59+08:00`
+- Review threads: no new current unresolved blocking thread.
+- Conversation: no Codex response to the Phase 12 review request yet.
+- Action: continue to the next implementation item because there is no blocking review feedback.
+
 ## Implementation
 
 Added `TestSourcePathDataSendSourceNonDirectGuardDualStack` in `wgengine/magicsock/sourcepath_linux_test.go`.
