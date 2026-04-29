@@ -213,8 +213,10 @@ type sourcePathSocketDebugSnapshot struct {
 	localAddr  string
 }
 
-// sourcePathDebugSnapshotLocked requires c.mu for c.sourceProbes.
-func (c *Conn) sourcePathDebugSnapshotLocked() sourcePathDebugSnapshot {
+func (c *Conn) sourcePathDebugSnapshot() sourcePathDebugSnapshot {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	s := sourcePathDebugSnapshot{
 		auxSocketCount: sourcePathAuxSocketCount(),
 		maxProbePeers:  sourcePathProbeMaxPeerCount(),
@@ -229,12 +231,6 @@ func (c *Conn) sourcePathDebugSnapshotLocked() sourcePathDebugSnapshot {
 	s.aux4 = sourcePathSocketDebugSnapshotLocked("auxiliary IPv4", &c.sourcePath.aux4, c.sourcePath.aux4Bound)
 	s.aux6 = sourcePathSocketDebugSnapshotLocked("auxiliary IPv6", &c.sourcePath.aux6, c.sourcePath.aux6Bound)
 	return s
-}
-
-func (c *Conn) sourcePathDebugSnapshot() sourcePathDebugSnapshot {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.sourcePathDebugSnapshotLocked()
 }
 
 func sourcePathSocketDebugSnapshotLocked(label string, s *sourcePathSocket, bound bool) sourcePathSocketDebugSnapshot {

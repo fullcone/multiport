@@ -29,7 +29,7 @@ All earlier known threads were either resolved or outdated before this fix.
 
 ## Problem
 
-`sourcePathDebugSnapshotLocked` read `c.sourceProbes.pending` and
+The source-selection debug snapshot read `c.sourceProbes.pending` and
 `c.sourceProbes.samples` through `pendingLenLocked` and `samplesLenLocked`.
 Those fields are mutated under `c.mu` by source probe send, receive, timeout,
 and cleanup paths.
@@ -38,17 +38,16 @@ Before this phase, the debug HTML caller happened to hold `c.mu` around the
 source-selection section. That made the current handler safe but left the
 source-selection debug helper dependent on an external lock contract that was
 not enforced at the helper boundary. A future caller could reuse
-`printSourcePathDebugHTML` or `sourcePathDebugSnapshotLocked` without holding
-`c.mu` and race with source probe mutation.
+`printSourcePathDebugHTML` without holding `c.mu` and race with source probe
+mutation.
 
 ## Fix
 
 `wgengine/magicsock/debughttp.go`
 
-- Adds a safe `sourcePathDebugSnapshot` wrapper that acquires `c.mu` before
-  reading `c.sourceProbes`.
-- Keeps `sourcePathDebugSnapshotLocked` as the internal locked helper and
-  documents that it requires `c.mu`.
+- Replaces the caller-dependent source-path debug snapshot helper with
+  `sourcePathDebugSnapshot`, which acquires `c.mu` before reading
+  `c.sourceProbes`.
 - Makes `printSourcePathDebugHTML` call the safe wrapper.
 - Moves the outer `ServeHTTPDebug` `c.mu` acquisition to after the
   source-selection section so the safe wrapper does not re-enter `c.mu`.
@@ -71,7 +70,7 @@ wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test 
 Result:
 
 ```text
-ok  	tailscale.com/wgengine/magicsock	0.013s
+ok  	tailscale.com/wgengine/magicsock	0.010s
 ```
 
 Command run from WSL:
@@ -83,7 +82,7 @@ wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test 
 Result:
 
 ```text
-ok  	tailscale.com/wgengine/magicsock	12.368s
+ok  	tailscale.com/wgengine/magicsock	11.377s
 ```
 
 The WSL commands printed the host's usual localhost/NAT warning after the
