@@ -853,6 +853,11 @@ func TestSourcePathForcedAuxDualNodeRuntime(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if !tt.want4 {
+				if err := ipv6LoopbackUDPRoundtripProbe(); err != nil {
+					t.Skipf("IPv6 loopback UDP roundtrip not delivered on this host (%v); srcsel IPv6 paths must be validated on a host with working IPv6 loopback or via real-network tests", err)
+				}
+			}
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
@@ -961,6 +966,11 @@ func TestSourcePathAutomaticAuxDualNodeRuntime(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if !tt.want4 {
+				if err := ipv6LoopbackUDPRoundtripProbe(); err != nil {
+					t.Skipf("IPv6 loopback UDP roundtrip not delivered on this host (%v); srcsel IPv6 paths must be validated on a host with working IPv6 loopback or via real-network tests", err)
+				}
+			}
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
@@ -1100,6 +1110,11 @@ func (c *failingSourcePathPacketConn) SetWriteDeadline(time.Time) error {
 
 func listenUDPForSourcePathTest(t *testing.T, network, addr string) *net.UDPConn {
 	t.Helper()
+	if network == "udp6" {
+		if err := ipv6LoopbackUDPRoundtripProbe(); err != nil {
+			t.Skipf("IPv6 loopback UDP roundtrip not delivered on this host (%v); srcsel IPv6 paths must be validated on a host with working IPv6 loopback or via real-network tests", err)
+		}
+	}
 	ua, err := net.ResolveUDPAddr(network, addr)
 	if err != nil {
 		t.Fatal(err)
@@ -1113,6 +1128,56 @@ func listenUDPForSourcePathTest(t *testing.T, network, addr string) *net.UDPConn
 	}
 	t.Cleanup(func() { c.Close() })
 	return c
+}
+
+var (
+	ipv6LoopbackUDPProbeOnce sync.Once
+	ipv6LoopbackUDPProbeErr  error
+)
+
+// ipv6LoopbackUDPRoundtripProbe verifies that a UDP datagram sent to [::1] on
+// this host is actually delivered to a peer socket on [::1]. The result is
+// cached for the lifetime of the test binary.
+//
+// Some Windows hosts (for example a Windows Server with WSL2 / Hyper-V
+// firewall) silently drop UDP traffic to ::1 even though net.ListenUDP
+// succeeds. On such hosts the source-path IPv6 loopback tests cannot complete
+// regardless of srcsel correctness, so the probe is used by
+// listenUDPForSourcePathTest to skip those tests with an explanatory message.
+func ipv6LoopbackUDPRoundtripProbe() error {
+	ipv6LoopbackUDPProbeOnce.Do(func() {
+		dst, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback, Port: 0})
+		if err != nil {
+			ipv6LoopbackUDPProbeErr = err
+			return
+		}
+		defer dst.Close()
+		src, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback, Port: 0})
+		if err != nil {
+			ipv6LoopbackUDPProbeErr = err
+			return
+		}
+		defer src.Close()
+		dstAP, err := netip.ParseAddrPort(dst.LocalAddr().String())
+		if err != nil {
+			ipv6LoopbackUDPProbeErr = err
+			return
+		}
+		if _, err := src.WriteToUDPAddrPort([]byte{0}, dstAP); err != nil {
+			ipv6LoopbackUDPProbeErr = err
+			return
+		}
+		if err := dst.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+			ipv6LoopbackUDPProbeErr = err
+			return
+		}
+		var buf [4]byte
+		if _, _, err := dst.ReadFromUDPAddrPort(buf[:]); err != nil {
+			ipv6LoopbackUDPProbeErr = err
+			return
+		}
+	})
+	return ipv6LoopbackUDPProbeErr
 }
 
 func udpConnAddrPort(t *testing.T, addr net.Addr) netip.AddrPort {
