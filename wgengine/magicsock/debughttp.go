@@ -31,15 +31,15 @@ func (c *Conn) ServeHTTPDebug(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	now := time.Now()
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, "<h1>magicsock</h1>")
 
 	c.printSourcePathDebugHTML(w)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	fmt.Fprintf(w, "<h2 id=derp><a href=#derp>#</a> DERP</h2><ul>")
 	if c.derpMap != nil {
@@ -213,6 +213,7 @@ type sourcePathSocketDebugSnapshot struct {
 	localAddr  string
 }
 
+// sourcePathDebugSnapshotLocked requires c.mu for c.sourceProbes.
 func (c *Conn) sourcePathDebugSnapshotLocked() sourcePathDebugSnapshot {
 	s := sourcePathDebugSnapshot{
 		auxSocketCount: sourcePathAuxSocketCount(),
@@ -228,6 +229,12 @@ func (c *Conn) sourcePathDebugSnapshotLocked() sourcePathDebugSnapshot {
 	s.aux4 = sourcePathSocketDebugSnapshotLocked("auxiliary IPv4", &c.sourcePath.aux4, c.sourcePath.aux4Bound)
 	s.aux6 = sourcePathSocketDebugSnapshotLocked("auxiliary IPv6", &c.sourcePath.aux6, c.sourcePath.aux6Bound)
 	return s
+}
+
+func (c *Conn) sourcePathDebugSnapshot() sourcePathDebugSnapshot {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sourcePathDebugSnapshotLocked()
 }
 
 func sourcePathSocketDebugSnapshotLocked(label string, s *sourcePathSocket, bound bool) sourcePathSocketDebugSnapshot {
@@ -251,7 +258,7 @@ func sourcePathDebugLocalAddr(ruc *RebindingUDPConn) string {
 }
 
 func (c *Conn) printSourcePathDebugHTML(w io.Writer) {
-	s := c.sourcePathDebugSnapshotLocked()
+	s := c.sourcePathDebugSnapshot()
 	fmt.Fprintf(w, "<h2 id=srcsel><a href=#srcsel>#</a> Source selection</h2><ul>")
 	fmt.Fprintf(w, "<li>generation: %d</li>\n", s.generation)
 	fmt.Fprintf(w, "<li>enabled auxiliary sockets: %d</li>\n", s.auxSocketCount)

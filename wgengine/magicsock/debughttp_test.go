@@ -30,9 +30,7 @@ func TestPrintSourcePathDebugHTML(t *testing.T) {
 	}
 
 	var b strings.Builder
-	c.mu.Lock()
 	c.printSourcePathDebugHTML(&b)
-	c.mu.Unlock()
 
 	body := b.String()
 	for _, want := range []string{
