@@ -357,14 +357,37 @@ Phase 3 Linux runtime review checkpoint on 2026-04-29:
   and skips the IPv6 subtest immediately if either node lacks a valid IPv6
   primary UDP endpoint. IPv4 primary absence remains a test failure.
 
+Phase 3 forced-aux runtime final verification on 2026-04-29:
+
+- Codex reviewed follow-up commit `1713f3e390bfde01a58bb48923c3d20c4cfe9d4e`
+  and reported no major issues:
+  `https://github.com/fullcone/multiport/pull/1#issuecomment-4340622840`
+- The latest Linux dual-node runtime proof was rerun under WSL Ubuntu-24.04:
+  `go test ./wgengine/magicsock -run TestSourcePathForcedAuxDualNodeRuntime -count=1 -v`.
+- IPv4 proof line:
+  `forced aux runtime path: aux=127.0.0.1:35699 primary=127.0.0.1:46661 peer=127.0.0.1:41424`.
+  The same run logged the injected auxiliary write failure and primary retry:
+  `srcsel: data send from source 1 to 127.0.0.1:41424 failed, retrying primary: write: operation not permitted`.
+- IPv6 proof line:
+  `forced aux runtime path: aux=[::1]:53258 primary=[::1]:54716 peer=[::1]:56119`.
+  The same run logged the injected auxiliary write failure and primary retry:
+  `srcsel: data send from source 2 to [::1]:56119 failed, retrying primary: write: operation not permitted`.
+- The test assertions require a WireGuard UDP write from the forced auxiliary
+  socket to the direct peer endpoint, then require primary fallback after the
+  injected auxiliary failure. Both the successful forced auxiliary send and the
+  fallback path keep `lastErrRebind` equal to the sentinel value.
+- Linux package regression also passed after the runtime proof:
+  `go test ./wgengine/magicsock ./envknob -count=1`.
+
 ## Current Status
 
 Phase 3 source-aware data-send plumbing is implemented for IPv4 and IPv6 behind
 a manual debug forcing gate. The latest Codex runtime-test review issues have
-been fixed locally. The Linux dual-stack source-selection unit path and local
-loopback egress path now pass under WSL Ubuntu-24.04, including IPv4 and IPv6
-auxiliary source-port verification, stale-generation rejection, auxiliary-send
-error isolation from primary rebind handling, and real dual-node forced
-auxiliary WireGuard data egress with primary fallback for both families. It is
-not yet an automatic path-selection feature, and external packet-capture
-validation remains optional future evidence.
+been fixed and the follow-up review reported no major issues. The Linux
+dual-stack source-selection unit path and local loopback egress path now pass
+under WSL Ubuntu-24.04, including IPv4 and IPv6 auxiliary source-port
+verification, stale-generation rejection, auxiliary-send error isolation from
+primary rebind handling, and real dual-node forced auxiliary WireGuard data
+egress with primary fallback for both families. It is not yet an automatic
+path-selection feature, and external packet-capture validation remains optional
+future evidence.
