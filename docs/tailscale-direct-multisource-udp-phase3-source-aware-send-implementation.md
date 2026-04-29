@@ -105,6 +105,12 @@ selection.
 - Adds explicit front-loaded assertions that the source-selection boolean knob,
   auxiliary socket-count integer knob, source-path auxiliary socket count, and
   IPv4/IPv6 forcing policy are active before validating selected sockets.
+- Adds `TestSendUDPBatchFromSourceAuxDualStackLoopback`, a Linux-only loopback
+  test that binds real IPv4 and IPv6 UDP destination sockets plus matching
+  auxiliary sockets, sends through `sendUDPBatchFromSource`, and verifies the
+  received packet source port is the selected auxiliary socket port.
+- Adds `TestSourcePathWriteWireGuardBatchToRejectsStaleAuxSource`, proving
+  stale auxiliary source metadata is rejected after a generation mismatch.
 
 `envknob/envknob.go`
 
@@ -157,18 +163,18 @@ Additional runtime/unit validation on 2026-04-29:
 ```powershell
 gofmt -w envknob\envknob.go envknob\envknob_test.go wgengine\magicsock\sourcepath_linux_test.go
 go test ./envknob
-wsl -d Ubuntu -- bash -lc 'cd /mnt/c/other_project/fullcone && go test ./wgengine/magicsock -run TestSourcePathDataSendSourceForcedAuxDualStack -count=1 -v'
+wsl -d Ubuntu-24.04 -- bash -lc 'cd /mnt/c/other_project/fullcone && go test ./wgengine/magicsock -run TestSourcePathDataSendSourceForcedAuxDualStack -count=1 -v'
 go test ./wgengine/magicsock ./envknob
-wsl -d Ubuntu -- bash -lc 'cd /mnt/c/other_project/fullcone && go test ./wgengine/magicsock ./envknob'
+wsl -d Ubuntu-24.04 -- bash -lc 'cd /mnt/c/other_project/fullcone && go test ./wgengine/magicsock ./envknob'
 ```
 
 Results:
 
 - `go test ./envknob`: passed.
-- WSL Ubuntu targeted
+- WSL Ubuntu-24.04 targeted
   `TestSourcePathDataSendSourceForcedAuxDualStack`: passed.
 - Windows `go test ./wgengine/magicsock ./envknob`: passed.
-- WSL Ubuntu `go test ./wgengine/magicsock ./envknob`: passed.
+- WSL Ubuntu-24.04 `go test ./wgengine/magicsock ./envknob`: passed.
 
 The first WSL Linux targeted run exposed that `envknob.Setenv` refreshed
 registered string, boolean, optional-boolean, and duration knobs, but not
@@ -177,12 +183,35 @@ registered integer knob, the Linux dual-stack test saw an auxiliary socket
 count of `0` after setting the knob to `1`. The `envknob.Setenv` `regInt` fix
 and `TestSetenvUpdatesRegisteredInt` cover this support bug.
 
+Additional Linux loopback egress validation on 2026-04-29:
+
+```powershell
+wsl -d Ubuntu-24.04 -- bash -lc 'cd /mnt/c/other_project/fullcone && go test ./wgengine/magicsock -run "Test(SendUDPBatchFromSourceAuxDualStackLoopback|SourcePathWriteWireGuardBatchToRejectsStaleAuxSource|SourcePathDataSendSourceForcedAuxDualStack)" -count=1 -v'
+wsl -d Ubuntu-24.04 -- bash -lc 'cd /mnt/c/other_project/fullcone && go test ./wgengine/magicsock ./envknob'
+go test ./wgengine/magicsock ./envknob
+```
+
+Results:
+
+- `TestSendUDPBatchFromSourceAuxDualStackLoopback`: passed for IPv4 and IPv6.
+  The destination sockets received the payload from the selected auxiliary UDP
+  socket ports, proving the source-aware Linux data-send helper can use the
+  auxiliary socket for actual local UDP egress.
+- `TestSourcePathWriteWireGuardBatchToRejectsStaleAuxSource`: passed, proving
+  stale auxiliary source metadata is rejected instead of sending through an old
+  socket identity.
+- `TestSourcePathDataSendSourceForcedAuxDualStack`: passed.
+- WSL Ubuntu-24.04 `go test ./wgengine/magicsock ./envknob`: passed.
+- Windows `go test ./wgengine/magicsock ./envknob`: passed.
+
 Runtime validation still required in a Linux dual-node testbed:
 
 - packet capture proving IPv4 WireGuard data can leave the IPv4 auxiliary
-  socket under `TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE=aux` or `aux4`;
+  socket under `TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE=aux` or `aux4` in a
+  real peer session;
 - packet capture proving IPv6 WireGuard data can leave the IPv6 auxiliary
-  socket under `TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE=aux` or `aux6`;
+  socket under `TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE=aux` or `aux6` in a
+  real peer session;
 - peer decrypt/response confirmation for both families;
 - primary fallback confirmation after forced auxiliary send failure;
 - confirmation that primary rebind counters/logs do not change because of an
@@ -237,7 +266,8 @@ Phase 3 documentation follow-up review checkpoint on 2026-04-29:
 
 Phase 3 source-aware data-send plumbing is implemented for IPv4 and IPv6 behind
 a manual debug forcing gate. Codex review found no major Phase 3 code issues.
-The Linux dual-stack source-selection unit path now passes under WSL after the
-registered integer envknob refresh fix. It is not yet an automatic
+The Linux dual-stack source-selection unit path and local loopback egress path
+now pass under WSL Ubuntu-24.04, including IPv4 and IPv6 auxiliary source-port
+verification plus stale-generation rejection. It is not yet an automatic
 path-selection feature, and true dual-node packet-capture validation remains
 pending.
