@@ -48,6 +48,16 @@ Phase 16 Codex review thread addressed by this follow-up:
   implementation commit is `cb3a212859ff647ecef95bf399b940e298b321ac`, while
   `29af3d194e85d52174649e41e8a77835d6f85992` is the validation checkout.
 
+Post-closeout Codex review found one additional current thread:
+
+- `PRRT_kwDOSPBZuM5-c5c4`: fixed in Phase 17 by making the source-selection
+  debug snapshot acquire `c.mu` before reading source probe maps. The Phase 17
+  follow-up review response reported no major issues:
+  `https://github.com/fullcone/multiport/pull/1#issuecomment-4344515382`.
+
+The full Phase 17 record is
+`docs/tailscale-direct-multisource-udp-phase17-debug-snapshot-lock-fix.md`.
+
 ## Final Package Validation
 
 Command run from the Windows host against the WSL checkout:

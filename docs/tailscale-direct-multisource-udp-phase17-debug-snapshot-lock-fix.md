@@ -15,6 +15,11 @@ Pull request: `https://github.com/fullcone/multiport/pull/1`
 PR head before this phase:
 `e03a1df78c2e2ac86b59e53fa3f69feb2f4e7e44`
 
+Phase 17 runtime-changing commits:
+
+- `d1d93651d61c23db143af04be6d968504614094d`
+- `202f878ef402de238dae3f3258a0c85f76a1333d`
+
 ## PR Review Gate
 
 Automatic flow review polling found one new current unresolved Codex thread:
@@ -103,3 +108,18 @@ files.
 This phase directly addresses `PRRT_kwDOSPBZuM5-c5c4` by ensuring source probe
 debug counters are read while `c.mu` is held, independent of the debug helper's
 caller.
+
+## Review Result
+
+Thread `PRRT_kwDOSPBZuM5-c5c4` was resolved after the safe snapshot helper was
+updated and the unsafe caller-dependent helper was removed.
+
+Phase 17 follow-up review request:
+`https://github.com/fullcone/multiport/pull/1#issuecomment-4344485699`
+
+Phase 17 Codex response:
+`https://github.com/fullcone/multiport/pull/1#issuecomment-4344515382`
+
+Result: Codex reported no major issues for the Phase 17 debug snapshot lock
+fix. Review polling after the response showed all known inline Codex threads
+resolved.
