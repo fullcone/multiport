@@ -6,15 +6,20 @@
 package magicsock
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/netip"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/tailscale/wireguard-go/tun/tuntest"
 	"tailscale.com/envknob"
 	"tailscale.com/net/packet"
+	"tailscale.com/types/logger"
+	"tailscale.com/types/netmap"
 	"tailscale.com/types/nettype"
 )
 
@@ -284,6 +289,76 @@ func TestSendUDPBatchFromSourceAuxErrorDoesNotRebind(t *testing.T) {
 	}
 }
 
+func TestSourcePathForcedAuxDualNodeRuntime(t *testing.T) {
+	tests := []struct {
+		name  string
+		want4 bool
+	}{
+		{"IPv4", true},
+		{"IPv6", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
+			t.Cleanup(func() {
+				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+			})
+
+			logf := logger.WithPrefix(t.Logf, "srcsel-dual-node-"+tt.name+": ")
+			pl := &recordingPacketListener{
+				base:     localhostListener{},
+				failures: map[netip.AddrPort]error{},
+			}
+			dm, _ := runDERPAndStun(t, logf, pl, netip.MustParseAddr("127.0.0.1"))
+			m1 := newMagicStack(t, logger.WithPrefix(logf, "m1: "), pl, dm)
+			m2 := newMagicStack(t, logger.WithPrefix(logf, "m2: "), pl, dm)
+			meshStacks(logf, sourcePathRuntimeNetmapEndpoints(t, tt.want4, m1, m2), m1, m2)
+
+			cleanupPing := newPinger(t, logf, m1, m2)
+			mustDirect(t, logf, m1, m2)
+			mustDirect(t, logf, m2, m1)
+			cleanupPing()
+
+			auxLocal := waitForSourcePathAuxLocal(t, m1.conn, tt.want4)
+			primaryLocal := primaryUDPAddrPort(t, m1.conn, tt.want4)
+			directPeer := currentDirectPeerAddr(t, m1, m2, tt.want4)
+			t.Logf("forced aux runtime path: aux=%v primary=%v peer=%v", auxLocal, primaryLocal, directPeer)
+
+			sentinel := time.Unix(123, 0)
+			m1.conn.lastErrRebind.Store(sentinel)
+			pl.clearWrites()
+			transitOnePing(t, m1, m2)
+			writes := pl.writesSnapshot()
+			if !hasWireGuardWrite(writes, auxLocal, directPeer, false) {
+				t.Fatalf("forced aux send did not emit a WireGuard UDP packet from aux %v to peer %v; writes=%v", auxLocal, directPeer, summarizeWrites(writes))
+			}
+			if got := m1.conn.lastErrRebind.Load(); !got.Equal(sentinel) {
+				t.Fatalf("successful aux send updated lastErrRebind: got %v want %v", got, sentinel)
+			}
+
+			pl.setFailure(auxLocal, &net.OpError{Op: "write", Err: syscall.EPERM})
+			t.Cleanup(pl.clearFailures)
+			pl.clearWrites()
+			transitOnePing(t, m1, m2)
+			writes = pl.writesSnapshot()
+			if !hasWireGuardWrite(writes, auxLocal, directPeer, true) {
+				t.Fatalf("forced aux failure did not try aux %v to peer %v first; writes=%v", auxLocal, directPeer, summarizeWrites(writes))
+			}
+			if !hasWireGuardWrite(writes, primaryLocal, directPeer, false) {
+				t.Fatalf("forced aux failure did not fall back to primary %v to peer %v; writes=%v", primaryLocal, directPeer, summarizeWrites(writes))
+			}
+			if got := m1.conn.lastErrRebind.Load(); !got.Equal(sentinel) {
+				t.Fatalf("aux fallback updated lastErrRebind: got %v want %v", got, sentinel)
+			}
+		})
+	}
+}
+
 type failingSourcePathPacketConn struct {
 	local *net.UDPAddr
 	err   error
@@ -341,4 +416,233 @@ func udpConnAddrPort(t *testing.T, addr net.Addr) netip.AddrPort {
 		t.Fatalf("ParseAddrPort(%q): %v", addr.String(), err)
 	}
 	return ap
+}
+
+type recordedUDPWrite struct {
+	local   netip.AddrPort
+	dst     netip.AddrPort
+	payload []byte
+	n       int
+	err     error
+}
+
+type recordingPacketListener struct {
+	base nettype.PacketListener
+
+	mu       sync.Mutex
+	writes   []recordedUDPWrite
+	failures map[netip.AddrPort]error
+}
+
+func (pl *recordingPacketListener) ListenPacket(ctx context.Context, network, address string) (net.PacketConn, error) {
+	pc, err := pl.base.ListenPacket(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	netipPC, ok := pc.(nettype.PacketConn)
+	if !ok {
+		pc.Close()
+		return nil, errors.New("packet listener returned a connection without netip PacketConn methods")
+	}
+	return &recordingPacketConn{
+		PacketConn: pc,
+		netipPC:    netipPC,
+		owner:      pl,
+	}, nil
+}
+
+func (pl *recordingPacketListener) record(write recordedUDPWrite) {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+	pl.writes = append(pl.writes, write)
+}
+
+func (pl *recordingPacketListener) setFailure(local netip.AddrPort, err error) {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+	if pl.failures == nil {
+		pl.failures = map[netip.AddrPort]error{}
+	}
+	pl.failures[local] = err
+}
+
+func (pl *recordingPacketListener) clearFailures() {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+	clear(pl.failures)
+}
+
+func (pl *recordingPacketListener) failureFor(local netip.AddrPort) error {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+	return pl.failures[local]
+}
+
+func (pl *recordingPacketListener) clearWrites() {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+	pl.writes = nil
+}
+
+func (pl *recordingPacketListener) writesSnapshot() []recordedUDPWrite {
+	pl.mu.Lock()
+	defer pl.mu.Unlock()
+	return append([]recordedUDPWrite(nil), pl.writes...)
+}
+
+type recordingPacketConn struct {
+	net.PacketConn
+	netipPC nettype.PacketConn
+	owner   *recordingPacketListener
+}
+
+func (pc *recordingPacketConn) ReadFromUDPAddrPort(b []byte) (int, netip.AddrPort, error) {
+	return pc.netipPC.ReadFromUDPAddrPort(b)
+}
+
+func (pc *recordingPacketConn) WriteToUDPAddrPort(b []byte, dst netip.AddrPort) (int, error) {
+	local, _ := addrPortFromNetAddr(pc.LocalAddr())
+	payload := append([]byte(nil), b...)
+	if err := pc.owner.failureFor(local); err != nil {
+		pc.owner.record(recordedUDPWrite{local: local, dst: dst, payload: payload, err: err})
+		return 0, err
+	}
+	n, err := pc.netipPC.WriteToUDPAddrPort(b, dst)
+	pc.owner.record(recordedUDPWrite{local: local, dst: dst, payload: payload, n: n, err: err})
+	return n, err
+}
+
+func addrPortFromNetAddr(addr net.Addr) (netip.AddrPort, bool) {
+	if addr == nil {
+		return netip.AddrPort{}, false
+	}
+	ap, err := netip.ParseAddrPort(addr.String())
+	return ap, err == nil
+}
+
+func waitForSourcePathAuxLocal(t *testing.T, c *Conn, want4 bool) netip.AddrPort {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var addr net.Addr
+		c.sourcePath.mu.Lock()
+		if want4 {
+			if c.sourcePath.aux4Bound {
+				addr = c.sourcePath.aux4.pconn.LocalAddr()
+			}
+		} else {
+			if c.sourcePath.aux6Bound {
+				addr = c.sourcePath.aux6.pconn.LocalAddr()
+			}
+		}
+		c.sourcePath.mu.Unlock()
+		if addr != nil {
+			return udpConnAddrPort(t, addr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !want4 {
+		t.Skip("IPv6 aux source path socket was not bound on this host")
+	}
+	t.Fatal("IPv4 aux source path socket was not bound")
+	return netip.AddrPort{}
+}
+
+func primaryUDPAddrPort(t *testing.T, c *Conn, want4 bool) netip.AddrPort {
+	t.Helper()
+	if want4 {
+		return udpConnAddrPort(t, c.pconn4.LocalAddr())
+	}
+	return udpConnAddrPort(t, c.pconn6.LocalAddr())
+}
+
+func currentDirectPeerAddr(t *testing.T, src, dst *magicStack, want4 bool) netip.AddrPort {
+	t.Helper()
+	peer := src.Status().Peer[dst.Public()]
+	if peer == nil {
+		t.Fatalf("no peer status for %v", dst.Public())
+	}
+	ap, err := netip.ParseAddrPort(peer.CurAddr)
+	if err != nil {
+		t.Fatalf("direct peer address %q is not addr:port: %v", peer.CurAddr, err)
+	}
+	if ap.Addr().Is4() != want4 {
+		t.Fatalf("direct peer address family mismatch: got %v want IPv4=%v", ap, want4)
+	}
+	return ap
+}
+
+func sourcePathRuntimeNetmapEndpoints(t *testing.T, want4 bool, stacks ...*magicStack) func(int, *netmap.NetworkMap) {
+	t.Helper()
+	primary := make([]netip.AddrPort, len(stacks))
+	for i, stack := range stacks {
+		primary[i] = primaryUDPAddrPort(t, stack.conn, want4)
+		if primary[i].Addr().Is4() != want4 {
+			t.Fatalf("stack %d primary endpoint = %v, want IPv4=%v", i, primary[i], want4)
+		}
+	}
+	return func(idx int, nm *netmap.NetworkMap) {
+		for i, peerView := range nm.Peers {
+			peerStackIdx := i
+			if peerStackIdx >= idx {
+				peerStackIdx++
+			}
+			if peerStackIdx >= len(primary) {
+				continue
+			}
+			peer := peerView.AsStruct()
+			peer.Endpoints = []netip.AddrPort{primary[peerStackIdx]}
+			nm.Peers[i] = peer.View()
+		}
+	}
+}
+
+func transitOnePing(t *testing.T, src, dst *magicStack) {
+	t.Helper()
+	ping := tuntest.Ping(dst.IP(), src.IP())
+	select {
+	case src.tun.Outbound <- ping:
+	case <-time.After(time.Second):
+		t.Fatal("timeout sending ping to source TUN")
+	}
+	select {
+	case <-dst.tun.Inbound:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for ping on destination TUN")
+	}
+}
+
+func hasWireGuardWrite(writes []recordedUDPWrite, local, dst netip.AddrPort, wantErr bool) bool {
+	for _, write := range writes {
+		if write.local != local || write.dst != dst {
+			continue
+		}
+		packetType, _ := packetLooksLike(write.payload)
+		if packetType != packetLooksLikeWireGuard {
+			continue
+		}
+		if wantErr {
+			if write.err != nil {
+				return true
+			}
+			continue
+		}
+		if write.err == nil && write.n > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func summarizeWrites(writes []recordedUDPWrite) []recordedUDPWrite {
+	summary := make([]recordedUDPWrite, 0, len(writes))
+	for _, write := range writes {
+		summary = append(summary, recordedUDPWrite{
+			local: write.local,
+			dst:   write.dst,
+			n:     write.n,
+			err:   write.err,
+		})
+	}
+	return summary
 }

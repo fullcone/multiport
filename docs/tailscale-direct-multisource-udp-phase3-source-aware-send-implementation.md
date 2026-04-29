@@ -114,6 +114,15 @@ selection.
 - Adds `TestSendUDPBatchFromSourceAuxErrorDoesNotRebind`, proving IPv4 and
   IPv6 auxiliary-source send errors return locally and leave the primary
   rebind throttle state unchanged.
+- Adds `TestSourcePathForcedAuxDualNodeRuntime`, a Linux-only dual-node runtime
+  test using real `magicStack` nodes, TUN pings, and recorded `PacketConn`
+  writes. It proves forced auxiliary WireGuard data egress for IPv4 and IPv6,
+  primary fallback after injected auxiliary `EPERM`, and no `lastErrRebind`
+  pollution from successful or failed auxiliary sends.
+- The runtime test injects loopback IPv6 endpoints directly into the test
+  netmap because the local WSL netcheck path does not advertise IPv6 STUN
+  endpoints. The actual proof still uses bound `::1` UDP sockets and recorded
+  real packet writes.
 
 `envknob/envknob.go`
 
@@ -221,7 +230,33 @@ Results:
   sentinel value. This directly covers the Phase 3 property that auxiliary-only
   send errors do not invoke primary socket rebind handling.
 
-Runtime validation still required in a Linux dual-node testbed:
+Linux dual-node runtime validation on 2026-04-29:
+
+```powershell
+wsl -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test ./wgengine/magicsock -run TestSourcePathForcedAuxDualNodeRuntime -count=1 -v'
+wsl -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test ./wgengine/magicsock -run "Test(SourcePath|SendUDPBatchFromSourceAux)" -count=1'
+```
+
+Results:
+
+- `TestSourcePathForcedAuxDualNodeRuntime`: passed for IPv4 and IPv6.
+- IPv4 runtime proof observed forced auxiliary, primary, and peer loopback
+  paths in the same real direct peer session. The test recorded a WireGuard UDP
+  packet leaving the IPv4 auxiliary socket, then injected `EPERM` on that
+  auxiliary source and observed fallback to the IPv4 primary socket.
+- IPv6 runtime proof observed forced auxiliary, primary, and peer `::1`
+  loopback paths in the same real direct peer session. The test recorded a
+  WireGuard UDP packet leaving the IPv6 auxiliary socket, then injected `EPERM`
+  on that auxiliary source and observed fallback to the IPv6 primary socket.
+- For both families, `lastErrRebind` stayed at the sentinel value after the
+  successful auxiliary send and after the auxiliary-failure primary fallback.
+  This proves forced auxiliary send failure does not pollute primary rebind
+  state.
+- The related Linux source-path test subset also passed after adding the
+  runtime test.
+
+External packet-capture validation remains optional if out-of-process evidence
+is needed:
 
 - packet capture proving IPv4 WireGuard data can leave the IPv4 auxiliary
   socket under `TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE=aux` or `aux4` in a
@@ -287,6 +322,8 @@ Phase 3 source-aware data-send plumbing is implemented for IPv4 and IPv6 behind
 a manual debug forcing gate. Codex review found no major Phase 3 code issues.
 The Linux dual-stack source-selection unit path and local loopback egress path
 now pass under WSL Ubuntu-24.04, including IPv4 and IPv6 auxiliary source-port
-verification, stale-generation rejection, and auxiliary-send error isolation
-from primary rebind handling. It is not yet an automatic path-selection
-feature, and true dual-node packet-capture validation remains pending.
+verification, stale-generation rejection, auxiliary-send error isolation from
+primary rebind handling, and real dual-node forced auxiliary WireGuard data
+egress with primary fallback for both families. It is not yet an automatic
+path-selection feature, and external packet-capture validation remains optional
+future evidence.
