@@ -123,8 +123,18 @@ Phase 9 implementation review tracking:
   `62b307da746f7d5f4c0c6f7b78a5f79b64f66ec0`.
 - Review request:
   `https://github.com/fullcone/multiport/pull/1#issuecomment-4343087512`.
-- First 60-second poll after the Phase 9 review request found no Codex response
-  yet and no new actionable review thread.
+- Codex implementation review response:
+  `https://github.com/fullcone/multiport/pull/1#issuecomment-4343111677`.
+- The implementation review response reported no major issues.
+- First 60-second poll after the Phase 9 review request initially found no
+  Codex response yet and no new actionable review thread.
+- The follow-up PR thread check later found the Codex implementation response
+  above and still found no new actionable current review thread.
+- Doc-only review request for the first poll record:
+  `https://github.com/fullcone/multiport/pull/1#issuecomment-4343121651`.
+- Codex doc-only review response:
+  `https://github.com/fullcone/multiport/pull/1#issuecomment-4343132051`.
+- The doc-only review response reported no major issues.
 - The only unresolved thread remained the outdated Phase 4B P2
   `sourcePathSocket.rxMeta` synchronization finding
   (`PRRT_kwDOSPBZuM5-U8eD`), already fixed by commit
