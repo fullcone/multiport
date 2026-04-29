@@ -239,3 +239,38 @@ func TestSourcePathProbeManagerBestCandidateDualStackObserveOnly(t *testing.T) {
 		t.Fatalf("samples mutated by scoring: got %d want %d", got, beforeSamples)
 	}
 }
+
+func TestSourcePathBestCandidateRequiresCurrentProbeSources(t *testing.T) {
+	var c Conn
+	now := mono.Now()
+	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 11}
+	v4 := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+
+	c.mu.Lock()
+	c.sourceProbes.pending = map[stun.TxID]sourcePathProbeTx{
+		stun.NewTxID(): {
+			dst:    v4,
+			source: source,
+			at:     now,
+		},
+	}
+	c.sourceProbes.samples = []sourcePathProbeSample{
+		{dst: v4, source: source, latency: 10 * time.Millisecond, at: now},
+	}
+	beforePending, beforeSamples := c.sourceProbes.pendingLenLocked(), c.sourceProbes.samplesLenLocked()
+	c.mu.Unlock()
+
+	if _, ok := c.sourcePathBestCandidate(v4); ok {
+		t.Fatal("candidate returned without current auxiliary probe sources")
+	}
+
+	c.mu.Lock()
+	afterPending, afterSamples := c.sourceProbes.pendingLenLocked(), c.sourceProbes.samplesLenLocked()
+	c.mu.Unlock()
+	if afterPending != beforePending {
+		t.Fatalf("pending probes mutated by Conn observe-only scoring: got %d want %d", afterPending, beforePending)
+	}
+	if afterSamples != beforeSamples {
+		t.Fatalf("samples mutated by Conn observe-only scoring: got %d want %d", afterSamples, beforeSamples)
+	}
+}

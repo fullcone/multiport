@@ -143,8 +143,12 @@ func TestSourcePathBestCandidateObserveOnlyDoesNotSelectDataSource(t *testing.T)
 		{dst: v6, source: sources6[0], latency: 11 * time.Millisecond, at: now.Add(-1 * time.Second)},
 	}
 	beforePending, beforeSamples := c.sourceProbes.pendingLenLocked(), c.sourceProbes.samplesLenLocked()
-	score4, ok4 := c.sourceProbes.bestCandidateLocked(v4, sources4)
-	score6, ok6 := c.sourceProbes.bestCandidateLocked(v6, sources6)
+	c.mu.Unlock()
+
+	score4, ok4 := c.sourcePathBestCandidate(v4)
+	score6, ok6 := c.sourcePathBestCandidate(v6)
+
+	c.mu.Lock()
 	afterPending, afterSamples := c.sourceProbes.pendingLenLocked(), c.sourceProbes.samplesLenLocked()
 	c.mu.Unlock()
 

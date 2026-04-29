@@ -95,6 +95,21 @@ func (pm *sourcePathProbeManager) samplesLenLocked() int {
 	return len(pm.samples)
 }
 
+func (c *Conn) sourcePathBestCandidate(dst epAddr) (sourcePathCandidateScore, bool) {
+	if !dst.isDirect() {
+		return sourcePathCandidateScore{}, false
+	}
+
+	sources := c.sourcePathProbeSources(dst.ap.Addr().Is4())
+	if len(sources) == 0 {
+		return sourcePathCandidateScore{}, false
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sourceProbes.bestCandidateLocked(dst, sources)
+}
+
 func (pm *sourcePathProbeManager) bestCandidateLocked(dst epAddr, sources []sourceRxMeta) (sourcePathCandidateScore, bool) {
 	if !dst.isDirect() {
 		return sourcePathCandidateScore{}, false
