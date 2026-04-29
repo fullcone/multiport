@@ -103,3 +103,35 @@ Results:
 - Windows `go test ./wgengine/magicsock ./envknob -count=1`: passed.
 - WSL Ubuntu-24.04 `go test ./wgengine/magicsock ./envknob -count=1`: passed.
 - `git diff --check`: passed with only CRLF worktree warnings.
+
+## PR Review Record
+
+Implementation commit:
+
+```text
+312a9e12260b0a0a4494a399cbadec5e5d062aa0
+```
+
+Review request:
+
+- PR comment: https://github.com/fullcone/multiport/pull/1#issuecomment-4340841513
+- Scope requested: Phase 4B observe-only `Conn.sourcePathBestCandidate`
+  boundary, IPv4/IPv6 candidate observation, unchanged data-send behavior,
+  unchanged primary fallback, unchanged endpoint promotion, unchanged primary
+  rebind logic.
+
+Polling status recorded on 2026-04-29:
+
+- First 60-second poll: no Codex response after the Phase 4B review request;
+  no new unresolved review thread.
+- Second 60-second poll: no Codex response after the Phase 4B review request;
+  no new unresolved review thread.
+- Third 60-second poll: no Codex response after the Phase 4B review request;
+  no new unresolved review thread.
+
+Current audit state:
+
+- All earlier Codex review threads on PR #1 are resolved.
+- No Phase 4B-specific unresolved Codex finding has appeared yet.
+- Branch head remains ready for the next implementation phase unless a later
+  Codex response adds new feedback.
