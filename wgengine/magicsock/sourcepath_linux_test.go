@@ -25,6 +25,86 @@ import (
 	"tailscale.com/types/nettype"
 )
 
+func TestSourcePathAuxSocketCountBoundaryDualStack(t *testing.T) {
+	tests := []struct {
+		name    string
+		enable  string
+		aux     string
+		wantAux int
+	}{
+		{
+			name:    "disabled",
+			enable:  "",
+			aux:     "1",
+			wantAux: 0,
+		},
+		{
+			name:    "zero",
+			enable:  "true",
+			aux:     "0",
+			wantAux: 0,
+		},
+		{
+			name:    "negative",
+			enable:  "true",
+			aux:     "-1",
+			wantAux: 0,
+		},
+		{
+			name:    "one",
+			enable:  "true",
+			aux:     "1",
+			wantAux: 1,
+		},
+		{
+			name:    "more-than-one-clamps",
+			enable:  "true",
+			aux:     "2",
+			wantAux: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", tt.enable)
+			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", tt.aux)
+			t.Cleanup(func() {
+				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+			})
+
+			if got := sourcePathAuxSocketCount(); got != tt.wantAux {
+				t.Fatalf("sourcePathAuxSocketCount() = %d, want %d", got, tt.wantAux)
+			}
+		})
+	}
+
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "2")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 3
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+	c.sourcePath.aux6.setID(sourceIPv6SocketID)
+	c.sourcePath.aux6.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux6Bound = true
+
+	sources4 := c.sourcePathProbeSources(true)
+	sources6 := c.sourcePathProbeSources(false)
+	if len(sources4) != 1 || sources4[0].socketID != sourceIPv4SocketID {
+		t.Fatalf("IPv4 probe sources with AUX_SOCKETS=2 = %+v, want one IPv4 auxiliary source", sources4)
+	}
+	if len(sources6) != 1 || sources6[0].socketID != sourceIPv6SocketID {
+		t.Fatalf("IPv6 probe sources with AUX_SOCKETS=2 = %+v, want one IPv6 auxiliary source", sources6)
+	}
+}
+
 func TestSourcePathDataSendSourceForcedAuxDualStack(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
