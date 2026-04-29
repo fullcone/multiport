@@ -93,7 +93,7 @@ It runs both IPv4 and IPv6 subtests. For each address family it:
 Full WSL runtime command:
 
 ```powershell
-wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test ./wgengine/magicsock -run "TestSourcePath(ForcedAuxDualNodeRuntime|AutomaticAuxDualNodeRuntime)" -count=1 -v'
+wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/zerotier-client/multiport -- bash -lc 'go test ./wgengine/magicsock -run "TestSourcePath(ForcedAuxDualNodeRuntime|AutomaticAuxDualNodeRuntime)" -count=1 -v'
 ```
 
 Result:
@@ -109,7 +109,7 @@ test command exited successfully.
 Clean evidence extraction command:
 
 ```powershell
-wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test ./wgengine/magicsock -run "TestSourcePath(ForcedAuxDualNodeRuntime|AutomaticAuxDualNodeRuntime)" -count=1 -v 2>&1 | grep -E "runtime path|retrying primary|--- PASS: TestSourcePath|^PASS$|^ok"'
+wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/zerotier-client/multiport -- bash -lc 'go test ./wgengine/magicsock -run "TestSourcePath(ForcedAuxDualNodeRuntime|AutomaticAuxDualNodeRuntime)" -count=1 -v 2>&1 | grep -E "runtime path|retrying primary|--- PASS: TestSourcePath|^PASS$|^ok"'
 ```
 
 Extracted evidence:

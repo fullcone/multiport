@@ -4,9 +4,9 @@ Date: 2026-04-29
 
 Repository: `https://github.com/fullcone/multiport`
 
-Local checkout: `C:\other_project\fullcone`
+Local checkout: `C:\other_project\zerotier-client\multiport`
 
-WSL checkout: `/mnt/c/other_project/fullcone`
+WSL checkout: `/mnt/c/other_project/zerotier-client/multiport`
 
 Branch: `phase1-srcsel-source-metadata`
 
@@ -63,7 +63,7 @@ The full Phase 17 record is
 Command run from the Windows host against the WSL checkout:
 
 ```powershell
-wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'git rev-parse HEAD && go test ./wgengine/magicsock -count=1'
+wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/zerotier-client/multiport -- bash -lc 'git rev-parse HEAD && go test ./wgengine/magicsock -count=1'
 ```
 
 Result:

@@ -4,9 +4,9 @@ Date: 2026-04-29
 
 Repository: `https://github.com/fullcone/multiport`
 
-Local checkout: `C:\other_project\fullcone`
+Local checkout: `C:\other_project\zerotier-client\multiport`
 
-WSL checkout: `/mnt/c/other_project/fullcone`
+WSL checkout: `/mnt/c/other_project/zerotier-client/multiport`
 
 Branch: `phase1-srcsel-source-metadata`
 
@@ -69,7 +69,7 @@ mutation.
 Command run from WSL:
 
 ```powershell
-wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test ./wgengine/magicsock -run TestPrintSourcePathDebugHTML -count=1'
+wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/zerotier-client/multiport -- bash -lc 'go test ./wgengine/magicsock -run TestPrintSourcePathDebugHTML -count=1'
 ```
 
 Result:
@@ -81,7 +81,7 @@ ok  	tailscale.com/wgengine/magicsock	0.010s
 Command run from WSL:
 
 ```powershell
-wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test ./wgengine/magicsock -count=1'
+wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/zerotier-client/multiport -- bash -lc 'go test ./wgengine/magicsock -count=1'
 ```
 
 Result:
@@ -123,3 +123,11 @@ Phase 17 Codex response:
 Result: Codex reported no major issues for the Phase 17 debug snapshot lock
 fix. Review polling after the response showed all known inline Codex threads
 resolved.
+
+## Post-Closeout Path Note
+
+After this phase, the local checkout was normalized under
+`C:\other_project\zerotier-client\multiport`. The documentation-only relocation
+record is:
+
+`docs/tailscale-direct-multisource-udp-phase18-worktree-path-normalization.md`

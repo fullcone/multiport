@@ -6,8 +6,8 @@ This document records the Phase 15 Linux dual-node runtime revalidation for
 source-selected direct UDP sends in `fullcone/multiport`.
 
 No production code changed in this phase. This phase re-ran the runtime tests in
-the local PR checkout at `C:\other_project\fullcone` and WSL path
-`/mnt/c/other_project/fullcone`; the tested checkout SHA is recorded below.
+the local PR checkout at `C:\other_project\zerotier-client\multiport` and WSL path
+`/mnt/c/other_project/zerotier-client/multiport`; the tested checkout SHA is recorded below.
 
 ## PR Review Gate
 
@@ -44,8 +44,8 @@ re-running the same Linux dual-node runtime validation command with
 
 ## Tested Checkout Identity
 
-- Windows checkout: `C:\other_project\fullcone`
-- WSL checkout: `/mnt/c/other_project/fullcone`
+- Windows checkout: `C:\other_project\zerotier-client\multiport`
+- WSL checkout: `/mnt/c/other_project/zerotier-client/multiport`
 - Phase 15 PR head before this feedback fix:
   `92c72267198f5b26627d4c287b6ce51297015441`
 - The validation command below printed:
@@ -108,7 +108,7 @@ Revalidate the runtime behavior after the Phase 14 lazy endpoint guard:
 Completed local validation on 2026-04-29 from the WSL PR checkout:
 
 ```powershell
-wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'git rev-parse HEAD && go test ./wgengine/magicsock -run "TestSourcePath(ForcedAuxDualNodeRuntime|AutomaticAuxDualNodeRuntime)" -count=1 -v'
+wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/zerotier-client/multiport -- bash -lc 'git rev-parse HEAD && go test ./wgengine/magicsock -run "TestSourcePath(ForcedAuxDualNodeRuntime|AutomaticAuxDualNodeRuntime)" -count=1 -v'
 ```
 
 Validation result:
@@ -122,7 +122,7 @@ ok  	tailscale.com/wgengine/magicsock	0.242s
 Filtered revalidation evidence from the same checkout:
 
 ```powershell
-wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'set -o pipefail; git rev-parse HEAD; go test ./wgengine/magicsock -run "TestSourcePath(ForcedAuxDualNodeRuntime|AutomaticAuxDualNodeRuntime)" -count=1 -v 2>&1 | grep -E "forced aux runtime path|automatic aux runtime path|srcsel: data send|--- PASS|^PASS$|^ok[[:space:]]"'
+wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/zerotier-client/multiport -- bash -lc 'set -o pipefail; git rev-parse HEAD; go test ./wgengine/magicsock -run "TestSourcePath(ForcedAuxDualNodeRuntime|AutomaticAuxDualNodeRuntime)" -count=1 -v 2>&1 | grep -E "forced aux runtime path|automatic aux runtime path|srcsel: data send|--- PASS|^PASS$|^ok[[:space:]]"'
 ```
 
 Filtered result:

@@ -103,9 +103,9 @@ rollback behavior continue to use the same single auxiliary IPv4/IPv6 pair.
 Completed local validation on 2026-04-29:
 
 ```powershell
-wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'gofmt -w wgengine/magicsock/sourcepath_linux_test.go'
-wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test ./wgengine/magicsock -run "TestSourcePathAuxSocketCountBoundaryDualStack|TestSourcePathDataSendSourceForcedAuxDualStack|TestSourcePathDataSendSourceNonDirectGuardDualStack" -count=1 -v'
-wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test ./wgengine/magicsock -run TestSourcePath -count=1'
+wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/zerotier-client/multiport -- bash -lc 'gofmt -w wgengine/magicsock/sourcepath_linux_test.go'
+wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/zerotier-client/multiport -- bash -lc 'go test ./wgengine/magicsock -run "TestSourcePathAuxSocketCountBoundaryDualStack|TestSourcePathDataSendSourceForcedAuxDualStack|TestSourcePathDataSendSourceNonDirectGuardDualStack" -count=1 -v'
+wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/zerotier-client/multiport -- bash -lc 'go test ./wgengine/magicsock -run TestSourcePath -count=1'
 ```
 
 Validation results:

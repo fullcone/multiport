@@ -18,7 +18,7 @@ IPv4 and IPv6 are both in scope:
 ## Repository State
 
 - Repository: `https://github.com/fullcone/multiport`
-- Local tree: `C:\other_project\fullcone`
+- Local tree: `C:\other_project\zerotier-client\multiport`
 - Branch: `phase1-srcsel-source-metadata`
 - PR: `https://github.com/fullcone/multiport/pull/1`
 - Phase 2 implementation commit: `faed25451`

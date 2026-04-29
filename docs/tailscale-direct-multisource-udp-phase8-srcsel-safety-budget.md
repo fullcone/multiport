@@ -118,7 +118,7 @@ Completed local validation on 2026-04-29:
 gofmt -w wgengine\magicsock\magicsock.go wgengine\magicsock\sourcepath.go wgengine\magicsock\sourcepath_linux.go wgengine\magicsock\sourcepath_default.go wgengine\magicsock\sourcepath_test.go
 go test ./wgengine/magicsock -run "TestSourcePathProbeManager.*Budget|TestSourcePathProbe" -count=1
 go test ./wgengine/magicsock ./envknob -count=1
-wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test ./wgengine/magicsock -run "TestSourcePathProbeManager.*Budget|TestSourcePathProbe" -count=1'
+wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/zerotier-client/multiport -- bash -lc 'go test ./wgengine/magicsock -run "TestSourcePathProbeManager.*Budget|TestSourcePathProbe" -count=1'
 git diff --check
 ```
 

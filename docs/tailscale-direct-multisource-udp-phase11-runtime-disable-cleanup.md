@@ -93,8 +93,8 @@ automatic source selection is considered.
 Completed local validation on 2026-04-29:
 
 ```powershell
-wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'gofmt -w wgengine/magicsock/sourcepath.go wgengine/magicsock/sourcepath_linux.go wgengine/magicsock/magicsock.go wgengine/magicsock/sourcepath_linux_test.go'
-wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test ./wgengine/magicsock -run "TestSourcePath(RebindDisabledClosesAuxAndClearsState|DataSendSourceForcedAuxDualStack|DataSendSourceAutomaticCandidateDualStack|ForcedAuxDualNodeRuntime|AutomaticAuxDualNodeRuntime)" -count=1 -v'
+wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/zerotier-client/multiport -- bash -lc 'gofmt -w wgengine/magicsock/sourcepath.go wgengine/magicsock/sourcepath_linux.go wgengine/magicsock/magicsock.go wgengine/magicsock/sourcepath_linux_test.go'
+wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/zerotier-client/multiport -- bash -lc 'go test ./wgengine/magicsock -run "TestSourcePath(RebindDisabledClosesAuxAndClearsState|DataSendSourceForcedAuxDualStack|DataSendSourceAutomaticCandidateDualStack|ForcedAuxDualNodeRuntime|AutomaticAuxDualNodeRuntime)" -count=1 -v'
 ```
 
 Validation results:

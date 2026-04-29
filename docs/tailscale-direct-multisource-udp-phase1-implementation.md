@@ -11,7 +11,7 @@ path behavior changes.
 ## Repository State
 
 - Repository: `https://github.com/fullcone/multiport`
-- Local tree: `C:\other_project\fullcone`
+- Local tree: `C:\other_project\zerotier-client\multiport`
 - Branch: `phase1-srcsel-source-metadata`
 - PR: `https://github.com/fullcone/multiport/pull/1`
 - Code commit: `e9f49eff3 magicsock: thread receive source metadata`

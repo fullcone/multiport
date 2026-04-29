@@ -80,7 +80,7 @@ gofmt -w wgengine\magicsock\debughttp.go wgengine\magicsock\debughttp_test.go wg
 go test ./wgengine/magicsock -run TestPrintSourcePathDebugHTML -count=1
 go test ./wgengine/magicsock -run "TestSourcePathProbe|TestPrintSourcePathDebugHTML" -count=1
 go test ./wgengine/magicsock ./envknob -count=1
-wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test ./wgengine/magicsock -run TestPrintSourcePathDebugHTML -count=1'
+wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/zerotier-client/multiport -- bash -lc 'go test ./wgengine/magicsock -run TestPrintSourcePathDebugHTML -count=1'
 git diff --check
 ```
 

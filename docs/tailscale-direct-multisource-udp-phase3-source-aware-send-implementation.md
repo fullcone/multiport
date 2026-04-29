@@ -175,9 +175,9 @@ Additional runtime/unit validation on 2026-04-29:
 ```powershell
 gofmt -w envknob\envknob.go envknob\envknob_test.go wgengine\magicsock\sourcepath_linux_test.go
 go test ./envknob
-wsl -d Ubuntu-24.04 -- bash -lc 'cd /mnt/c/other_project/fullcone && go test ./wgengine/magicsock -run TestSourcePathDataSendSourceForcedAuxDualStack -count=1 -v'
+wsl -d Ubuntu-24.04 -- bash -lc 'cd /mnt/c/other_project/zerotier-client/multiport && go test ./wgengine/magicsock -run TestSourcePathDataSendSourceForcedAuxDualStack -count=1 -v'
 go test ./wgengine/magicsock ./envknob
-wsl -d Ubuntu-24.04 -- bash -lc 'cd /mnt/c/other_project/fullcone && go test ./wgengine/magicsock ./envknob'
+wsl -d Ubuntu-24.04 -- bash -lc 'cd /mnt/c/other_project/zerotier-client/multiport && go test ./wgengine/magicsock ./envknob'
 ```
 
 Results:
@@ -198,8 +198,8 @@ and `TestSetenvUpdatesRegisteredInt` cover this support bug.
 Additional Linux loopback egress validation on 2026-04-29:
 
 ```powershell
-wsl -d Ubuntu-24.04 -- bash -lc 'cd /mnt/c/other_project/fullcone && go test ./wgengine/magicsock -run "Test(SendUDPBatchFromSourceAuxDualStackLoopback|SourcePathWriteWireGuardBatchToRejectsStaleAuxSource|SourcePathDataSendSourceForcedAuxDualStack)" -count=1 -v'
-wsl -d Ubuntu-24.04 -- bash -lc 'cd /mnt/c/other_project/fullcone && go test ./wgengine/magicsock ./envknob'
+wsl -d Ubuntu-24.04 -- bash -lc 'cd /mnt/c/other_project/zerotier-client/multiport && go test ./wgengine/magicsock -run "Test(SendUDPBatchFromSourceAuxDualStackLoopback|SourcePathWriteWireGuardBatchToRejectsStaleAuxSource|SourcePathDataSendSourceForcedAuxDualStack)" -count=1 -v'
+wsl -d Ubuntu-24.04 -- bash -lc 'cd /mnt/c/other_project/zerotier-client/multiport && go test ./wgengine/magicsock ./envknob'
 go test ./wgengine/magicsock ./envknob
 ```
 
@@ -219,7 +219,7 @@ Results:
 Additional auxiliary-send error isolation validation on 2026-04-29:
 
 ```powershell
-wsl -d Ubuntu-24.04 -- bash -lc 'cd /mnt/c/other_project/fullcone && go test ./wgengine/magicsock -run "Test(SendUDPBatchFromSourceAuxErrorDoesNotRebind|SendUDPBatchFromSourceAuxDualStackLoopback|SourcePathWriteWireGuardBatchToRejectsStaleAuxSource|SourcePathDataSendSourceForcedAuxDualStack)" -count=1 -v'
+wsl -d Ubuntu-24.04 -- bash -lc 'cd /mnt/c/other_project/zerotier-client/multiport && go test ./wgengine/magicsock -run "Test(SendUDPBatchFromSourceAuxErrorDoesNotRebind|SendUDPBatchFromSourceAuxDualStackLoopback|SourcePathWriteWireGuardBatchToRejectsStaleAuxSource|SourcePathDataSendSourceForcedAuxDualStack)" -count=1 -v'
 ```
 
 Results:
@@ -233,8 +233,8 @@ Results:
 Linux dual-node runtime validation on 2026-04-29:
 
 ```powershell
-wsl -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test ./wgengine/magicsock -run TestSourcePathForcedAuxDualNodeRuntime -count=1 -v'
-wsl -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test ./wgengine/magicsock -run "Test(SourcePath|SendUDPBatchFromSourceAux)" -count=1'
+wsl -d Ubuntu-24.04 --cd /mnt/c/other_project/zerotier-client/multiport -- bash -lc 'go test ./wgengine/magicsock -run TestSourcePathForcedAuxDualNodeRuntime -count=1 -v'
+wsl -d Ubuntu-24.04 --cd /mnt/c/other_project/zerotier-client/multiport -- bash -lc 'go test ./wgengine/magicsock -run "Test(SourcePath|SendUDPBatchFromSourceAux)" -count=1'
 ```
 
 Results:
@@ -259,8 +259,8 @@ Codex review follow-up fix validation on 2026-04-29:
 
 ```powershell
 gofmt -w wgengine\magicsock\sourcepath_linux_test.go
-wsl -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test ./wgengine/magicsock -run TestSourcePathForcedAuxDualNodeRuntime -count=1 -v'
-wsl -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test ./wgengine/magicsock ./envknob -count=1'
+wsl -d Ubuntu-24.04 --cd /mnt/c/other_project/zerotier-client/multiport -- bash -lc 'go test ./wgengine/magicsock -run TestSourcePathForcedAuxDualNodeRuntime -count=1 -v'
+wsl -d Ubuntu-24.04 --cd /mnt/c/other_project/zerotier-client/multiport -- bash -lc 'go test ./wgengine/magicsock ./envknob -count=1'
 go test ./wgengine/magicsock ./envknob -count=1
 ```
 
