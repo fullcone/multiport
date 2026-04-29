@@ -166,3 +166,23 @@ Current audit state:
 - The P2 is valid and is fixed by making `sourcePathSocket.id` atomic and
   adding `TestSourcePathSocketRxMetaConcurrentIDUpdate`, verified under WSL
   Linux `go test -race`.
+- After the atomic ID fix, PR thread `PRRT_kwDOSPBZuM5-U8eD` became outdated
+  and no new non-outdated Codex review issue was present during the follow-up
+  poll.
+
+Post-fix runtime validation on 2026-04-29:
+
+- Revalidated forced auxiliary data send on commit
+  `5c6738d84cca8f09d896e82c375a181c97158b8a`.
+- WSL Ubuntu-24.04 command:
+  `go test ./wgengine/magicsock -run TestSourcePathForcedAuxDualNodeRuntime -count=1 -v`.
+- IPv4 proof line:
+  `forced aux runtime path: aux=127.0.0.1:34452 primary=127.0.0.1:46258 peer=127.0.0.1:37725`.
+  The test then injected an auxiliary `EPERM` and logged primary fallback:
+  `srcsel: data send from source 1 to 127.0.0.1:37725 failed, retrying primary: write: operation not permitted`.
+- IPv6 proof line:
+  `forced aux runtime path: aux=[::1]:45730 primary=[::1]:39643 peer=[::1]:60969`.
+  The test then injected an auxiliary `EPERM` and logged primary fallback:
+  `srcsel: data send from source 2 to [::1]:60969 failed, retrying primary: write: operation not permitted`.
+- WSL Ubuntu-24.04 package regression:
+  `go test ./wgengine/magicsock ./envknob -count=1`: passed.
