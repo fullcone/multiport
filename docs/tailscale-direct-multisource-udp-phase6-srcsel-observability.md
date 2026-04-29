@@ -152,15 +152,25 @@ Review request:
 
 Review result:
 
-- Pending Codex response after the first 60-second poll.
+- Codex no-major-issues response:
+  `https://github.com/fullcone/multiport/pull/1#issuecomment-4342469162`.
 
 Polling record on 2026-04-29:
 
 - First 60-second poll after the Phase 6 review request: no Codex response for
   commit `83ed931cb87553b06ed6fc31918f10f50075069a`; no new actionable review
   thread appeared.
+- Later poll found the Codex no-major-issues response for the Phase 6
+  implementation review request.
+- Doc-only polling-record commit:
+  `9f037901dee21e9e18e4440e54f1765919b1231b`
+  (`docs: record phase6 review polling`).
+- Doc-only polling-record review request:
+  `https://github.com/fullcone/multiport/pull/1#issuecomment-4342486594`.
+- Doc-only polling-record review result:
+  `https://github.com/fullcone/multiport/pull/1#issuecomment-4342497823`.
 
-Current PR feedback state after the first Phase 6 poll:
+Current PR feedback state after the Phase 6 review responses:
 
 - Earlier Phase 2 review threads are resolved.
 - Earlier Phase 3 test-fixture review threads are resolved and outdated.
@@ -169,4 +179,4 @@ Current PR feedback state after the first Phase 6 poll:
   (`PRRT_kwDOSPBZuM5-U8eD`), already fixed by commit
   `5c6738d84cca8f09d896e82c375a181c97158b8a` and followed by a no-major-issues
   Codex review.
-- No Phase 6-specific actionable feedback has appeared in the first poll.
+- No Phase 6-specific actionable feedback has appeared.
