@@ -1078,12 +1078,19 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 	var err error
 	if udpAddr.ap.IsValid() {
 		source := de.c.sourcePathDataSendSource(udpAddr)
+		usingSourcePathAux := !source.isPrimary()
+		if usingSourcePathAux {
+			metricSourcePathDataSendAuxSelected.Add(1)
+		}
 		usedPrimarySend := source.isPrimary()
 		_, err = de.c.sendUDPBatchFromSource(source, udpAddr, buffs, offset)
-		if err != nil && !source.isPrimary() {
+		if err != nil && usingSourcePathAux {
+			metricSourcePathDataSendAuxFallback.Add(1)
 			de.c.logf("magicsock: srcsel: data send from source %d to %v failed, retrying primary: %v", source.socketID, udpAddr, err)
 			usedPrimarySend = true
 			_, err = de.c.sendUDPBatch(udpAddr, buffs, offset)
+		} else if usingSourcePathAux {
+			metricSourcePathDataSendAuxSucceeded.Add(1)
 		}
 
 		// If the error is known to indicate that the endpoint is no longer

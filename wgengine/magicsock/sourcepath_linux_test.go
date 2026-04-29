@@ -551,11 +551,19 @@ func TestSourcePathForcedAuxDualNodeRuntime(t *testing.T) {
 
 			sentinel := time.Unix(123, 0)
 			m1.conn.lastErrRebind.Store(sentinel)
+			selectedBefore := metricSourcePathDataSendAuxSelected.Value()
+			succeededBefore := metricSourcePathDataSendAuxSucceeded.Value()
 			pl.clearWrites()
 			transitOnePing(t, m1, m2)
 			writes := pl.writesSnapshot()
 			if !hasWireGuardWrite(writes, auxLocal, directPeer, false) {
 				t.Fatalf("forced aux send did not emit a WireGuard UDP packet from aux %v to peer %v; writes=%v", auxLocal, directPeer, summarizeWrites(writes))
+			}
+			if got := metricSourcePathDataSendAuxSelected.Value() - selectedBefore; got < 1 {
+				t.Fatalf("forced aux send selected metric delta = %d, want at least 1", got)
+			}
+			if got := metricSourcePathDataSendAuxSucceeded.Value() - succeededBefore; got < 1 {
+				t.Fatalf("forced aux send succeeded metric delta = %d, want at least 1", got)
 			}
 			if got := m1.conn.lastErrRebind.Load(); !got.Equal(sentinel) {
 				t.Fatalf("successful aux send updated lastErrRebind: got %v want %v", got, sentinel)
@@ -563,6 +571,8 @@ func TestSourcePathForcedAuxDualNodeRuntime(t *testing.T) {
 
 			pl.setFailure(auxLocal, &net.OpError{Op: "write", Err: syscall.EPERM})
 			t.Cleanup(pl.clearFailures)
+			selectedBefore = metricSourcePathDataSendAuxSelected.Value()
+			fallbackBefore := metricSourcePathDataSendAuxFallback.Value()
 			pl.clearWrites()
 			transitOnePing(t, m1, m2)
 			writes = pl.writesSnapshot()
@@ -571,6 +581,12 @@ func TestSourcePathForcedAuxDualNodeRuntime(t *testing.T) {
 			}
 			if !hasWireGuardWrite(writes, primaryLocal, directPeer, false) {
 				t.Fatalf("forced aux failure did not fall back to primary %v to peer %v; writes=%v", primaryLocal, directPeer, summarizeWrites(writes))
+			}
+			if got := metricSourcePathDataSendAuxSelected.Value() - selectedBefore; got < 1 {
+				t.Fatalf("forced aux fallback selected metric delta = %d, want at least 1", got)
+			}
+			if got := metricSourcePathDataSendAuxFallback.Value() - fallbackBefore; got < 1 {
+				t.Fatalf("forced aux fallback metric delta = %d, want at least 1", got)
 			}
 			if got := m1.conn.lastErrRebind.Load(); !got.Equal(sentinel) {
 				t.Fatalf("aux fallback updated lastErrRebind: got %v want %v", got, sentinel)
@@ -648,11 +664,19 @@ func TestSourcePathAutomaticAuxDualNodeRuntime(t *testing.T) {
 
 			sentinel := time.Unix(456, 0)
 			m1.conn.lastErrRebind.Store(sentinel)
+			selectedBefore := metricSourcePathDataSendAuxSelected.Value()
+			succeededBefore := metricSourcePathDataSendAuxSucceeded.Value()
 			pl.clearWrites()
 			transitOnePing(t, m1, m2)
 			writes := pl.writesSnapshot()
 			if !hasWireGuardWrite(writes, auxLocal, directPeer, false) {
 				t.Fatalf("automatic aux send did not emit a WireGuard UDP packet from aux %v to peer %v; writes=%v", auxLocal, directPeer, summarizeWrites(writes))
+			}
+			if got := metricSourcePathDataSendAuxSelected.Value() - selectedBefore; got < 1 {
+				t.Fatalf("automatic aux send selected metric delta = %d, want at least 1", got)
+			}
+			if got := metricSourcePathDataSendAuxSucceeded.Value() - succeededBefore; got < 1 {
+				t.Fatalf("automatic aux send succeeded metric delta = %d, want at least 1", got)
 			}
 			if got := m1.conn.lastErrRebind.Load(); !got.Equal(sentinel) {
 				t.Fatalf("successful automatic aux send updated lastErrRebind: got %v want %v", got, sentinel)
@@ -660,6 +684,8 @@ func TestSourcePathAutomaticAuxDualNodeRuntime(t *testing.T) {
 
 			pl.setFailure(auxLocal, &net.OpError{Op: "write", Err: syscall.EPERM})
 			t.Cleanup(pl.clearFailures)
+			selectedBefore = metricSourcePathDataSendAuxSelected.Value()
+			fallbackBefore := metricSourcePathDataSendAuxFallback.Value()
 			pl.clearWrites()
 			transitOnePing(t, m1, m2)
 			writes = pl.writesSnapshot()
@@ -668,6 +694,12 @@ func TestSourcePathAutomaticAuxDualNodeRuntime(t *testing.T) {
 			}
 			if !hasWireGuardWrite(writes, primaryLocal, directPeer, false) {
 				t.Fatalf("automatic aux failure did not fall back to primary %v to peer %v; writes=%v", primaryLocal, directPeer, summarizeWrites(writes))
+			}
+			if got := metricSourcePathDataSendAuxSelected.Value() - selectedBefore; got < 1 {
+				t.Fatalf("automatic aux fallback selected metric delta = %d, want at least 1", got)
+			}
+			if got := metricSourcePathDataSendAuxFallback.Value() - fallbackBefore; got < 1 {
+				t.Fatalf("automatic aux fallback metric delta = %d, want at least 1", got)
 			}
 			if got := m1.conn.lastErrRebind.Load(); !got.Equal(sentinel) {
 				t.Fatalf("automatic aux fallback updated lastErrRebind: got %v want %v", got, sentinel)
