@@ -68,6 +68,13 @@ type sourcePathProbeSample struct {
 	at       mono.Time
 }
 
+type sourcePathCandidateScore struct {
+	source  sourceRxMeta
+	latency time.Duration
+	samples int
+	lastAt  mono.Time
+}
+
 func (pm *sourcePathProbeManager) addLocked(tx sourcePathProbeTx) {
 	if pm.pending == nil {
 		pm.pending = make(map[stun.TxID]sourcePathProbeTx)
@@ -86,6 +93,53 @@ func (pm *sourcePathProbeManager) pendingLenLocked() int {
 
 func (pm *sourcePathProbeManager) samplesLenLocked() int {
 	return len(pm.samples)
+}
+
+func (pm *sourcePathProbeManager) bestCandidateLocked(dst epAddr, sources []sourceRxMeta) (sourcePathCandidateScore, bool) {
+	if !dst.isDirect() {
+		return sourcePathCandidateScore{}, false
+	}
+
+	var best sourcePathCandidateScore
+	var bestOK bool
+	for _, source := range sources {
+		if source.isPrimary() {
+			continue
+		}
+
+		var candidate sourcePathCandidateScore
+		var candidateOK bool
+		for _, sample := range pm.samples {
+			if sample.dst != dst || sample.source != source {
+				continue
+			}
+			if !candidateOK {
+				candidate = sourcePathCandidateScore{
+					source:  source,
+					latency: sample.latency,
+					samples: 1,
+					lastAt:  sample.at,
+				}
+				candidateOK = true
+				continue
+			}
+			candidate.samples++
+			if sample.latency < candidate.latency {
+				candidate.latency = sample.latency
+			}
+			if sample.at.Sub(candidate.lastAt) > 0 {
+				candidate.lastAt = sample.at
+			}
+		}
+		if !candidateOK {
+			continue
+		}
+		if !bestOK || candidate.latency < best.latency || (candidate.latency == best.latency && candidate.lastAt.Sub(best.lastAt) > 0) {
+			best = candidate
+			bestOK = true
+		}
+	}
+	return best, bestOK
 }
 
 func (pm *sourcePathProbeManager) pruneExpiredLocked(now mono.Time) {

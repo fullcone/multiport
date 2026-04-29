@@ -160,3 +160,82 @@ func TestSourcePathProbeManagerConsumesExpiredPong(t *testing.T) {
 		t.Fatalf("samples after expired pong = %d, want 0", got)
 	}
 }
+
+func TestSourcePathProbeManagerBestCandidateDualStackObserveOnly(t *testing.T) {
+	var pm sourcePathProbeManager
+	now := mono.Now()
+	current4 := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 11}
+	stale4 := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 10}
+	current6 := sourceRxMeta{socketID: sourceIPv6SocketID, generation: 12}
+	v4 := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	v4Other := epAddr{ap: netip.MustParseAddrPort("192.0.2.3:41641")}
+	v6 := epAddr{ap: netip.MustParseAddrPort("[2001:db8::1]:41641")}
+
+	pm.pending = map[stun.TxID]sourcePathProbeTx{
+		stun.NewTxID(): {
+			dst:    v4,
+			source: current4,
+			at:     now,
+		},
+	}
+	pm.samples = []sourcePathProbeSample{
+		{dst: v4, source: primarySourceRxMeta, latency: time.Millisecond, at: now.Add(-5 * time.Second)},
+		{dst: v4, source: stale4, latency: time.Millisecond, at: now.Add(-4 * time.Second)},
+		{dst: v4Other, source: current4, latency: time.Millisecond, at: now.Add(-3 * time.Second)},
+		{dst: v4, source: current4, latency: 20 * time.Millisecond, at: now.Add(-2 * time.Second)},
+		{dst: v4, source: current4, latency: 10 * time.Millisecond, at: now.Add(-1 * time.Second)},
+		{dst: v6, source: current6, latency: 12 * time.Millisecond, at: now.Add(-2 * time.Second)},
+		{dst: v6, source: current6, latency: 15 * time.Millisecond, at: now.Add(-1 * time.Second)},
+	}
+	beforePending, beforeSamples := pm.pendingLenLocked(), pm.samplesLenLocked()
+
+	score4, ok := pm.bestCandidateLocked(v4, []sourceRxMeta{primarySourceRxMeta, current4, current6})
+	if !ok {
+		t.Fatal("IPv4 candidate not found")
+	}
+	if score4.source != current4 {
+		t.Fatalf("IPv4 candidate source = %+v, want %+v", score4.source, current4)
+	}
+	if score4.latency != 10*time.Millisecond {
+		t.Fatalf("IPv4 candidate latency = %v, want 10ms", score4.latency)
+	}
+	if score4.samples != 2 {
+		t.Fatalf("IPv4 candidate sample count = %d, want 2", score4.samples)
+	}
+	if got, want := score4.lastAt.Sub(now.Add(-1*time.Second)), time.Duration(0); got != want {
+		t.Fatalf("IPv4 candidate lastAt delta = %v, want %v", got, want)
+	}
+
+	score6, ok := pm.bestCandidateLocked(v6, []sourceRxMeta{current4, current6})
+	if !ok {
+		t.Fatal("IPv6 candidate not found")
+	}
+	if score6.source != current6 {
+		t.Fatalf("IPv6 candidate source = %+v, want %+v", score6.source, current6)
+	}
+	if score6.latency != 12*time.Millisecond {
+		t.Fatalf("IPv6 candidate latency = %v, want 12ms", score6.latency)
+	}
+	if score6.samples != 2 {
+		t.Fatalf("IPv6 candidate sample count = %d, want 2", score6.samples)
+	}
+	if got, want := score6.lastAt.Sub(now.Add(-1*time.Second)), time.Duration(0); got != want {
+		t.Fatalf("IPv6 candidate lastAt delta = %v, want %v", got, want)
+	}
+
+	if _, ok := pm.bestCandidateLocked(v4, []sourceRxMeta{primarySourceRxMeta}); ok {
+		t.Fatal("primary-only source list returned a candidate")
+	}
+	if _, ok := pm.bestCandidateLocked(v4, []sourceRxMeta{{socketID: sourceIPv4SocketID, generation: 99}}); ok {
+		t.Fatal("nonmatching generation source list returned a candidate")
+	}
+	if _, ok := pm.bestCandidateLocked(epAddr{}, []sourceRxMeta{current4}); ok {
+		t.Fatal("non-direct destination returned a candidate")
+	}
+	if got := pm.pendingLenLocked(); got != beforePending {
+		t.Fatalf("pending probes mutated by scoring: got %d want %d", got, beforePending)
+	}
+	if got := pm.samplesLenLocked(); got != beforeSamples {
+		t.Fatalf("samples mutated by scoring: got %d want %d", got, beforeSamples)
+	}
+}

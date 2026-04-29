@@ -18,6 +18,8 @@ import (
 	"github.com/tailscale/wireguard-go/tun/tuntest"
 	"tailscale.com/envknob"
 	"tailscale.com/net/packet"
+	"tailscale.com/net/stun"
+	"tailscale.com/tstime/mono"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/netmap"
 	"tailscale.com/types/nettype"
@@ -90,6 +92,94 @@ func TestSourcePathDataSendSourceForcedAuxDualStack(t *testing.T) {
 	}
 	if got := c.sourcePathDataSendSource(v6); !got.isPrimary() {
 		t.Fatalf("unforced IPv6 source socket = %d, want primary", got.socketID)
+	}
+}
+
+func TestSourcePathBestCandidateObserveOnlyDoesNotSelectDataSource(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 17
+	c.sourcePath.aux4.id = sourceIPv4SocketID
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+	c.sourcePath.aux6.id = sourceIPv6SocketID
+	c.sourcePath.aux6.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux6Bound = true
+
+	v4 := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
+	v6 := epAddr{ap: netip.MustParseAddrPort("[2001:db8::1]:41641")}
+	sources4 := c.sourcePathProbeSources(true)
+	sources6 := c.sourcePathProbeSources(false)
+	if len(sources4) != 1 || sources4[0].socketID != sourceIPv4SocketID {
+		t.Fatalf("IPv4 probe sources = %+v, want one IPv4 auxiliary source", sources4)
+	}
+	if len(sources6) != 1 || sources6[0].socketID != sourceIPv6SocketID {
+		t.Fatalf("IPv6 probe sources = %+v, want one IPv6 auxiliary source", sources6)
+	}
+
+	sentinel := time.Unix(321, 0)
+	c.lastErrRebind.Store(sentinel)
+	now := mono.Now()
+
+	c.mu.Lock()
+	c.sourceProbes.pending = map[stun.TxID]sourcePathProbeTx{
+		stun.NewTxID(): {
+			dst:    v4,
+			source: sources4[0],
+			at:     now,
+		},
+	}
+	c.sourceProbes.samples = []sourcePathProbeSample{
+		{dst: v4, source: sources4[0], latency: 9 * time.Millisecond, at: now.Add(-2 * time.Second)},
+		{dst: v4, source: sources4[0], latency: 7 * time.Millisecond, at: now.Add(-1 * time.Second)},
+		{dst: v6, source: sources6[0], latency: 11 * time.Millisecond, at: now.Add(-1 * time.Second)},
+	}
+	beforePending, beforeSamples := c.sourceProbes.pendingLenLocked(), c.sourceProbes.samplesLenLocked()
+	score4, ok4 := c.sourceProbes.bestCandidateLocked(v4, sources4)
+	score6, ok6 := c.sourceProbes.bestCandidateLocked(v6, sources6)
+	afterPending, afterSamples := c.sourceProbes.pendingLenLocked(), c.sourceProbes.samplesLenLocked()
+	c.mu.Unlock()
+
+	if !ok4 {
+		t.Fatal("IPv4 observe-only candidate not found")
+	}
+	if score4.source != sources4[0] {
+		t.Fatalf("IPv4 observe-only candidate source = %+v, want %+v", score4.source, sources4[0])
+	}
+	if score4.latency != 7*time.Millisecond || score4.samples != 2 {
+		t.Fatalf("IPv4 observe-only score = latency %v samples %d, want 7ms and 2 samples", score4.latency, score4.samples)
+	}
+	if !ok6 {
+		t.Fatal("IPv6 observe-only candidate not found")
+	}
+	if score6.source != sources6[0] {
+		t.Fatalf("IPv6 observe-only candidate source = %+v, want %+v", score6.source, sources6[0])
+	}
+	if score6.latency != 11*time.Millisecond || score6.samples != 1 {
+		t.Fatalf("IPv6 observe-only score = latency %v samples %d, want 11ms and 1 sample", score6.latency, score6.samples)
+	}
+	if afterPending != beforePending {
+		t.Fatalf("pending probes mutated by observe-only scoring: got %d want %d", afterPending, beforePending)
+	}
+	if afterSamples != beforeSamples {
+		t.Fatalf("samples mutated by observe-only scoring: got %d want %d", afterSamples, beforeSamples)
+	}
+	if got := c.sourcePathDataSendSource(v4); !got.isPrimary() {
+		t.Fatalf("unforced IPv4 data source = %+v, want primary", got)
+	}
+	if got := c.sourcePathDataSendSource(v6); !got.isPrimary() {
+		t.Fatalf("unforced IPv6 data source = %+v, want primary", got)
+	}
+	if got := c.lastErrRebind.Load(); !got.Equal(sentinel) {
+		t.Fatalf("observe-only scoring updated lastErrRebind: got %v want %v", got, sentinel)
 	}
 }
 
