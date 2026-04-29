@@ -206,6 +206,97 @@ func TestSourcePathProbeManagerConsumesExpiredPong(t *testing.T) {
 	}
 }
 
+func TestSourcePathProbeManagerEnforcesPeerBudget(t *testing.T) {
+	var pm sourcePathProbeManager
+	now := mono.Now()
+	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 5}
+	peerA := key.NewDisco().Public()
+	peerB := key.NewDisco().Public()
+	dstA := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	dstB := epAddr{ap: netip.MustParseAddrPort("192.0.2.3:41641")}
+	droppedBefore := metricSourcePathProbePeerBudgetDropped.Value()
+
+	if got := pm.addWithBudgetLocked(sourcePathProbeTx{
+		txid:     stun.NewTxID(),
+		dst:      dstA,
+		dstDisco: peerA,
+		source:   source,
+		at:       now,
+	}, 1, 2); got != sourcePathProbeAdded {
+		t.Fatalf("first peer add result = %v, want added", got)
+	}
+	if got := pm.addWithBudgetLocked(sourcePathProbeTx{
+		txid:     stun.NewTxID(),
+		dst:      dstA,
+		dstDisco: peerA,
+		source:   source,
+		at:       now,
+	}, 1, 2); got != sourcePathProbeAdded {
+		t.Fatalf("same peer add result = %v, want added", got)
+	}
+	if got := pm.addWithBudgetLocked(sourcePathProbeTx{
+		txid:     stun.NewTxID(),
+		dst:      dstB,
+		dstDisco: peerB,
+		source:   source,
+		at:       now,
+	}, 1, 2); got != sourcePathProbePeerBudgetExceeded {
+		t.Fatalf("second peer add result = %v, want peer budget exceeded", got)
+	}
+	if got := pm.pendingLenLocked(); got != 2 {
+		t.Fatalf("pending probes = %d, want 2", got)
+	}
+	if got := metricSourcePathProbePeerBudgetDropped.Value() - droppedBefore; got != 1 {
+		t.Fatalf("peer budget metric delta = %d, want 1", got)
+	}
+}
+
+func TestSourcePathProbeManagerEnforcesBurstBudget(t *testing.T) {
+	var pm sourcePathProbeManager
+	now := mono.Now()
+	source4 := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 5}
+	source6 := sourceRxMeta{socketID: sourceIPv6SocketID, generation: 6}
+	peerA := key.NewDisco().Public()
+	peerB := key.NewDisco().Public()
+	dst4 := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	dst6 := epAddr{ap: netip.MustParseAddrPort("[2001:db8::2]:41641")}
+	droppedBefore := metricSourcePathProbeBurstBudgetDropped.Value()
+
+	if got := pm.addWithBudgetLocked(sourcePathProbeTx{
+		txid:     stun.NewTxID(),
+		dst:      dst4,
+		dstDisco: peerA,
+		source:   source4,
+		at:       now,
+	}, 2, 1); got != sourcePathProbeAdded {
+		t.Fatalf("first probe add result = %v, want added", got)
+	}
+	if got := pm.addWithBudgetLocked(sourcePathProbeTx{
+		txid:     stun.NewTxID(),
+		dst:      dst6,
+		dstDisco: peerA,
+		source:   source6,
+		at:       now,
+	}, 2, 1); got != sourcePathProbeBurstBudgetExceeded {
+		t.Fatalf("same peer burst add result = %v, want burst budget exceeded", got)
+	}
+	if got := pm.addWithBudgetLocked(sourcePathProbeTx{
+		txid:     stun.NewTxID(),
+		dst:      dst6,
+		dstDisco: peerB,
+		source:   source6,
+		at:       now,
+	}, 2, 1); got != sourcePathProbeAdded {
+		t.Fatalf("second peer add result = %v, want added", got)
+	}
+	if got := pm.pendingLenLocked(); got != 2 {
+		t.Fatalf("pending probes = %d, want 2", got)
+	}
+	if got := metricSourcePathProbeBurstBudgetDropped.Value() - droppedBefore; got != 1 {
+		t.Fatalf("burst budget metric delta = %d, want 1", got)
+	}
+}
+
 func TestSourcePathProbeManagerBestCandidateDualStackObserveOnly(t *testing.T) {
 	var pm sourcePathProbeManager
 	now := mono.Now()

@@ -20,6 +20,8 @@ var (
 	envknobSrcSelAuxSockets      = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS")
 	envknobSrcSelForceDataSource = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE")
 	envknobSrcSelAutoDataSource  = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE")
+	envknobSrcSelMaxPeers        = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PEERS")
+	envknobSrcSelMaxProbeBurst   = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST")
 )
 
 func sourcePathAuxSocketCount() int {
@@ -31,6 +33,22 @@ func sourcePathAuxSocketCount() int {
 		return 0
 	}
 	return min(n, 1)
+}
+
+func sourcePathProbeMaxPeerCount() int {
+	n := envknobSrcSelMaxPeers()
+	if n <= 0 {
+		return sourcePathProbeMaxPeers
+	}
+	return n
+}
+
+func sourcePathProbeMaxBurstCount() int {
+	n := envknobSrcSelMaxProbeBurst()
+	if n <= 0 {
+		return sourcePathProbeMaxBurst
+	}
+	return n
 }
 
 func (c *Conn) sourcePathReceiveFuncs() []conn.ReceiveFunc {

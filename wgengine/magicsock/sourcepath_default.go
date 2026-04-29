@@ -17,6 +17,10 @@ func (c *Conn) sourcePathProbeSources(is4 bool) []sourceRxMeta { return nil }
 
 func (c *Conn) sourcePathDataSendSource(dst epAddr) sourceRxMeta { return primarySourceRxMeta }
 
+func sourcePathProbeMaxPeerCount() int { return sourcePathProbeMaxPeers }
+
+func sourcePathProbeMaxBurstCount() int { return sourcePathProbeMaxBurst }
+
 func (c *Conn) sourcePathWriteWireGuardBatchTo(source sourceRxMeta, dst epAddr, buffs [][]byte, offset int) error {
 	return errSourcePathUnavailable
 }

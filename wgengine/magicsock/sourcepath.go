@@ -17,9 +17,17 @@ import (
 	"tailscale.com/types/key"
 )
 
-const sourcePathProbeHistoryLimit = 32
+const (
+	sourcePathProbeHistoryLimit = 32
+	sourcePathProbeMaxPeers     = 32
+	sourcePathProbeMaxBurst     = 1
+)
 
-var errSourcePathUnavailable = errors.New("magicsock: source path unavailable")
+var (
+	errSourcePathUnavailable              = errors.New("magicsock: source path unavailable")
+	errSourcePathProbePeerBudgetExceeded  = errors.New("magicsock: source path probe peer budget exceeded")
+	errSourcePathProbeBurstBudgetExceeded = errors.New("magicsock: source path probe burst budget exceeded")
+)
 
 type sourcePathState struct {
 	mu         syncs.Mutex
@@ -82,12 +90,57 @@ type sourcePathCandidateScore struct {
 	lastAt  mono.Time
 }
 
-func (pm *sourcePathProbeManager) addLocked(tx sourcePathProbeTx) {
+type sourcePathProbeAddResult uint8
+
+const (
+	sourcePathProbeAdded sourcePathProbeAddResult = iota
+	sourcePathProbePeerBudgetExceeded
+	sourcePathProbeBurstBudgetExceeded
+)
+
+func (pm *sourcePathProbeManager) addLocked(tx sourcePathProbeTx) sourcePathProbeAddResult {
+	return pm.addWithBudgetLocked(tx, sourcePathProbeMaxPeerCount(), sourcePathProbeMaxBurstCount())
+}
+
+func (pm *sourcePathProbeManager) addWithBudgetLocked(tx sourcePathProbeTx, maxPeers, maxBurst int) sourcePathProbeAddResult {
 	if pm.pending == nil {
 		pm.pending = make(map[stun.TxID]sourcePathProbeTx)
 	}
 	pm.pruneExpiredLocked(tx.at)
+	if maxPeers <= 0 {
+		maxPeers = sourcePathProbeMaxPeers
+	}
+	if maxBurst <= 0 {
+		maxBurst = sourcePathProbeMaxBurst
+	}
+
+	var (
+		peerSeen    bool
+		peerPending int
+		peerCount   int
+		seenPeers   = make(map[key.DiscoPublic]struct{})
+	)
+	for _, pending := range pm.pending {
+		if pending.dstDisco == tx.dstDisco {
+			peerSeen = true
+			peerPending++
+		}
+		if _, ok := seenPeers[pending.dstDisco]; ok {
+			continue
+		}
+		seenPeers[pending.dstDisco] = struct{}{}
+		peerCount++
+	}
+	if !peerSeen && peerCount >= maxPeers {
+		metricSourcePathProbePeerBudgetDropped.Add(1)
+		return sourcePathProbePeerBudgetExceeded
+	}
+	if peerPending >= maxBurst {
+		metricSourcePathProbeBurstBudgetDropped.Add(1)
+		return sourcePathProbeBurstBudgetExceeded
+	}
 	pm.pending[tx.txid] = tx
+	return sourcePathProbeAdded
 }
 
 func (pm *sourcePathProbeManager) forgetLocked(txid stun.TxID) {
@@ -237,7 +290,7 @@ func (c *Conn) sendSourcePathDiscoPing(source sourceRxMeta, dst epAddr, dstKey k
 		return false, errors.New("unknown peer")
 	}
 	di := c.discoInfoForKnownPeerLocked(dstDisco)
-	c.sourceProbes.addLocked(sourcePathProbeTx{
+	addResult := c.sourceProbes.addLocked(sourcePathProbeTx{
 		txid:     txid,
 		dst:      dst,
 		dstDisco: dstDisco,
@@ -245,6 +298,18 @@ func (c *Conn) sendSourcePathDiscoPing(source sourceRxMeta, dst epAddr, dstKey k
 		at:       mono.Now(),
 		size:     size,
 	})
+	switch addResult {
+	case sourcePathProbeAdded:
+	case sourcePathProbePeerBudgetExceeded:
+		c.mu.Unlock()
+		return false, errSourcePathProbePeerBudgetExceeded
+	case sourcePathProbeBurstBudgetExceeded:
+		c.mu.Unlock()
+		return false, errSourcePathProbeBurstBudgetExceeded
+	default:
+		c.mu.Unlock()
+		return false, errSourcePathUnavailable
+	}
 	c.mu.Unlock()
 
 	pkt := make([]byte, 0, 512)
