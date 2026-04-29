@@ -63,6 +63,7 @@ func TestSourcePathProbeManagerHandlesMatchingPong(t *testing.T) {
 	src := epAddr{ap: netip.MustParseAddrPort("192.0.2.3:41641")}
 	pongSrc := netip.MustParseAddrPort("198.51.100.1:41641")
 	var sender key.DiscoPublic
+	acceptedBefore := metricSourcePathProbePongAccepted.Value()
 
 	pm.addLocked(sourcePathProbeTx{
 		txid:     txid,
@@ -88,6 +89,9 @@ func TestSourcePathProbeManagerHandlesMatchingPong(t *testing.T) {
 	}
 	if sample.dst != dst || sample.pongFrom != src || sample.pongSrc != pongSrc || sample.source != source {
 		t.Fatalf("sample = %+v, want dst=%v pongFrom=%v pongSrc=%v source=%+v", sample, dst, src, pongSrc, source)
+	}
+	if got := metricSourcePathProbePongAccepted.Value() - acceptedBefore; got != 1 {
+		t.Fatalf("accepted pong metric delta = %d, want 1", got)
 	}
 }
 
@@ -135,6 +139,7 @@ func TestSourcePathProbeManagerPrunesExpiredProbes(t *testing.T) {
 	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 3}
 	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
 	now := mono.Now()
+	expiredBefore := metricSourcePathProbePendingExpired.Value()
 
 	pm.addLocked(sourcePathProbeTx{
 		txid:   oldTxID,
@@ -157,6 +162,9 @@ func TestSourcePathProbeManagerPrunesExpiredProbes(t *testing.T) {
 	if _, ok := pm.pending[oldTxID]; ok {
 		t.Fatal("expired source-path probe remains pending")
 	}
+	if got := metricSourcePathProbePendingExpired.Value() - expiredBefore; got != 1 {
+		t.Fatalf("expired pending metric delta = %d, want 1", got)
+	}
 }
 
 func TestSourcePathProbeManagerConsumesExpiredPong(t *testing.T) {
@@ -170,6 +178,8 @@ func TestSourcePathProbeManagerConsumesExpiredPong(t *testing.T) {
 	dst := epAddr{ap: netip.MustParseAddrPort("[2001:db8::1]:41641")}
 	src := epAddr{ap: netip.MustParseAddrPort("[2001:db8::2]:41641")}
 	var sender key.DiscoPublic
+	expiredBefore := metricSourcePathProbePongExpired.Value()
+	acceptedBefore := metricSourcePathProbePongAccepted.Value()
 
 	pm.addLocked(sourcePathProbeTx{
 		txid:     txid,
@@ -187,6 +197,12 @@ func TestSourcePathProbeManagerConsumesExpiredPong(t *testing.T) {
 	}
 	if got := pm.samplesLenLocked(); got != 0 {
 		t.Fatalf("samples after expired pong = %d, want 0", got)
+	}
+	if got := metricSourcePathProbePongExpired.Value() - expiredBefore; got != 1 {
+		t.Fatalf("expired pong metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathProbePongAccepted.Value() - acceptedBefore; got != 0 {
+		t.Fatalf("accepted pong metric delta after expired pong = %d, want 0", got)
 	}
 }
 

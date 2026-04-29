@@ -165,10 +165,15 @@ func (pm *sourcePathProbeManager) bestCandidateLocked(dst epAddr, sources []sour
 }
 
 func (pm *sourcePathProbeManager) pruneExpiredLocked(now mono.Time) {
+	var expired int64
 	for txid, tx := range pm.pending {
 		if now.Sub(tx.at) >= pingTimeoutDuration {
 			delete(pm.pending, txid)
+			expired++
 		}
+	}
+	if expired > 0 {
+		metricSourcePathProbePendingExpired.Add(expired)
 	}
 }
 
@@ -184,6 +189,7 @@ func (pm *sourcePathProbeManager) handlePongLocked(pong *disco.Pong, sender key.
 	now := mono.Now()
 	if now.Sub(tx.at) >= pingTimeoutDuration {
 		delete(pm.pending, txid)
+		metricSourcePathProbePongExpired.Add(1)
 		return true
 	}
 	if tx.source != rxMeta || tx.dstDisco != sender {
@@ -204,6 +210,7 @@ func (pm *sourcePathProbeManager) handlePongLocked(pong *disco.Pong, sender key.
 		copy(pm.samples, pm.samples[len(pm.samples)-sourcePathProbeHistoryLimit:])
 		pm.samples = pm.samples[:sourcePathProbeHistoryLimit]
 	}
+	metricSourcePathProbePongAccepted.Add(1)
 	return true
 }
 
