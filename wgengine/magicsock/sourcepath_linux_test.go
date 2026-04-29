@@ -287,6 +287,89 @@ func TestSourcePathDataSendSourceAutomaticCandidateDualStack(t *testing.T) {
 	}
 }
 
+func TestSourcePathDataSendSourceNonDirectGuardDualStack(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 23
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+	c.sourcePath.aux6.setID(sourceIPv6SocketID)
+	c.sourcePath.aux6.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux6Bound = true
+
+	source4 := c.sourcePath.aux4.rxMeta()
+	source6 := c.sourcePath.aux6.rxMeta()
+	direct4 := epAddr{ap: netip.MustParseAddrPort("192.0.2.10:41641")}
+	direct6 := epAddr{ap: netip.MustParseAddrPort("[2001:db8::10]:41641")}
+	var relayVNI packet.VirtualNetworkID
+	relayVNI.Set(1)
+	relay4 := epAddr{ap: direct4.ap, vni: relayVNI}
+	relay6 := epAddr{ap: direct6.ap, vni: relayVNI}
+
+	if got := c.sourcePathDataSendSource(direct4); got != source4 {
+		t.Fatalf("forced direct IPv4 source = %+v, want %+v", got, source4)
+	}
+	if got := c.sourcePathDataSendSource(direct6); got != source6 {
+		t.Fatalf("forced direct IPv6 source = %+v, want %+v", got, source6)
+	}
+	if got := c.sourcePathDataSendSource(relay4); !got.isPrimary() {
+		t.Fatalf("forced non-direct IPv4 source = %+v, want primary", got)
+	}
+	if got := c.sourcePathDataSendSource(relay6); !got.isPrimary() {
+		t.Fatalf("forced non-direct IPv6 source = %+v, want primary", got)
+	}
+
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+	now := mono.Now()
+	c.mu.Lock()
+	c.sourceProbes.pending = map[stun.TxID]sourcePathProbeTx{
+		stun.NewTxID(): {dst: direct4, source: source4, at: now},
+		stun.NewTxID(): {dst: direct6, source: source6, at: now},
+	}
+	c.sourceProbes.samples = []sourcePathProbeSample{
+		{dst: direct4, source: source4, latency: 6 * time.Millisecond, at: now},
+		{dst: direct6, source: source6, latency: 7 * time.Millisecond, at: now},
+		{dst: relay4, source: source4, latency: time.Millisecond, at: now},
+		{dst: relay6, source: source6, latency: time.Millisecond, at: now},
+	}
+	beforePending, beforeSamples := c.sourceProbes.pendingLenLocked(), c.sourceProbes.samplesLenLocked()
+	c.mu.Unlock()
+
+	if got := c.sourcePathDataSendSource(direct4); got != source4 {
+		t.Fatalf("automatic direct IPv4 source = %+v, want %+v", got, source4)
+	}
+	if got := c.sourcePathDataSendSource(direct6); got != source6 {
+		t.Fatalf("automatic direct IPv6 source = %+v, want %+v", got, source6)
+	}
+	if got := c.sourcePathDataSendSource(relay4); !got.isPrimary() {
+		t.Fatalf("automatic non-direct IPv4 source = %+v, want primary", got)
+	}
+	if got := c.sourcePathDataSendSource(relay6); !got.isPrimary() {
+		t.Fatalf("automatic non-direct IPv6 source = %+v, want primary", got)
+	}
+
+	c.mu.Lock()
+	afterPending, afterSamples := c.sourceProbes.pendingLenLocked(), c.sourceProbes.samplesLenLocked()
+	c.mu.Unlock()
+	if afterPending != beforePending {
+		t.Fatalf("non-direct guard mutated pending probes: got %d want %d", afterPending, beforePending)
+	}
+	if afterSamples != beforeSamples {
+		t.Fatalf("non-direct guard mutated samples: got %d want %d", afterSamples, beforeSamples)
+	}
+}
+
 func TestSourcePathRebindDisabledClosesAuxAndClearsState(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
