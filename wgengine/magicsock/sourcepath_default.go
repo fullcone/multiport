@@ -13,6 +13,8 @@ import (
 
 func (c *Conn) sourcePathReceiveFuncs() []conn.ReceiveFunc { return nil }
 
+func sourcePathAuxSocketCount() int { return 0 }
+
 func (c *Conn) sourcePathProbeSources(is4 bool) []sourceRxMeta { return nil }
 
 func (c *Conn) sourcePathDataSendSource(dst epAddr) sourceRxMeta { return primarySourceRxMeta }
