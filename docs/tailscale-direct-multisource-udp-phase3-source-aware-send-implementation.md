@@ -111,6 +111,9 @@ selection.
   received packet source port is the selected auxiliary socket port.
 - Adds `TestSourcePathWriteWireGuardBatchToRejectsStaleAuxSource`, proving
   stale auxiliary source metadata is rejected after a generation mismatch.
+- Adds `TestSendUDPBatchFromSourceAuxErrorDoesNotRebind`, proving IPv4 and
+  IPv6 auxiliary-source send errors return locally and leave the primary
+  rebind throttle state unchanged.
 
 `envknob/envknob.go`
 
@@ -204,6 +207,20 @@ Results:
 - WSL Ubuntu-24.04 `go test ./wgengine/magicsock ./envknob`: passed.
 - Windows `go test ./wgengine/magicsock ./envknob`: passed.
 
+Additional auxiliary-send error isolation validation on 2026-04-29:
+
+```powershell
+wsl -d Ubuntu-24.04 -- bash -lc 'cd /mnt/c/other_project/fullcone && go test ./wgengine/magicsock -run "Test(SendUDPBatchFromSourceAuxErrorDoesNotRebind|SendUDPBatchFromSourceAuxDualStackLoopback|SourcePathWriteWireGuardBatchToRejectsStaleAuxSource|SourcePathDataSendSourceForcedAuxDualStack)" -count=1 -v'
+```
+
+Results:
+
+- `TestSendUDPBatchFromSourceAuxErrorDoesNotRebind`: passed for IPv4 and IPv6.
+  A failing auxiliary packet conn returned `EPERM` through
+  `sendUDPBatchFromSource`, and `lastErrRebind` stayed at its pre-call
+  sentinel value. This directly covers the Phase 3 property that auxiliary-only
+  send errors do not invoke primary socket rebind handling.
+
 Runtime validation still required in a Linux dual-node testbed:
 
 - packet capture proving IPv4 WireGuard data can leave the IPv4 auxiliary
@@ -214,8 +231,8 @@ Runtime validation still required in a Linux dual-node testbed:
   real peer session;
 - peer decrypt/response confirmation for both families;
 - primary fallback confirmation after forced auxiliary send failure;
-- confirmation that primary rebind counters/logs do not change because of an
-  auxiliary-only send error;
+- optional runtime log/counter confirmation of the same no-primary-rebind
+  property already covered by `TestSendUDPBatchFromSourceAuxErrorDoesNotRebind`;
 - confirmation that `lazyEndpoint` remains on the original primary send path.
 
 ## Codex Review
@@ -243,11 +260,13 @@ Requested on PR #1:
 
 PR startup check on 2026-04-29:
 
-- Two older Phase 2 inline review threads still appear unresolved in the GitHub
-  UI:
-  - `PRRT_kwDOSPBZuM5-NLPH`: auxiliary probes must not advertise non-primary
+- Two older Phase 2 inline review threads were rechecked against the current
+  source and marked resolved after verifying the corresponding fixes:
+  - `PRRT_kwDOSPBZuM5-NLPH`: auxiliary probes now use the source-path probe
+    request path instead of advertising auxiliary sockets as ordinary peer
     endpoints.
-  - `PRRT_kwDOSPBZuM5-NLPK`: unsatisfied source-path probe TxIDs need expiry.
+  - `PRRT_kwDOSPBZuM5-NLPK`: unsatisfied source-path probe TxIDs are pruned and
+    expired Pongs are consumed without producing samples.
 - Both findings were addressed by the Phase 2 feedback fix and recorded in
   `docs/tailscale-direct-multisource-udp-phase2-dualstack-implementation.md`.
 - The follow-up Codex review for that fix reported no major issues:
@@ -259,8 +278,8 @@ Phase 3 documentation follow-up review checkpoint on 2026-04-29:
 - Later PR refresh observed Codex response:
   `https://github.com/fullcone/multiport/pull/1#issuecomment-4338125251`
 - Codex reported no major issues for the Phase 3 documentation update.
-- The two older Phase 2 inline threads still appear unresolved in the GitHub UI,
-  but no newer review has contradicted the Phase 2 fixes.
+- The two older Phase 2 inline threads are now resolved after the startup
+  source check described above.
 
 ## Current Status
 
@@ -268,6 +287,6 @@ Phase 3 source-aware data-send plumbing is implemented for IPv4 and IPv6 behind
 a manual debug forcing gate. Codex review found no major Phase 3 code issues.
 The Linux dual-stack source-selection unit path and local loopback egress path
 now pass under WSL Ubuntu-24.04, including IPv4 and IPv6 auxiliary source-port
-verification plus stale-generation rejection. It is not yet an automatic
-path-selection feature, and true dual-node packet-capture validation remains
-pending.
+verification, stale-generation rejection, and auxiliary-send error isolation
+from primary rebind handling. It is not yet an automatic path-selection
+feature, and true dual-node packet-capture validation remains pending.
