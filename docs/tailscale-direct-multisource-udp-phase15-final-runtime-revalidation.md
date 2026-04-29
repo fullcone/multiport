@@ -5,8 +5,9 @@ Date: 2026-04-29
 This document records the Phase 15 Linux dual-node runtime revalidation for
 source-selected direct UDP sends in `fullcone/multiport`.
 
-No production code changed in this phase. This phase re-ran the runtime tests on
-the current PR head and records the evidence.
+No production code changed in this phase. This phase re-ran the runtime tests in
+the local PR checkout at `C:\other_project\fullcone` and WSL path
+`/mnt/c/other_project/fullcone`; the tested checkout SHA is recorded below.
 
 ## PR Review Gate
 
@@ -24,6 +25,38 @@ Current PR feedback state before this revalidation:
 - All known inline review threads were resolved.
 - No new current unresolved blocking review thread was present, so validation
   continued under the automatic flow rule.
+
+## Phase 15 Feedback Fix Gate
+
+Codex opened one Phase 15 documentation feedback thread after the initial
+runtime revalidation record:
+
+- Review request:
+  `https://github.com/fullcone/multiport/pull/1#issuecomment-4343916482`
+- Inline review thread: `PRRT_kwDOSPBZuM5-cKZI`
+- Inline review comment: `PRRC_kwDOSPBZuM68bEbP`
+- Feedback: the document recorded the WSL checkout path but did not record the
+  actual tested SHA from that checkout.
+
+This update addresses the feedback by recording the tested checkout identity and
+re-running the same Linux dual-node runtime validation command with
+`git rev-parse HEAD` printed immediately before `go test`.
+
+## Tested Checkout Identity
+
+- Windows checkout: `C:\other_project\fullcone`
+- WSL checkout: `/mnt/c/other_project/fullcone`
+- Phase 15 PR head before this feedback fix:
+  `92c72267198f5b26627d4c287b6ce51297015441`
+- The validation command below printed:
+  `92c72267198f5b26627d4c287b6ce51297015441`
+- Production implementation head before Phase 15 doc-only commits:
+  `29f764970958dffe14ebdb6ce7b0fea28271931f`
+- `git diff --name-only 29f764970958dffe14ebdb6ce7b0fea28271931f..92c72267198f5b26627d4c287b6ce51297015441`
+  listed only
+  `docs/tailscale-direct-multisource-udp-phase15-final-runtime-revalidation.md`,
+  so the runtime behavior under test came from the same production code as the
+  pre-Phase-15 implementation head.
 
 ## Objective
 
@@ -72,17 +105,46 @@ Revalidate the runtime behavior after the Phase 14 lazy endpoint guard:
 
 ## Validation Command
 
-Completed local validation on 2026-04-29:
+Completed local validation on 2026-04-29 from the WSL PR checkout:
 
 ```powershell
-wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test ./wgengine/magicsock -run "TestSourcePath(ForcedAuxDualNodeRuntime|AutomaticAuxDualNodeRuntime)" -count=1 -v'
+wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'git rev-parse HEAD && go test ./wgengine/magicsock -run "TestSourcePath(ForcedAuxDualNodeRuntime|AutomaticAuxDualNodeRuntime)" -count=1 -v'
 ```
 
 Validation result:
 
 ```text
+92c72267198f5b26627d4c287b6ce51297015441
 PASS
-ok  	tailscale.com/wgengine/magicsock	0.165s
+ok  	tailscale.com/wgengine/magicsock	0.242s
+```
+
+Filtered revalidation evidence from the same checkout:
+
+```powershell
+wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'set -o pipefail; git rev-parse HEAD; go test ./wgengine/magicsock -run "TestSourcePath(ForcedAuxDualNodeRuntime|AutomaticAuxDualNodeRuntime)" -count=1 -v 2>&1 | grep -E "forced aux runtime path|automatic aux runtime path|srcsel: data send|--- PASS|^PASS$|^ok[[:space:]]"'
+```
+
+Filtered result:
+
+```text
+92c72267198f5b26627d4c287b6ce51297015441
+    sourcepath_linux_test.go:905: forced aux runtime path: aux=127.0.0.1:57723 primary=127.0.0.1:39024 peer=127.0.0.1:44044
+    logger.go:105: srcsel-dual-node-IPv4: m1: magicsock: srcsel: data send from source 1 to 127.0.0.1:44044 failed, retrying primary: write: operation not permitted
+    sourcepath_linux_test.go:905: forced aux runtime path: aux=[::1]:36932 primary=[::1]:46032 peer=[::1]:43797
+    logger.go:105: srcsel-dual-node-IPv6: m1: magicsock: srcsel: data send from source 2 to [::1]:43797 failed, retrying primary: write: operation not permitted
+--- PASS: TestSourcePathForcedAuxDualNodeRuntime (0.08s)
+    --- PASS: TestSourcePathForcedAuxDualNodeRuntime/IPv4 (0.05s)
+    --- PASS: TestSourcePathForcedAuxDualNodeRuntime/IPv6 (0.03s)
+    sourcepath_linux_test.go:1018: automatic aux runtime path: aux=127.0.0.1:59171 primary=127.0.0.1:58127 peer=127.0.0.1:55477 source={socketID:1 generation:1}
+    logger.go:105: srcsel-auto-dual-node-IPv4: m1: magicsock: srcsel: data send from source 1 to 127.0.0.1:55477 failed, retrying primary: write: operation not permitted
+    sourcepath_linux_test.go:1018: automatic aux runtime path: aux=[::1]:53524 primary=[::1]:46483 peer=[::1]:41341 source={socketID:2 generation:1}
+    logger.go:105: srcsel-auto-dual-node-IPv6: m1: magicsock: srcsel: data send from source 2 to [::1]:41341 failed, retrying primary: write: operation not permitted
+--- PASS: TestSourcePathAutomaticAuxDualNodeRuntime (0.12s)
+    --- PASS: TestSourcePathAutomaticAuxDualNodeRuntime/IPv4 (0.06s)
+    --- PASS: TestSourcePathAutomaticAuxDualNodeRuntime/IPv6 (0.06s)
+PASS
+ok  	tailscale.com/wgengine/magicsock	0.230s
 ```
 
 The WSL command printed the known localhost/NAT warning after the Go test
@@ -94,43 +156,45 @@ Forced auxiliary runtime path, IPv4:
 
 ```text
 === RUN   TestSourcePathForcedAuxDualNodeRuntime/IPv4
-sourcepath_linux_test.go:905: forced aux runtime path: aux=127.0.0.1:55753 primary=127.0.0.1:33189 peer=127.0.0.1:55936
-srcsel-dual-node-IPv4: m1: magicsock: srcsel: data send from source 1 to 127.0.0.1:55936 failed, retrying primary: write: operation not permitted
+sourcepath_linux_test.go:905: forced aux runtime path: aux=127.0.0.1:57723 primary=127.0.0.1:39024 peer=127.0.0.1:44044
+srcsel-dual-node-IPv4: m1: magicsock: srcsel: data send from source 1 to 127.0.0.1:44044 failed, retrying primary: write: operation not permitted
 ```
 
 Forced auxiliary runtime path, IPv6:
 
 ```text
 === RUN   TestSourcePathForcedAuxDualNodeRuntime/IPv6
-sourcepath_linux_test.go:905: forced aux runtime path: aux=[::1]:38061 primary=[::1]:54682 peer=[::1]:43487
-srcsel-dual-node-IPv6: m1: magicsock: srcsel: data send from source 2 to [::1]:43487 failed, retrying primary: write: operation not permitted
+sourcepath_linux_test.go:905: forced aux runtime path: aux=[::1]:36932 primary=[::1]:46032 peer=[::1]:43797
+srcsel-dual-node-IPv6: m1: magicsock: srcsel: data send from source 2 to [::1]:43797 failed, retrying primary: write: operation not permitted
 ```
 
 Automatic auxiliary runtime path, IPv4:
 
 ```text
 === RUN   TestSourcePathAutomaticAuxDualNodeRuntime/IPv4
-sourcepath_linux_test.go:1018: automatic aux runtime path: aux=127.0.0.1:56509 primary=127.0.0.1:56198 peer=127.0.0.1:53727 source={socketID:1 generation:1}
-srcsel-auto-dual-node-IPv4: m1: magicsock: srcsel: data send from source 1 to 127.0.0.1:53727 failed, retrying primary: write: operation not permitted
+sourcepath_linux_test.go:1018: automatic aux runtime path: aux=127.0.0.1:59171 primary=127.0.0.1:58127 peer=127.0.0.1:55477 source={socketID:1 generation:1}
+srcsel-auto-dual-node-IPv4: m1: magicsock: srcsel: data send from source 1 to 127.0.0.1:55477 failed, retrying primary: write: operation not permitted
 ```
 
 Automatic auxiliary runtime path, IPv6:
 
 ```text
 === RUN   TestSourcePathAutomaticAuxDualNodeRuntime/IPv6
-sourcepath_linux_test.go:1018: automatic aux runtime path: aux=[::1]:38497 primary=[::1]:59134 peer=[::1]:37670 source={socketID:2 generation:1}
-srcsel-auto-dual-node-IPv6: m1: magicsock: srcsel: data send from source 2 to [::1]:37670 failed, retrying primary: write: operation not permitted
+sourcepath_linux_test.go:1018: automatic aux runtime path: aux=[::1]:53524 primary=[::1]:46483 peer=[::1]:41341 source={socketID:2 generation:1}
+srcsel-auto-dual-node-IPv6: m1: magicsock: srcsel: data send from source 2 to [::1]:41341 failed, retrying primary: write: operation not permitted
 ```
 
 Pass summary:
 
 ```text
 --- PASS: TestSourcePathForcedAuxDualNodeRuntime (0.08s)
---- PASS: TestSourcePathAutomaticAuxDualNodeRuntime (0.06s)
---- PASS: TestSourcePathAutomaticAuxDualNodeRuntime/IPv4 (0.03s)
---- PASS: TestSourcePathAutomaticAuxDualNodeRuntime/IPv6 (0.03s)
+--- PASS: TestSourcePathForcedAuxDualNodeRuntime/IPv4 (0.05s)
+--- PASS: TestSourcePathForcedAuxDualNodeRuntime/IPv6 (0.03s)
+--- PASS: TestSourcePathAutomaticAuxDualNodeRuntime (0.12s)
+--- PASS: TestSourcePathAutomaticAuxDualNodeRuntime/IPv4 (0.06s)
+--- PASS: TestSourcePathAutomaticAuxDualNodeRuntime/IPv6 (0.06s)
 PASS
-ok  	tailscale.com/wgengine/magicsock	0.165s
+ok  	tailscale.com/wgengine/magicsock	0.230s
 ```
 
 ## Conclusion
