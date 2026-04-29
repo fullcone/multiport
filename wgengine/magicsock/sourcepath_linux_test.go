@@ -37,10 +37,10 @@ func TestSourcePathDataSendSourceForcedAuxDualStack(t *testing.T) {
 
 	var c Conn
 	c.sourcePath.generation = 7
-	c.sourcePath.aux4.id = sourceIPv4SocketID
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
 	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
 	c.sourcePath.aux4Bound = true
-	c.sourcePath.aux6.id = sourceIPv6SocketID
+	c.sourcePath.aux6.setID(sourceIPv6SocketID)
 	c.sourcePath.aux6.generation.Store(uint64(c.sourcePath.generation))
 	c.sourcePath.aux6Bound = true
 
@@ -107,10 +107,10 @@ func TestSourcePathBestCandidateObserveOnlyDoesNotSelectDataSource(t *testing.T)
 
 	var c Conn
 	c.sourcePath.generation = 17
-	c.sourcePath.aux4.id = sourceIPv4SocketID
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
 	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
 	c.sourcePath.aux4Bound = true
-	c.sourcePath.aux6.id = sourceIPv6SocketID
+	c.sourcePath.aux6.setID(sourceIPv6SocketID)
 	c.sourcePath.aux6.generation.Store(uint64(c.sourcePath.generation))
 	c.sourcePath.aux6Bound = true
 
@@ -210,7 +210,7 @@ func TestSendUDPBatchFromSourceAuxDualStackLoopback(t *testing.T) {
 			addr:     "127.0.0.1:0",
 			socketID: sourceIPv4SocketID,
 			bindAuxConn: func(c *Conn, pc nettype.PacketConn) {
-				c.sourcePath.aux4.id = sourceIPv4SocketID
+				c.sourcePath.aux4.setID(sourceIPv4SocketID)
 				c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
 				c.sourcePath.aux4.pconn.mu.Lock()
 				c.sourcePath.aux4.pconn.setConnLocked(pc, "udp4", 1)
@@ -224,7 +224,7 @@ func TestSendUDPBatchFromSourceAuxDualStackLoopback(t *testing.T) {
 			addr:     "[::1]:0",
 			socketID: sourceIPv6SocketID,
 			bindAuxConn: func(c *Conn, pc nettype.PacketConn) {
-				c.sourcePath.aux6.id = sourceIPv6SocketID
+				c.sourcePath.aux6.setID(sourceIPv6SocketID)
 				c.sourcePath.aux6.generation.Store(uint64(c.sourcePath.generation))
 				c.sourcePath.aux6.pconn.mu.Lock()
 				c.sourcePath.aux6.pconn.setConnLocked(pc, "udp6", 1)
@@ -284,7 +284,7 @@ func TestSourcePathWriteWireGuardBatchToRejectsStaleAuxSource(t *testing.T) {
 
 	var c Conn
 	c.sourcePath.generation = 11
-	c.sourcePath.aux4.id = sourceIPv4SocketID
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
 	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
 	c.sourcePath.aux4.pconn.mu.Lock()
 	c.sourcePath.aux4.pconn.setConnLocked(auxConn, "udp4", 1)
@@ -324,7 +324,7 @@ func TestSendUDPBatchFromSourceAuxErrorDoesNotRebind(t *testing.T) {
 			local:    &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345},
 			socketID: sourceIPv4SocketID,
 			bindAuxConn: func(c *Conn, pc nettype.PacketConn) {
-				c.sourcePath.aux4.id = sourceIPv4SocketID
+				c.sourcePath.aux4.setID(sourceIPv4SocketID)
 				c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
 				c.sourcePath.aux4.pconn.mu.Lock()
 				c.sourcePath.aux4.pconn.setConnLocked(pc, "udp4", 1)
@@ -338,7 +338,7 @@ func TestSendUDPBatchFromSourceAuxErrorDoesNotRebind(t *testing.T) {
 			local:    &net.UDPAddr{IP: net.ParseIP("::1"), Port: 12345},
 			socketID: sourceIPv6SocketID,
 			bindAuxConn: func(c *Conn, pc nettype.PacketConn) {
-				c.sourcePath.aux6.id = sourceIPv6SocketID
+				c.sourcePath.aux6.setID(sourceIPv6SocketID)
 				c.sourcePath.aux6.generation.Store(uint64(c.sourcePath.generation))
 				c.sourcePath.aux6.pconn.mu.Lock()
 				c.sourcePath.aux6.pconn.setConnLocked(pc, "udp6", 1)

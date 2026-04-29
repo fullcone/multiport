@@ -31,13 +31,20 @@ type sourcePathState struct {
 }
 
 type sourcePathSocket struct {
-	id         SourceSocketID
+	id         atomic.Uint32
 	generation atomic.Uint64
 	pconn      RebindingUDPConn
 }
 
+func (s *sourcePathSocket) setID(id SourceSocketID) {
+	s.id.Store(uint32(id))
+}
+
 func (s *sourcePathSocket) rxMeta() sourceRxMeta {
-	return sourceRxMeta{socketID: s.id, generation: sourceGeneration(s.generation.Load())}
+	return sourceRxMeta{
+		socketID:   SourceSocketID(s.id.Load()),
+		generation: sourceGeneration(s.generation.Load()),
+	}
 }
 
 func (m sourceRxMeta) isPrimary() bool {

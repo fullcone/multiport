@@ -55,9 +55,14 @@ data-send source selection, endpoint state, or primary rebind state.
 - Keeps the scoring implementation in `sourcePathProbeManager.bestCandidateLocked`.
 - Avoids nested `sourcePath.mu` and `Conn.mu` locking by snapshotting sources
   before acquiring `Conn.mu`.
+- Changes `sourcePathSocket.id` to an atomic field and routes rebind/setup
+  writes through `sourcePathSocket.setID`, so receive hot-path metadata reads
+  cannot race with auxiliary socket rebinds.
 
 `wgengine/magicsock/sourcepath_test.go`
 
+- Adds a race-oriented common test that concurrently updates
+  `sourcePathSocket` IDs while reading `rxMeta`.
 - Adds a common test proving the `Conn` boundary returns no candidate when
   there are probe samples but no current auxiliary probe source.
 - Proves the `Conn` boundary does not mutate pending probes or sample history.
@@ -104,6 +109,29 @@ Results:
 - WSL Ubuntu-24.04 `go test ./wgengine/magicsock ./envknob -count=1`: passed.
 - `git diff --check`: passed with only CRLF worktree warnings.
 
+Follow-up validation for the Codex P2 socket ID synchronization fix:
+
+```powershell
+go test -race ./wgengine/magicsock -run TestSourcePathSocketRxMetaConcurrentIDUpdate -count=1
+$env:CGO_ENABLED='1'; go test -race ./wgengine/magicsock -run TestSourcePathSocketRxMetaConcurrentIDUpdate -count=1
+go test ./wgengine/magicsock -run "TestSourcePath" -count=1
+go test ./wgengine/magicsock ./envknob -count=1
+wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test -race ./wgengine/magicsock -run TestSourcePathSocketRxMetaConcurrentIDUpdate -count=1'
+wsl.exe -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test ./wgengine/magicsock ./envknob -count=1'
+git diff --check
+```
+
+Results:
+
+- Windows `go test -race ...`: not runnable with default `CGO_ENABLED=0`.
+- Windows `CGO_ENABLED=1 go test -race ...`: not runnable because no `gcc`
+  exists in `%PATH%`.
+- Windows `go test ./wgengine/magicsock -run "TestSourcePath" -count=1`: passed.
+- Windows `go test ./wgengine/magicsock ./envknob -count=1`: passed.
+- WSL Ubuntu-24.04 `go test -race ./wgengine/magicsock -run TestSourcePathSocketRxMetaConcurrentIDUpdate -count=1`: passed.
+- WSL Ubuntu-24.04 `go test ./wgengine/magicsock ./envknob -count=1`: passed.
+- `git diff --check`: passed with only CRLF worktree warnings.
+
 ## PR Review Record
 
 Implementation commit:
@@ -132,6 +160,9 @@ Polling status recorded on 2026-04-29:
 Current audit state:
 
 - All earlier Codex review threads on PR #1 are resolved.
-- No Phase 4B-specific unresolved Codex finding has appeared yet.
-- Branch head remains ready for the next implementation phase unless a later
-  Codex response adds new feedback.
+- A later Codex response found one Phase 4B-specific P2 at
+  https://github.com/fullcone/multiport/pull/1#discussion_r3158651554:
+  `sourcePathSocket.rxMeta` could read `id` concurrently with rebind writes.
+- The P2 is valid and is fixed by making `sourcePathSocket.id` atomic and
+  adding `TestSourcePathSocketRxMetaConcurrentIDUpdate`, verified under WSL
+  Linux `go test -race`.

@@ -5,6 +5,7 @@ package magicsock
 
 import (
 	"net/netip"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +25,34 @@ func TestPrimarySourceRxMeta(t *testing.T) {
 	if (sourceRxMeta{socketID: sourceIPv4SocketID, generation: 1}).isPrimary() {
 		t.Fatal("auxiliary source metadata is marked primary")
 	}
+}
+
+func TestSourcePathSocketRxMetaConcurrentIDUpdate(t *testing.T) {
+	var s sourcePathSocket
+	s.setID(sourceIPv4SocketID)
+	s.generation.Store(17)
+
+	const iters = 10000
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iters; i++ {
+			s.setID(sourceIPv6SocketID)
+			s.setID(sourceIPv4SocketID)
+		}
+	}()
+
+	for i := 0; i < iters; i++ {
+		got := s.rxMeta()
+		if got.generation != 17 {
+			t.Fatalf("source generation = %d, want 17", got.generation)
+		}
+		if got.socketID != sourceIPv4SocketID && got.socketID != sourceIPv6SocketID {
+			t.Fatalf("source socket ID = %d, want IPv4 or IPv6 auxiliary", got.socketID)
+		}
+	}
+	wg.Wait()
 }
 
 func TestSourcePathProbeManagerHandlesMatchingPong(t *testing.T) {

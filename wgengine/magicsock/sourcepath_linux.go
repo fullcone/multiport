@@ -39,8 +39,8 @@ func (c *Conn) sourcePathReceiveFuncs() []conn.ReceiveFunc {
 
 	c.sourcePath.mu.Lock()
 	defer c.sourcePath.mu.Unlock()
-	c.sourcePath.aux4.id = sourceIPv4SocketID
-	c.sourcePath.aux6.id = sourceIPv6SocketID
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux6.setID(sourceIPv6SocketID)
 	c.ensureSourcePathPConnLocked(&c.sourcePath.aux4.pconn)
 	c.ensureSourcePathPConnLocked(&c.sourcePath.aux6.pconn)
 
@@ -138,9 +138,9 @@ func (c *Conn) rebindSourcePathSockets() error {
 	c.sourcePath.mu.Lock()
 	defer c.sourcePath.mu.Unlock()
 	c.sourcePath.generation++
-	c.sourcePath.aux4.id = sourceIPv4SocketID
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
 	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
-	c.sourcePath.aux6.id = sourceIPv6SocketID
+	c.sourcePath.aux6.setID(sourceIPv6SocketID)
 	c.sourcePath.aux6.generation.Store(uint64(c.sourcePath.generation))
 
 	err4 := c.bindSourcePathSocketLocked(&c.sourcePath.aux4.pconn, "udp4")
