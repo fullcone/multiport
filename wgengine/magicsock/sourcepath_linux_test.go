@@ -314,10 +314,30 @@ func TestSourcePathForcedAuxDualNodeRuntime(t *testing.T) {
 				base:     localhostListener{},
 				failures: map[netip.AddrPort]error{},
 			}
-			dm, _ := runDERPAndStun(t, logf, pl, netip.MustParseAddr("127.0.0.1"))
+			dm, cleanupDERP := runDERPAndStun(t, logf, pl, netip.MustParseAddr("127.0.0.1"))
+			t.Cleanup(cleanupDERP)
 			m1 := newMagicStack(t, logger.WithPrefix(logf, "m1: "), pl, dm)
+			t.Cleanup(m1.Close)
 			m2 := newMagicStack(t, logger.WithPrefix(logf, "m2: "), pl, dm)
-			meshStacks(logf, sourcePathRuntimeNetmapEndpoints(t, tt.want4, m1, m2), m1, m2)
+			t.Cleanup(m2.Close)
+
+			m1Primary, ok := primaryUDPAddrPort(t, m1.conn, tt.want4)
+			if !ok {
+				if tt.want4 {
+					t.Fatal("IPv4 primary socket was not bound for m1")
+				}
+				t.Skip("IPv6 primary socket was not bound for m1")
+			}
+			m2Primary, ok := primaryUDPAddrPort(t, m2.conn, tt.want4)
+			if !ok {
+				if tt.want4 {
+					t.Fatal("IPv4 primary socket was not bound for m2")
+				}
+				t.Skip("IPv6 primary socket was not bound for m2")
+			}
+
+			cleanupMesh := meshStacks(logf, sourcePathRuntimeNetmapEndpoints(t, []netip.AddrPort{m1Primary, m2Primary}), m1, m2)
+			t.Cleanup(cleanupMesh)
 
 			cleanupPing := newPinger(t, logf, m1, m2)
 			mustDirect(t, logf, m1, m2)
@@ -325,7 +345,7 @@ func TestSourcePathForcedAuxDualNodeRuntime(t *testing.T) {
 			cleanupPing()
 
 			auxLocal := waitForSourcePathAuxLocal(t, m1.conn, tt.want4)
-			primaryLocal := primaryUDPAddrPort(t, m1.conn, tt.want4)
+			primaryLocal := m1Primary
 			directPeer := currentDirectPeerAddr(t, m1, m2, tt.want4)
 			t.Logf("forced aux runtime path: aux=%v primary=%v peer=%v", auxLocal, primaryLocal, directPeer)
 
@@ -548,12 +568,19 @@ func waitForSourcePathAuxLocal(t *testing.T, c *Conn, want4 bool) netip.AddrPort
 	return netip.AddrPort{}
 }
 
-func primaryUDPAddrPort(t *testing.T, c *Conn, want4 bool) netip.AddrPort {
+func primaryUDPAddrPort(t *testing.T, c *Conn, want4 bool) (netip.AddrPort, bool) {
 	t.Helper()
+	var addr net.Addr
 	if want4 {
-		return udpConnAddrPort(t, c.pconn4.LocalAddr())
+		addr = c.pconn4.LocalAddr()
+	} else {
+		addr = c.pconn6.LocalAddr()
 	}
-	return udpConnAddrPort(t, c.pconn6.LocalAddr())
+	ap, ok := addrPortFromNetAddr(addr)
+	if !ok || !ap.IsValid() || ap.Addr().Is4() != want4 {
+		return netip.AddrPort{}, false
+	}
+	return ap, true
 }
 
 func currentDirectPeerAddr(t *testing.T, src, dst *magicStack, want4 bool) netip.AddrPort {
@@ -572,15 +599,8 @@ func currentDirectPeerAddr(t *testing.T, src, dst *magicStack, want4 bool) netip
 	return ap
 }
 
-func sourcePathRuntimeNetmapEndpoints(t *testing.T, want4 bool, stacks ...*magicStack) func(int, *netmap.NetworkMap) {
+func sourcePathRuntimeNetmapEndpoints(t *testing.T, primary []netip.AddrPort) func(int, *netmap.NetworkMap) {
 	t.Helper()
-	primary := make([]netip.AddrPort, len(stacks))
-	for i, stack := range stacks {
-		primary[i] = primaryUDPAddrPort(t, stack.conn, want4)
-		if primary[i].Addr().Is4() != want4 {
-			t.Fatalf("stack %d primary endpoint = %v, want IPv4=%v", i, primary[i], want4)
-		}
-	}
 	return func(idx int, nm *netmap.NetworkMap) {
 		for i, peerView := range nm.Peers {
 			peerStackIdx := i

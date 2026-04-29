@@ -255,6 +255,31 @@ Results:
 - The related Linux source-path test subset also passed after adding the
   runtime test.
 
+Codex review follow-up fix validation on 2026-04-29:
+
+```powershell
+gofmt -w wgengine\magicsock\sourcepath_linux_test.go
+wsl -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test ./wgengine/magicsock -run TestSourcePathForcedAuxDualNodeRuntime -count=1 -v'
+wsl -d Ubuntu-24.04 --cd /mnt/c/other_project/fullcone -- bash -lc 'go test ./wgengine/magicsock ./envknob -count=1'
+go test ./wgengine/magicsock ./envknob -count=1
+```
+
+Results:
+
+- `TestSourcePathForcedAuxDualNodeRuntime`: passed again for IPv4 and IPv6.
+  The rerun still recorded a WireGuard UDP packet from the forced auxiliary
+  source, then recorded the injected auxiliary `EPERM` followed by primary
+  fallback for each address family.
+- The runtime test now registers cleanup for the DERP/STUN fixture, both
+  `magicStack` instances, and the `meshStacks` goroutine before traffic starts.
+  The verbose rerun showed both nodes closing and STUN server shutdown after
+  each subtest.
+- IPv6 primary endpoint availability is checked before test netmap endpoint
+  injection. A host without usable `udp6` primary bind now skips the IPv6
+  runtime subtest before touching `pconn6.LocalAddr()` as an endpoint.
+- WSL Ubuntu-24.04 `go test ./wgengine/magicsock ./envknob -count=1`: passed.
+- Windows `go test ./wgengine/magicsock ./envknob -count=1`: passed.
+
 External packet-capture validation remains optional if out-of-process evidence
 is needed:
 
@@ -316,14 +341,30 @@ Phase 3 documentation follow-up review checkpoint on 2026-04-29:
 - The two older Phase 2 inline threads are now resolved after the startup
   source check described above.
 
+Phase 3 Linux runtime review checkpoint on 2026-04-29:
+
+- Codex reviewed commit `8f62f51a0` and found two P2 issues in
+  `TestSourcePathForcedAuxDualNodeRuntime`:
+  - the dual-node subtests created DERP/STUN, mesh, and magicStack resources
+    without per-subtest cleanup;
+  - the IPv6 path read `pconn6.LocalAddr()` during endpoint injection before
+    the IPv6 skip gate, which would fatal instead of skip on hosts without a
+    usable IPv6 UDP primary socket.
+- The follow-up patch registers the DERP/STUN cleanup closure, both
+  `magicStack.Close` calls, and `meshStacks` cleanup with `t.Cleanup` so the
+  mesh goroutine exits before stacks and DERP/STUN are closed.
+- The follow-up patch computes both primary endpoints before netmap injection
+  and skips the IPv6 subtest immediately if either node lacks a valid IPv6
+  primary UDP endpoint. IPv4 primary absence remains a test failure.
+
 ## Current Status
 
 Phase 3 source-aware data-send plumbing is implemented for IPv4 and IPv6 behind
-a manual debug forcing gate. Codex review found no major Phase 3 code issues.
-The Linux dual-stack source-selection unit path and local loopback egress path
-now pass under WSL Ubuntu-24.04, including IPv4 and IPv6 auxiliary source-port
-verification, stale-generation rejection, auxiliary-send error isolation from
-primary rebind handling, and real dual-node forced auxiliary WireGuard data
-egress with primary fallback for both families. It is not yet an automatic
-path-selection feature, and external packet-capture validation remains optional
-future evidence.
+a manual debug forcing gate. The latest Codex runtime-test review issues have
+been fixed locally. The Linux dual-stack source-selection unit path and local
+loopback egress path now pass under WSL Ubuntu-24.04, including IPv4 and IPv6
+auxiliary source-port verification, stale-generation rejection, auxiliary-send
+error isolation from primary rebind handling, and real dual-node forced
+auxiliary WireGuard data egress with primary fallback for both families. It is
+not yet an automatic path-selection feature, and external packet-capture
+validation remains optional future evidence.
