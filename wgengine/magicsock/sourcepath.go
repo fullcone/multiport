@@ -155,6 +155,11 @@ func (pm *sourcePathProbeManager) samplesLenLocked() int {
 	return len(pm.samples)
 }
 
+func (pm *sourcePathProbeManager) clearLocked() {
+	clear(pm.pending)
+	pm.samples = nil
+}
+
 func (c *Conn) sourcePathBestCandidate(dst epAddr) (sourcePathCandidateScore, bool) {
 	if !dst.isDirect() {
 		return sourcePathCandidateScore{}, false

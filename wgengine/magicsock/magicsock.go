@@ -3657,6 +3657,7 @@ func (c *Conn) Close() error {
 	c.pconn6.Close()
 	c.pconn4.Close()
 	c.closeSourcePathSockets()
+	c.sourceProbes.clearLocked()
 	if c.closeDisco4 != nil {
 		c.closeDisco4.Close()
 	}

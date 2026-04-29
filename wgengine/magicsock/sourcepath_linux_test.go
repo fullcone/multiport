@@ -287,6 +287,93 @@ func TestSourcePathDataSendSourceAutomaticCandidateDualStack(t *testing.T) {
 	}
 }
 
+func TestSourcePathRebindDisabledClosesAuxAndClearsState(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 29
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux6.setID(sourceIPv6SocketID)
+	c.sourcePath.aux6.generation.Store(uint64(c.sourcePath.generation))
+
+	auxErr := errors.New("unused source path packet conn")
+	aux4 := &failingSourcePathPacketConn{
+		local: net.UDPAddrFromAddrPort(netip.MustParseAddrPort("127.0.0.1:12345")),
+		err:   auxErr,
+	}
+	aux6 := &failingSourcePathPacketConn{
+		local: net.UDPAddrFromAddrPort(netip.MustParseAddrPort("[::1]:12345")),
+		err:   auxErr,
+	}
+
+	c.sourcePath.aux4.pconn.mu.Lock()
+	c.sourcePath.aux4.pconn.setConnLocked(aux4, "udp4", 1)
+	c.sourcePath.aux4.pconn.mu.Unlock()
+	c.sourcePath.aux6.pconn.mu.Lock()
+	c.sourcePath.aux6.pconn.setConnLocked(aux6, "udp6", 1)
+	c.sourcePath.aux6.pconn.mu.Unlock()
+	c.sourcePath.aux4Bound = true
+	c.sourcePath.aux6Bound = true
+
+	v4 := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
+	v6 := epAddr{ap: netip.MustParseAddrPort("[2001:db8::1]:41641")}
+	source4 := c.sourcePath.aux4.rxMeta()
+	source6 := c.sourcePath.aux6.rxMeta()
+	now := mono.Now()
+
+	c.mu.Lock()
+	c.sourceProbes.pending = map[stun.TxID]sourcePathProbeTx{
+		stun.NewTxID(): {dst: v4, source: source4, at: now},
+		stun.NewTxID(): {dst: v6, source: source6, at: now},
+	}
+	c.sourceProbes.samples = []sourcePathProbeSample{
+		{dst: v4, source: source4, latency: time.Millisecond, at: now},
+		{dst: v6, source: source6, latency: time.Millisecond, at: now},
+	}
+	c.mu.Unlock()
+
+	if err := c.rebindSourcePathSockets(); err != nil {
+		t.Fatal(err)
+	}
+
+	if !aux4.closed {
+		t.Fatal("disabled rebind did not close IPv4 auxiliary socket")
+	}
+	if !aux6.closed {
+		t.Fatal("disabled rebind did not close IPv6 auxiliary socket")
+	}
+
+	c.sourcePath.mu.Lock()
+	aux4Bound, aux6Bound := c.sourcePath.aux4Bound, c.sourcePath.aux6Bound
+	c.sourcePath.mu.Unlock()
+	if aux4Bound || aux6Bound {
+		t.Fatalf("disabled rebind left aux bound state set: aux4=%v aux6=%v", aux4Bound, aux6Bound)
+	}
+
+	c.mu.Lock()
+	pending, samples := c.sourceProbes.pendingLenLocked(), c.sourceProbes.samplesLenLocked()
+	c.mu.Unlock()
+	if pending != 0 || samples != 0 {
+		t.Fatalf("disabled rebind left source probe state: pending=%d samples=%d", pending, samples)
+	}
+	if got := c.sourcePathDataSendSource(v4); !got.isPrimary() {
+		t.Fatalf("disabled forced IPv4 source = %+v, want primary", got)
+	}
+	if got := c.sourcePathDataSendSource(v6); !got.isPrimary() {
+		t.Fatalf("disabled forced IPv6 source = %+v, want primary", got)
+	}
+}
+
 func TestSendUDPBatchFromSourceAuxDualStackLoopback(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
@@ -709,8 +796,9 @@ func TestSourcePathAutomaticAuxDualNodeRuntime(t *testing.T) {
 }
 
 type failingSourcePathPacketConn struct {
-	local *net.UDPAddr
-	err   error
+	local  *net.UDPAddr
+	err    error
+	closed bool
 }
 
 func (c *failingSourcePathPacketConn) WriteToUDPAddrPort([]byte, netip.AddrPort) (int, error) {
@@ -722,6 +810,7 @@ func (c *failingSourcePathPacketConn) ReadFromUDPAddrPort([]byte) (int, netip.Ad
 }
 
 func (c *failingSourcePathPacketConn) Close() error {
+	c.closed = true
 	return nil
 }
 

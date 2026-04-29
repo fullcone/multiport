@@ -176,6 +176,9 @@ func (c *Conn) sourcePathWriteTo(source sourceRxMeta, dst netip.AddrPort, pkt []
 func (c *Conn) rebindSourcePathSockets() error {
 	if sourcePathAuxSocketCount() == 0 {
 		c.closeSourcePathSockets()
+		c.mu.Lock()
+		c.sourceProbes.clearLocked()
+		c.mu.Unlock()
 		return nil
 	}
 
