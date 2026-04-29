@@ -90,6 +90,10 @@ TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE
 When that knob is unset, `sourcePathDataSendSource` continues to return the
 primary source for both IPv4 and IPv6 direct UDP destinations.
 
+Phase 5 later consumes this boundary only behind the separate explicit
+`TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE` gate. The Phase 4B invariant remains
+important: scorer observation by itself does not imply data-path selection.
+
 ## Validation
 
 Completed locally on 2026-04-29:

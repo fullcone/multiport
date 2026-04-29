@@ -29,10 +29,12 @@ func TestSourcePathDataSendSourceForcedAuxDualStack(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	})
 
 	var c Conn
@@ -99,10 +101,12 @@ func TestSourcePathBestCandidateObserveOnlyDoesNotSelectDataSource(t *testing.T)
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	})
 
 	var c Conn
@@ -187,14 +191,112 @@ func TestSourcePathBestCandidateObserveOnlyDoesNotSelectDataSource(t *testing.T)
 	}
 }
 
-func TestSendUDPBatchFromSourceAuxDualStackLoopback(t *testing.T) {
+func TestSourcePathDataSendSourceAutomaticCandidateDualStack(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
-	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "true")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 19
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+	c.sourcePath.aux6.setID(sourceIPv6SocketID)
+	c.sourcePath.aux6.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux6Bound = true
+
+	v4 := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
+	v4Other := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	v4NoSample := epAddr{ap: netip.MustParseAddrPort("192.0.2.3:41641")}
+	v6 := epAddr{ap: netip.MustParseAddrPort("[2001:db8::1]:41641")}
+	sources4 := c.sourcePathProbeSources(true)
+	sources6 := c.sourcePathProbeSources(false)
+	if len(sources4) != 1 || sources4[0].socketID != sourceIPv4SocketID {
+		t.Fatalf("IPv4 probe sources = %+v, want one IPv4 auxiliary source", sources4)
+	}
+	if len(sources6) != 1 || sources6[0].socketID != sourceIPv6SocketID {
+		t.Fatalf("IPv6 probe sources = %+v, want one IPv6 auxiliary source", sources6)
+	}
+
+	sentinel := time.Unix(654, 0)
+	c.lastErrRebind.Store(sentinel)
+	now := mono.Now()
+	stale4 := sourceRxMeta{socketID: sourceIPv4SocketID, generation: sourceGeneration(c.sourcePath.generation - 1)}
+
+	c.mu.Lock()
+	c.sourceProbes.pending = map[stun.TxID]sourcePathProbeTx{
+		stun.NewTxID(): {
+			dst:    v4,
+			source: sources4[0],
+			at:     now,
+		},
+	}
+	c.sourceProbes.samples = []sourcePathProbeSample{
+		{dst: v4, source: primarySourceRxMeta, latency: time.Millisecond, at: now.Add(-5 * time.Second)},
+		{dst: v4, source: stale4, latency: time.Millisecond, at: now.Add(-4 * time.Second)},
+		{dst: v4Other, source: sources4[0], latency: time.Millisecond, at: now.Add(-3 * time.Second)},
+		{dst: v4, source: sources4[0], latency: 8 * time.Millisecond, at: now.Add(-2 * time.Second)},
+		{dst: v4, source: sources4[0], latency: 6 * time.Millisecond, at: now.Add(-1 * time.Second)},
+		{dst: v6, source: sources6[0], latency: 10 * time.Millisecond, at: now.Add(-1 * time.Second)},
+	}
+	beforePending, beforeSamples := c.sourceProbes.pendingLenLocked(), c.sourceProbes.samplesLenLocked()
+	c.mu.Unlock()
+
+	if got := c.sourcePathDataSendSource(v4); got != sources4[0] {
+		t.Fatalf("automatic IPv4 data source = %+v, want %+v", got, sources4[0])
+	}
+	if got := c.sourcePathDataSendSource(v6); got != sources6[0] {
+		t.Fatalf("automatic IPv6 data source = %+v, want %+v", got, sources6[0])
+	}
+	if got := c.sourcePathDataSendSource(v4NoSample); !got.isPrimary() {
+		t.Fatalf("automatic no-sample IPv4 data source = %+v, want primary", got)
+	}
+
+	c.mu.Lock()
+	afterPending, afterSamples := c.sourceProbes.pendingLenLocked(), c.sourceProbes.samplesLenLocked()
+	c.mu.Unlock()
+	if afterPending != beforePending {
+		t.Fatalf("pending probes mutated by automatic source selection: got %d want %d", afterPending, beforePending)
+	}
+	if afterSamples != beforeSamples {
+		t.Fatalf("samples mutated by automatic source selection: got %d want %d", afterSamples, beforeSamples)
+	}
+	if got := c.lastErrRebind.Load(); !got.Equal(sentinel) {
+		t.Fatalf("automatic source selection updated lastErrRebind: got %v want %v", got, sentinel)
+	}
+
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux4")
+	if got := c.sourcePathDataSendSource(v6); !got.isPrimary() {
+		t.Fatalf("aux4 forced IPv6 source with auto enabled = %+v, want primary", got)
+	}
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux6")
+	if got := c.sourcePathDataSendSource(v4); !got.isPrimary() {
+		t.Fatalf("aux6 forced IPv4 source with auto enabled = %+v, want primary", got)
+	}
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
+	if got := c.sourcePathDataSendSource(v4); !got.isPrimary() {
+		t.Fatalf("auto-disabled IPv4 data source = %+v, want primary", got)
+	}
+}
+
+func TestSendUDPBatchFromSourceAuxDualStackLoopback(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	})
 
 	tests := []struct {
@@ -305,10 +407,12 @@ func TestSendUDPBatchFromSourceAuxErrorDoesNotRebind(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	})
 
 	tests := []struct {
@@ -397,10 +501,12 @@ func TestSourcePathForcedAuxDualNodeRuntime(t *testing.T) {
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
+			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 			t.Cleanup(func() {
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 			})
 
 			logf := logger.WithPrefix(t.Logf, "srcsel-dual-node-"+tt.name+": ")
@@ -468,6 +574,103 @@ func TestSourcePathForcedAuxDualNodeRuntime(t *testing.T) {
 			}
 			if got := m1.conn.lastErrRebind.Load(); !got.Equal(sentinel) {
 				t.Fatalf("aux fallback updated lastErrRebind: got %v want %v", got, sentinel)
+			}
+		})
+	}
+}
+
+func TestSourcePathAutomaticAuxDualNodeRuntime(t *testing.T) {
+	tests := []struct {
+		name  string
+		want4 bool
+	}{
+		{"IPv4", true},
+		{"IPv6", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "true")
+			t.Cleanup(func() {
+				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
+			})
+
+			logf := logger.WithPrefix(t.Logf, "srcsel-auto-dual-node-"+tt.name+": ")
+			pl := &recordingPacketListener{
+				base:     localhostListener{},
+				failures: map[netip.AddrPort]error{},
+			}
+			dm, cleanupDERP := runDERPAndStun(t, logf, pl, netip.MustParseAddr("127.0.0.1"))
+			t.Cleanup(cleanupDERP)
+			m1 := newMagicStack(t, logger.WithPrefix(logf, "m1: "), pl, dm)
+			t.Cleanup(m1.Close)
+			m2 := newMagicStack(t, logger.WithPrefix(logf, "m2: "), pl, dm)
+			t.Cleanup(m2.Close)
+
+			m1Primary, ok := primaryUDPAddrPort(t, m1.conn, tt.want4)
+			if !ok {
+				if tt.want4 {
+					t.Fatal("IPv4 primary socket was not bound for m1")
+				}
+				t.Skip("IPv6 primary socket was not bound for m1")
+			}
+			m2Primary, ok := primaryUDPAddrPort(t, m2.conn, tt.want4)
+			if !ok {
+				if tt.want4 {
+					t.Fatal("IPv4 primary socket was not bound for m2")
+				}
+				t.Skip("IPv6 primary socket was not bound for m2")
+			}
+
+			cleanupMesh := meshStacks(logf, sourcePathRuntimeNetmapEndpoints(t, []netip.AddrPort{m1Primary, m2Primary}), m1, m2)
+			t.Cleanup(cleanupMesh)
+
+			cleanupPing := newPinger(t, logf, m1, m2)
+			mustDirect(t, logf, m1, m2)
+			mustDirect(t, logf, m2, m1)
+			cleanupPing()
+
+			auxLocal := waitForSourcePathAuxLocal(t, m1.conn, tt.want4)
+			primaryLocal := m1Primary
+			directPeer := currentDirectPeerAddr(t, m1, m2, tt.want4)
+			directDst := epAddr{ap: directPeer}
+			selected := seedSourcePathAutomaticCandidate(t, m1.conn, directDst, tt.want4)
+			if got := m1.conn.sourcePathDataSendSource(directDst); got != selected {
+				t.Fatalf("automatic runtime selected source = %+v, want seeded candidate %+v", got, selected)
+			}
+			t.Logf("automatic aux runtime path: aux=%v primary=%v peer=%v source=%+v", auxLocal, primaryLocal, directPeer, selected)
+
+			sentinel := time.Unix(456, 0)
+			m1.conn.lastErrRebind.Store(sentinel)
+			pl.clearWrites()
+			transitOnePing(t, m1, m2)
+			writes := pl.writesSnapshot()
+			if !hasWireGuardWrite(writes, auxLocal, directPeer, false) {
+				t.Fatalf("automatic aux send did not emit a WireGuard UDP packet from aux %v to peer %v; writes=%v", auxLocal, directPeer, summarizeWrites(writes))
+			}
+			if got := m1.conn.lastErrRebind.Load(); !got.Equal(sentinel) {
+				t.Fatalf("successful automatic aux send updated lastErrRebind: got %v want %v", got, sentinel)
+			}
+
+			pl.setFailure(auxLocal, &net.OpError{Op: "write", Err: syscall.EPERM})
+			t.Cleanup(pl.clearFailures)
+			pl.clearWrites()
+			transitOnePing(t, m1, m2)
+			writes = pl.writesSnapshot()
+			if !hasWireGuardWrite(writes, auxLocal, directPeer, true) {
+				t.Fatalf("automatic aux failure did not try aux %v to peer %v first; writes=%v", auxLocal, directPeer, summarizeWrites(writes))
+			}
+			if !hasWireGuardWrite(writes, primaryLocal, directPeer, false) {
+				t.Fatalf("automatic aux failure did not fall back to primary %v to peer %v; writes=%v", primaryLocal, directPeer, summarizeWrites(writes))
+			}
+			if got := m1.conn.lastErrRebind.Load(); !got.Equal(sentinel) {
+				t.Fatalf("automatic aux fallback updated lastErrRebind: got %v want %v", got, sentinel)
 			}
 		})
 	}
@@ -691,6 +894,27 @@ func currentDirectPeerAddr(t *testing.T, src, dst *magicStack, want4 bool) netip
 		t.Fatalf("direct peer address family mismatch: got %v want IPv4=%v", ap, want4)
 	}
 	return ap
+}
+
+func seedSourcePathAutomaticCandidate(t *testing.T, c *Conn, dst epAddr, want4 bool) sourceRxMeta {
+	t.Helper()
+	sources := c.sourcePathProbeSources(want4)
+	if len(sources) != 1 {
+		t.Fatalf("source path probe sources for IPv4=%v = %+v, want one current auxiliary source", want4, sources)
+	}
+	now := mono.Now()
+	c.mu.Lock()
+	c.sourceProbes.samples = append(c.sourceProbes.samples, sourcePathProbeSample{
+		txid:     stun.NewTxID(),
+		dst:      dst,
+		pongFrom: dst,
+		pongSrc:  dst.ap,
+		source:   sources[0],
+		latency:  time.Millisecond,
+		at:       now,
+	})
+	c.mu.Unlock()
+	return sources[0]
 }
 
 func sourcePathRuntimeNetmapEndpoints(t *testing.T, primary []netip.AddrPort) func(int, *netmap.NetworkMap) {

@@ -19,6 +19,7 @@ var (
 	envknobSrcSelEnable          = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_ENABLE")
 	envknobSrcSelAuxSockets      = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS")
 	envknobSrcSelForceDataSource = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE")
+	envknobSrcSelAutoDataSource  = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE")
 )
 
 func sourcePathAuxSocketCount() int {
@@ -68,8 +69,16 @@ func (c *Conn) sourcePathProbeSources(is4 bool) []sourceRxMeta {
 	return []sourceRxMeta{c.sourcePath.aux6.rxMeta()}
 }
 
+func sourcePathForcedDataSourceMode() string {
+	return strings.ToLower(envknobSrcSelForceDataSource())
+}
+
 func sourcePathForcedDataSourceAllowsAddr(addr netip.Addr) bool {
-	switch strings.ToLower(envknobSrcSelForceDataSource()) {
+	return sourcePathForcedDataSourceModeAllowsAddr(sourcePathForcedDataSourceMode(), addr)
+}
+
+func sourcePathForcedDataSourceModeAllowsAddr(mode string, addr netip.Addr) bool {
+	switch mode {
 	case "aux":
 		return true
 	case "aux4", "ipv4", "v4":
@@ -82,9 +91,26 @@ func sourcePathForcedDataSourceAllowsAddr(addr netip.Addr) bool {
 }
 
 func (c *Conn) sourcePathDataSendSource(dst epAddr) sourceRxMeta {
-	if sourcePathAuxSocketCount() == 0 || !dst.isDirect() || !sourcePathForcedDataSourceAllowsAddr(dst.ap.Addr()) {
+	if sourcePathAuxSocketCount() == 0 || !dst.isDirect() {
 		return primarySourceRxMeta
 	}
+	if forceMode := sourcePathForcedDataSourceMode(); forceMode != "" {
+		if !sourcePathForcedDataSourceModeAllowsAddr(forceMode, dst.ap.Addr()) {
+			return primarySourceRxMeta
+		}
+		return c.sourcePathForcedDataSendSource(dst)
+	}
+	if !envknobSrcSelAutoDataSource() {
+		return primarySourceRxMeta
+	}
+	score, ok := c.sourcePathBestCandidate(dst)
+	if !ok {
+		return primarySourceRxMeta
+	}
+	return score.source
+}
+
+func (c *Conn) sourcePathForcedDataSendSource(dst epAddr) sourceRxMeta {
 	c.sourcePath.mu.Lock()
 	defer c.sourcePath.mu.Unlock()
 	switch {
