@@ -73,10 +73,29 @@ processes are restarted with the appropriate
 run from each end in each direction over both IPv4 and IPv6 tailnet
 addresses; then `magicsock_srcsel_*` counter metrics are sampled.
 
-Auth and pre-auth keys are short-lived headscale-issued tokens; the
-helpers in `scripts/srcsel-w7/` were used as the foundation, with
-W10-specific adapter scripts that target the host-host pair instead
-of the host-client pair (the original W7 only had one remote).
+Auth and pre-auth keys are short-lived headscale-issued tokens. The
+W10 orchestration helpers live in
+[`scripts/srcsel-w10/`](../scripts/srcsel-w10/) — they share the
+W7-style `SRCSEL_W7_*` env knobs for the headscale host and add a
+parallel `SRCSEL_W10_CLIENT_*` group for the second pair member.
+Run order:
+
+```
+scripts/srcsel-w10/
+  README.md             prerequisites + env-var contract + run order
+  .gitignore            excludes __pycache__/ and *.pyc
+  _pair.py              shared paramiko helper (host + client connections)
+  01-recon.py           OS / NIC / public-reach probe of both servers
+  02-upload-binaries.py sftp Linux binaries to /usr/local/bin/ on both
+  03-headscale-setup.py install + reconfigure headscale on host server
+  04-both-up.py         restart tailscaled on both with mode env
+                        (SRCSEL_W10_MODE = baseline | force | auto)
+  05-tsmp-test.py       bidirectional TSMP IPv4 + IPv6 + metric capture
+  06-sustained-ping.py  20-round sustained ping from host (exercises Phase 20)
+```
+
+These helpers are best-effort, one-time test harness; expect to
+tweak them for any other environment.
 
 ## Result 1 — Direct UDP Path Established Instantly
 
