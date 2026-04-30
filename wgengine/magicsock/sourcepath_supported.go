@@ -22,6 +22,8 @@ var (
 	envknobSrcSelAutoDataSource  = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE")
 	envknobSrcSelMaxPeers        = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PEERS")
 	envknobSrcSelMaxProbeBurst   = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST")
+	envknobSrcSelMaxPending      = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PENDING")
+	envknobSrcSelMaxSamples      = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_SAMPLES")
 )
 
 func sourcePathAuxSocketCount() int {
@@ -35,9 +37,16 @@ func sourcePathAuxSocketCount() int {
 	return min(n, 1)
 }
 
+// sourcePathProbeMaxPeerCount returns the policy cap on distinct peers with
+// pending probes. Zero means "unlimited" — the default for server deployments
+// where the probe traffic itself is negligible. A positive
+// TS_EXPERIMENTAL_SRCSEL_MAX_PEERS sets an explicit cap.
 func sourcePathProbeMaxPeerCount() int {
 	n := envknobSrcSelMaxPeers()
-	if n <= 0 {
+	if n < 0 {
+		return 0
+	}
+	if n == 0 {
 		return sourcePathProbeMaxPeers
 	}
 	return n
@@ -47,6 +56,26 @@ func sourcePathProbeMaxBurstCount() int {
 	n := envknobSrcSelMaxProbeBurst()
 	if n <= 0 {
 		return sourcePathProbeMaxBurst
+	}
+	return n
+}
+
+// sourcePathProbeHardPendingCount is the memory-safety hard cap on total
+// pending probes. <= 0 disables the cap (tests only).
+func sourcePathProbeHardPendingCount() int {
+	n := envknobSrcSelMaxPending()
+	if n == 0 {
+		return sourcePathProbeHardPendingCap
+	}
+	return n
+}
+
+// sourcePathProbeSampleLimitCount is the memory-safety hard cap on the total
+// number of probe samples retained globally. <= 0 disables the cap.
+func sourcePathProbeSampleLimitCount() int {
+	n := envknobSrcSelMaxSamples()
+	if n == 0 {
+		return sourcePathProbeHistoryLimit
 	}
 	return n
 }

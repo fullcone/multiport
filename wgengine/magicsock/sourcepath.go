@@ -18,9 +18,35 @@ import (
 )
 
 const (
-	sourcePathProbeHistoryLimit = 32
-	sourcePathProbeMaxPeers     = 32
-	sourcePathProbeMaxBurst     = 1
+	// sourcePathProbeHistoryLimit bounds the global sample buffer. A FIFO
+	// ring at this size meant a per-Conn ceiling regardless of peer count,
+	// so with N peers each pair was only guaranteed limit/N samples on
+	// average. Lift it to a memory-safety hard cap; freshness is enforced
+	// by sourcePathSampleTTL during scoring and by pruneExpiredSamplesLocked
+	// when new samples arrive. Override via TS_EXPERIMENTAL_SRCSEL_MAX_SAMPLES.
+	sourcePathProbeHistoryLimit = 100000
+
+	// sourcePathProbeMaxPeers is the default per-Conn cap on distinct peers
+	// with pending probes. Zero means no policy limit — server-class
+	// deployments may carry many peers and probe traffic itself is
+	// negligible. A non-zero override can still be configured via
+	// TS_EXPERIMENTAL_SRCSEL_MAX_PEERS.
+	sourcePathProbeMaxPeers = 0
+
+	// sourcePathProbeMaxBurst is the default cap on simultaneously pending
+	// probes per peer. Eight allows IPv4 + IPv6 plus a few concurrent samples
+	// to fill quickly; tests and tighter operational caps may override via
+	// TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST.
+	sourcePathProbeMaxBurst = 8
+
+	// sourcePathProbeHardPendingCap bounds the total number of pending
+	// probes across all peers. Unlike sourcePathProbeMaxPeers /
+	// sourcePathProbeMaxBurst this is a memory-safety hard cap, not a
+	// policy choice: it exists so a peer that never replies (for example
+	// because it does not recognize disco.SourcePathProbe) cannot grow the
+	// pending map without bound. Override only via
+	// TS_EXPERIMENTAL_SRCSEL_MAX_PENDING.
+	sourcePathProbeHardPendingCap = 100000
 
 	// sourcePathSampleTTL is the maximum age of a probe sample considered by
 	// the scorer. Older samples are skipped so a stale lucky measurement does
@@ -39,6 +65,7 @@ var (
 	errSourcePathUnavailable              = errors.New("magicsock: source path unavailable")
 	errSourcePathProbePeerBudgetExceeded  = errors.New("magicsock: source path probe peer budget exceeded")
 	errSourcePathProbeBurstBudgetExceeded = errors.New("magicsock: source path probe burst budget exceeded")
+	errSourcePathProbeHardCapExceeded     = errors.New("magicsock: source path probe pending hard cap exceeded")
 )
 
 type sourcePathState struct {
@@ -108,44 +135,62 @@ const (
 	sourcePathProbeAdded sourcePathProbeAddResult = iota
 	sourcePathProbePeerBudgetExceeded
 	sourcePathProbeBurstBudgetExceeded
+	sourcePathProbeHardCapExceeded
 )
 
 func (pm *sourcePathProbeManager) addLocked(tx sourcePathProbeTx) sourcePathProbeAddResult {
-	return pm.addWithBudgetLocked(tx, sourcePathProbeMaxPeerCount(), sourcePathProbeMaxBurstCount())
+	return pm.addWithBudgetLocked(tx, sourcePathProbeMaxPeerCount(), sourcePathProbeMaxBurstCount(), sourcePathProbeHardPendingCount())
 }
 
-func (pm *sourcePathProbeManager) addWithBudgetLocked(tx sourcePathProbeTx, maxPeers, maxBurst int) sourcePathProbeAddResult {
+// addWithBudgetLocked attempts to track tx as a pending probe. maxPeers <= 0
+// disables the per-peer-count policy cap (unlimited peers). maxBurst <= 0
+// falls back to the default burst constant. hardCap is the memory-safety hard
+// cap on total pending probes; <= 0 disables it (use only for tests).
+func (pm *sourcePathProbeManager) addWithBudgetLocked(tx sourcePathProbeTx, maxPeers, maxBurst, hardCap int) sourcePathProbeAddResult {
 	if pm.pending == nil {
 		pm.pending = make(map[stun.TxID]sourcePathProbeTx)
 	}
 	pm.pruneExpiredLocked(tx.at)
-	if maxPeers <= 0 {
-		maxPeers = sourcePathProbeMaxPeers
-	}
 	if maxBurst <= 0 {
 		maxBurst = sourcePathProbeMaxBurst
+	}
+
+	if hardCap > 0 && len(pm.pending) >= hardCap {
+		metricSourcePathProbeHardCapDropped.Add(1)
+		return sourcePathProbeHardCapExceeded
 	}
 
 	var (
 		peerSeen    bool
 		peerPending int
-		peerCount   int
-		seenPeers   = make(map[key.DiscoPublic]struct{})
 	)
-	for _, pending := range pm.pending {
-		if pending.dstDisco == tx.dstDisco {
-			peerSeen = true
-			peerPending++
+	if maxPeers > 0 {
+		var (
+			peerCount int
+			seenPeers = make(map[key.DiscoPublic]struct{})
+		)
+		for _, pending := range pm.pending {
+			if pending.dstDisco == tx.dstDisco {
+				peerSeen = true
+				peerPending++
+			}
+			if _, ok := seenPeers[pending.dstDisco]; ok {
+				continue
+			}
+			seenPeers[pending.dstDisco] = struct{}{}
+			peerCount++
 		}
-		if _, ok := seenPeers[pending.dstDisco]; ok {
-			continue
+		if !peerSeen && peerCount >= maxPeers {
+			metricSourcePathProbePeerBudgetDropped.Add(1)
+			return sourcePathProbePeerBudgetExceeded
 		}
-		seenPeers[pending.dstDisco] = struct{}{}
-		peerCount++
-	}
-	if !peerSeen && peerCount >= maxPeers {
-		metricSourcePathProbePeerBudgetDropped.Add(1)
-		return sourcePathProbePeerBudgetExceeded
+	} else {
+		// Unlimited peers: only count this peer's pending burst.
+		for _, pending := range pm.pending {
+			if pending.dstDisco == tx.dstDisco {
+				peerPending++
+			}
+		}
 	}
 	if peerPending >= maxBurst {
 		metricSourcePathProbeBurstBudgetDropped.Add(1)
@@ -288,6 +333,29 @@ func (pm *sourcePathProbeManager) pruneExpiredLocked(now mono.Time) {
 	}
 }
 
+// pruneExpiredSamplesLocked drops samples older than sourcePathSampleTTL.
+// Called on every Pong so the slice does not grow with stale samples that
+// the scorer would skip anyway.
+func (pm *sourcePathProbeManager) pruneExpiredSamplesLocked(now mono.Time) {
+	if len(pm.samples) == 0 {
+		return
+	}
+	n := 0
+	expired := int64(0)
+	for _, sample := range pm.samples {
+		if now.Sub(sample.at) > sourcePathSampleTTL {
+			expired++
+			continue
+		}
+		pm.samples[n] = sample
+		n++
+	}
+	pm.samples = pm.samples[:n]
+	if expired > 0 {
+		metricSourcePathProbeSamplesExpired.Add(expired)
+	}
+}
+
 func (pm *sourcePathProbeManager) handlePongLocked(pong *disco.Pong, sender key.DiscoPublic, src epAddr, rxMeta sourceRxMeta) bool {
 	if rxMeta.isPrimary() {
 		return false
@@ -307,6 +375,7 @@ func (pm *sourcePathProbeManager) handlePongLocked(pong *disco.Pong, sender key.
 		return false
 	}
 	delete(pm.pending, txid)
+	pm.pruneExpiredSamplesLocked(now)
 
 	pm.samples = append(pm.samples, sourcePathProbeSample{
 		txid:     txid,
@@ -317,9 +386,11 @@ func (pm *sourcePathProbeManager) handlePongLocked(pong *disco.Pong, sender key.
 		latency:  now.Sub(tx.at),
 		at:       now,
 	})
-	if len(pm.samples) > sourcePathProbeHistoryLimit {
-		copy(pm.samples, pm.samples[len(pm.samples)-sourcePathProbeHistoryLimit:])
-		pm.samples = pm.samples[:sourcePathProbeHistoryLimit]
+	if hardCap := sourcePathProbeSampleLimitCount(); hardCap > 0 && len(pm.samples) > hardCap {
+		dropped := int64(len(pm.samples) - hardCap)
+		copy(pm.samples, pm.samples[len(pm.samples)-hardCap:])
+		pm.samples = pm.samples[:hardCap]
+		metricSourcePathProbeSamplesEvicted.Add(dropped)
 	}
 	metricSourcePathProbePongAccepted.Add(1)
 	return true

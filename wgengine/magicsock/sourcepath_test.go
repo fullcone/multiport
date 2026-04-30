@@ -222,7 +222,7 @@ func TestSourcePathProbeManagerEnforcesPeerBudget(t *testing.T) {
 		dstDisco: peerA,
 		source:   source,
 		at:       now,
-	}, 1, 2); got != sourcePathProbeAdded {
+	}, 1, 2, 0); got != sourcePathProbeAdded {
 		t.Fatalf("first peer add result = %v, want added", got)
 	}
 	if got := pm.addWithBudgetLocked(sourcePathProbeTx{
@@ -231,7 +231,7 @@ func TestSourcePathProbeManagerEnforcesPeerBudget(t *testing.T) {
 		dstDisco: peerA,
 		source:   source,
 		at:       now,
-	}, 1, 2); got != sourcePathProbeAdded {
+	}, 1, 2, 0); got != sourcePathProbeAdded {
 		t.Fatalf("same peer add result = %v, want added", got)
 	}
 	if got := pm.addWithBudgetLocked(sourcePathProbeTx{
@@ -240,7 +240,7 @@ func TestSourcePathProbeManagerEnforcesPeerBudget(t *testing.T) {
 		dstDisco: peerB,
 		source:   source,
 		at:       now,
-	}, 1, 2); got != sourcePathProbePeerBudgetExceeded {
+	}, 1, 2, 0); got != sourcePathProbePeerBudgetExceeded {
 		t.Fatalf("second peer add result = %v, want peer budget exceeded", got)
 	}
 	if got := pm.pendingLenLocked(); got != 2 {
@@ -268,7 +268,7 @@ func TestSourcePathProbeManagerEnforcesBurstBudget(t *testing.T) {
 		dstDisco: peerA,
 		source:   source4,
 		at:       now,
-	}, 2, 1); got != sourcePathProbeAdded {
+	}, 2, 1, 0); got != sourcePathProbeAdded {
 		t.Fatalf("first probe add result = %v, want added", got)
 	}
 	if got := pm.addWithBudgetLocked(sourcePathProbeTx{
@@ -277,7 +277,7 @@ func TestSourcePathProbeManagerEnforcesBurstBudget(t *testing.T) {
 		dstDisco: peerA,
 		source:   source6,
 		at:       now,
-	}, 2, 1); got != sourcePathProbeBurstBudgetExceeded {
+	}, 2, 1, 0); got != sourcePathProbeBurstBudgetExceeded {
 		t.Fatalf("same peer burst add result = %v, want burst budget exceeded", got)
 	}
 	if got := pm.addWithBudgetLocked(sourcePathProbeTx{
@@ -286,7 +286,7 @@ func TestSourcePathProbeManagerEnforcesBurstBudget(t *testing.T) {
 		dstDisco: peerB,
 		source:   source6,
 		at:       now,
-	}, 2, 1); got != sourcePathProbeAdded {
+	}, 2, 1, 0); got != sourcePathProbeAdded {
 		t.Fatalf("second peer add result = %v, want added", got)
 	}
 	if got := pm.pendingLenLocked(); got != 2 {
@@ -294,6 +294,89 @@ func TestSourcePathProbeManagerEnforcesBurstBudget(t *testing.T) {
 	}
 	if got := metricSourcePathProbeBurstBudgetDropped.Value() - droppedBefore; got != 1 {
 		t.Fatalf("burst budget metric delta = %d, want 1", got)
+	}
+}
+
+func TestSourcePathProbeManagerUnlimitedPeersByDefault(t *testing.T) {
+	var pm sourcePathProbeManager
+	now := mono.Now()
+	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 5}
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+
+	const peerCount = 100
+	for i := 0; i < peerCount; i++ {
+		peer := key.NewDisco().Public()
+		got := pm.addWithBudgetLocked(sourcePathProbeTx{
+			txid:     stun.NewTxID(),
+			dst:      dst,
+			dstDisco: peer,
+			source:   source,
+			at:       now,
+		}, 0, sourcePathProbeMaxBurst, 0) // 0 peers = unlimited
+		if got != sourcePathProbeAdded {
+			t.Fatalf("add result for peer %d = %v, want added (peer cap should be unlimited)", i, got)
+		}
+	}
+	if got := pm.pendingLenLocked(); got != peerCount {
+		t.Fatalf("pending probes = %d, want %d", got, peerCount)
+	}
+}
+
+func TestSourcePathProbeManagerEnforcesHardPendingCap(t *testing.T) {
+	var pm sourcePathProbeManager
+	now := mono.Now()
+	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 5}
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	droppedBefore := metricSourcePathProbeHardCapDropped.Value()
+
+	const hardCap = 4
+	for i := 0; i < hardCap; i++ {
+		peer := key.NewDisco().Public()
+		got := pm.addWithBudgetLocked(sourcePathProbeTx{
+			txid:     stun.NewTxID(),
+			dst:      dst,
+			dstDisco: peer,
+			source:   source,
+			at:       now,
+		}, 0, sourcePathProbeMaxBurst, hardCap)
+		if got != sourcePathProbeAdded {
+			t.Fatalf("add %d before hard cap = %v, want added", i, got)
+		}
+	}
+	got := pm.addWithBudgetLocked(sourcePathProbeTx{
+		txid:     stun.NewTxID(),
+		dst:      dst,
+		dstDisco: key.NewDisco().Public(),
+		source:   source,
+		at:       now,
+	}, 0, sourcePathProbeMaxBurst, hardCap)
+	if got != sourcePathProbeHardCapExceeded {
+		t.Fatalf("add at hard cap = %v, want hard cap exceeded", got)
+	}
+	if pm.pendingLenLocked() != hardCap {
+		t.Fatalf("pending after hard cap = %d, want %d", pm.pendingLenLocked(), hardCap)
+	}
+	if delta := metricSourcePathProbeHardCapDropped.Value() - droppedBefore; delta != 1 {
+		t.Fatalf("hard cap metric delta = %d, want 1", delta)
+	}
+}
+
+func TestSourcePathProbeManagerSamplePruneOnPongAndCap(t *testing.T) {
+	var pm sourcePathProbeManager
+	now := mono.Now()
+	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 5}
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+
+	// Pre-populate with TTL-stale samples; pruneExpiredSamplesLocked should
+	// drop them all.
+	pm.samples = []sourcePathProbeSample{
+		{dst: dst, source: source, latency: time.Millisecond, at: now.Add(-2 * sourcePathSampleTTL)},
+		{dst: dst, source: source, latency: time.Millisecond, at: now.Add(-(sourcePathSampleTTL + time.Second))},
+		{dst: dst, source: source, latency: time.Millisecond, at: now.Add(-(sourcePathSampleTTL + 2*time.Second))},
+	}
+	pm.pruneExpiredSamplesLocked(now)
+	if got := pm.samplesLenLocked(); got != 0 {
+		t.Fatalf("after prune of all-stale samples len = %d, want 0", got)
 	}
 }
 

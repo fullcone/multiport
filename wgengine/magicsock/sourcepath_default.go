@@ -23,6 +23,10 @@ func sourcePathProbeMaxPeerCount() int { return sourcePathProbeMaxPeers }
 
 func sourcePathProbeMaxBurstCount() int { return sourcePathProbeMaxBurst }
 
+func sourcePathProbeHardPendingCount() int { return sourcePathProbeHardPendingCap }
+
+func sourcePathProbeSampleLimitCount() int { return sourcePathProbeHistoryLimit }
+
 func (c *Conn) sourcePathWriteWireGuardBatchTo(source sourceRxMeta, dst epAddr, buffs [][]byte, offset int) error {
 	return errSourcePathUnavailable
 }
