@@ -8,21 +8,35 @@ when picked up by a phase doc.
 
 ## Phase 21 (candidate) — Dynamic multi-endpoint advertise
 
-**Problem.** A `tailscaled` server today advertises **one** NAT-mapped
-public endpoint, the one its primary socket's STUN exchange resolved.
-Operators who place a server behind several public IP:port front
-doors (multiple DNAT rules, e.g. `P1:port → S:port`,
-`P2:port → S:port`, `P3:port → S:port`) cannot get clients to use
-those alternative front doors: clients only know about the single
-STUN-discovered endpoint plus DERP relays, so the extra DNAT rules
-are dead weight.
+**Problem.** A `tailscaled` server today advertises a set of endpoints
+that magicsock's `determineEndpoints` (`wgengine/magicsock/magicsock.go`)
+gathers from a fixed list of *intrinsic* sources: STUN responses,
+NAT-PMP / PCP / UPnP port-mapping, locally-bound interface addresses,
+and a small static-config slot. The set is fanned out to peers via the
+control client's `cc.UpdateEndpoints` → `MapRequest.Endpoints` /
+`MapRequest.EndpointTypes` flow (`control/controlclient/auto.go`),
+landing on the control plane as `tailcfg.Node.Endpoints` and
+propagating outward as full netmap updates or
+`tailcfg.PeersChangedPatch.Endpoints` deltas.
+
+What is **missing** is a way to inject endpoints that live behind a
+DNAT layer that is **not** discoverable by any of those intrinsic
+mechanisms — e.g. multiple public IP:port front doors managed by a
+separate load-balancer / "rotating IPs against censorship" controller
+that DNATs `P1:port → S:port`, `P2:port → S:port`, etc. STUN cannot
+see those alternate front doors (the server's own STUN exchange goes
+out via *one* of them, returning *one* mapped tuple). Port-mapping
+protocols target the local NAT, not an upstream LB. Static config is
+restart-only. So extra DNAT rules are dead weight even though the
+underlying packets, if a client knew to send them, would arrive
+correctly at the server's primary socket.
 
 **Why this is *not* covered by Phase 1-20 srcsel.** Source-path
 selection (Phases 1-20 + W-series validation) is about the **sender**
 choosing which of its multiple local UDP sockets to send from. It
-does not change the **receiver**'s endpoint advertisement. The
-receiver still publishes one (`endpoint`, `socket`) tuple per
-socket, all derived from STUN.
+does not change which set of `(IP:port)` *destinations* the receiver
+advertises to its peers, nor whether those destinations include
+addresses that live on a separate machine.
 
 **User scenario making this concrete.** The operator wants:
 
@@ -45,37 +59,57 @@ That dynamic case is the load-bearing requirement; a static one-shot
      "endpoints": ["P1:41641", "P2:41641", "P3:41641"]
    }
    ```
-2. **Watcher in `magicsock`**: a goroutine that watches the file via
-   `fsnotify` (Linux inotify / macOS FSEvents / Windows
-   ReadDirectoryChangesW). On change:
-   - Re-read the file.
-   - Diff against the current set of "extra advertised endpoints".
-   - Push a synthetic `magicsock.endpointGather` cycle that includes
-     the new set alongside the STUN-derived primary.
-3. **Control plane propagation**: the gathered endpoint set is
-   already pushed to the control plane (headscale / Tailscale SaaS)
-   via the existing `Hostinfo.Endpoints` flow. Headscale fans out
-   the change as a peer-list update; existing clients receive it
-   over their long-poll netmap subscription within ~1 s.
-4. **Client side**: no change required. magicsock already iterates
-   over peer endpoints when establishing direct paths; a fresh set
-   means the next path probe will try the new IP:port.
+2. **Watcher inside magicsock's gather step**:
+   `Conn.determineEndpoints` already returns a `[]tailcfg.Endpoint`
+   built from `tailcfg.EndpointSTUN`, `EndpointPortMapped`,
+   `EndpointLocal`, `EndpointExplicitConf`, etc. Add a new
+   `EndpointExtraAdvertised` (or extend the `EndpointExplicitConf`
+   handling) with values read from this file. A `fsnotify`-based
+   watcher (Linux inotify / macOS FSEvents / Windows
+   ReadDirectoryChangesW) running in its own goroutine calls
+   `Conn.ReSTUN("extra-endpoints-changed")` on file change so the
+   normal endpoint-update path picks up the new set without bypassing
+   `setEndpoints` deduplication / change detection.
+3. **Control plane propagation**: re-uses the *existing* path —
+   `setEndpoints` → `epFunc` callback registered by `wgengine`
+   (`wgengine/userspace.go`) → `cc.UpdateEndpoints` (in
+   `ipnlocal/local.go`) → `controlclient.Auto.UpdateEndpoints` →
+   `Direct.sendMapRequest` → over the wire as `MapRequest.Endpoints`
+   + `MapRequest.EndpointTypes` (`tailcfg.MapRequest`). The control
+   plane stores the set in `tailcfg.Node.Endpoints` and fans it out
+   to peers via either a fresh netmap or a
+   `tailcfg.PeersChangedPatch.Endpoints` delta. **No new
+   control-plane field is required.**
+4. **Client-side application**: peers' magicsock receives the netmap
+   update at `magicsock.go:4024` and calls
+   `ep.setEndpointsLocked(views.SliceOf(m.Endpoints))`, which already
+   handles the multi-endpoint set. The next path probe / ping will
+   try the new IP:port, no client-side code change needed.
 5. **Polling fallback**: for filesystems where fsnotify is unreliable
    (e.g. some network mounts), allow a polling interval via env
    `TS_EXPERIMENTAL_EXTRA_ENDPOINTS_POLL=10s`.
 6. **Removal semantics**: when an endpoint disappears from the file,
-   the watcher pushes a netmap update with that endpoint absent.
-   Already-connected clients whose `bestAddr` was that endpoint will
-   detect failure on next packet (or via `noteRecvActivity` quiet
-   timeout) and re-probe.
+   `determineEndpoints` returns a smaller set, `setEndpoints` reports
+   it changed, and the same flow propagates the removal. Peers
+   whose `bestAddr` was the removed endpoint detect failure on next
+   send (or via `noteRecvActivity` quiet timeout) and re-probe.
+7. **End-to-end timing**: the netmap update reaches peers within ~1 s
+   in the streaming long-poll path; the file-change → wire latency is
+   bounded by the file watcher (sub-second on inotify, polling
+   interval otherwise) plus the next `determineEndpoints` cycle.
 
 ### Open questions
 
-- **Authentication for extra endpoints.** A peer can already lie about
-  its own IP/port today (any value goes through STUN); the file
-  watcher does not change the trust model — we still rely on the
-  WireGuard handshake to confirm the peer at the address. So no new
-  auth surface, but it is worth documenting explicitly in the doc.
+- **Authentication for extra endpoints.** WireGuard handshake at the
+  destination still authenticates the actual data plane regardless of
+  how the client learned the IP:port, so the wire-level threat model
+  is unchanged. The *new* surface is local: any process that can write
+  the file can publish endpoints under this node's identity. The
+  file's filesystem permissions therefore become the trust boundary.
+  Plan: chmod 0644 owner=root by default, refuse to read if
+  group-writable or world-writable, log loudly on permission widening.
+  A future variant could read from a Unix socket controlled by a
+  sibling daemon instead of a flat file.
 - **Interaction with srcsel auxiliary sockets.** If the server has
   aux sockets enabled, do we advertise extra endpoints for the aux
   socket too? Probably yes — the watcher should publish

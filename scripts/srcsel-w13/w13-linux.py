@@ -44,6 +44,7 @@ NAT_HOSTNAME = "srcsel-w12-nat-server"
 DEFAULT_PINGS = 40
 DEFAULT_TIMEOUT_S = 10
 WARMUP_S = 8
+PEER_DISCOVERY_DEADLINE_S = 60
 
 
 def env_for_mode(mode: str) -> str:
@@ -127,6 +128,12 @@ def main() -> None:
                    help=f"TSMP pings per direction (default {DEFAULT_PINGS})")
     p.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S,
                    help=f"per-ping timeout in seconds (default {DEFAULT_TIMEOUT_S})")
+    p.add_argument("--allow-missing-windows", action="store_true",
+                   help="proceed even if the Windows peer is not seen "
+                        "within the discovery deadline (default: fail). "
+                        "Use only when intentionally running Linux side "
+                        "alone, e.g. for re-collecting metrics after a "
+                        "coordinated mode change.")
     args = p.parse_args()
 
     env = env_for_mode(args.mode)
@@ -144,32 +151,57 @@ def main() -> None:
         print(f"\n--- warmup {WARMUP_S}s")
         time.sleep(WARMUP_S)
 
-        status = ts_status_json(h)
-
-        # Discover peer tailnet addresses from host's view.
-        host_v4, host_v6 = find_peer_addrs(status, HOST_HOSTNAME)
-        if host_v4 is None and host_v6 is None:
-            # Self is host; pull our own TailscaleIPs from status.Self.
-            self_node = status.get("Self") or {}
-            for ip in self_node.get("TailscaleIPs") or []:
-                if ":" in ip:
-                    host_v6 = host_v6 or ip
-                else:
-                    host_v4 = host_v4 or ip
-        nat_v4, nat_v6 = find_peer_addrs(status, NAT_HOSTNAME)
-        win_v4, win_v6 = find_peer_addrs(
-            status, lambda hn: hn.startswith(WINDOWS_HOSTNAME_PREFIX))
+        # Wait up to PEER_DISCOVERY_DEADLINE_S for all three peers
+        # (including the Windows side started by the operator's
+        # parallel run-w13-windows.ps1) to appear in 216's status.
+        # Without this block, an early Linux-side run before the
+        # Windows side has rejoined would silently skip the four
+        # Linux→Win directions and still produce a transcript that
+        # looks like a complete coordinated run.
+        deadline = time.monotonic() + PEER_DISCOVERY_DEADLINE_S
+        host_v4 = host_v6 = nat_v4 = nat_v6 = win_v4 = win_v6 = None
+        while time.monotonic() < deadline:
+            status = ts_status_json(h)
+            host_v4, host_v6 = find_peer_addrs(status, HOST_HOSTNAME)
+            if host_v4 is None and host_v6 is None:
+                # Self is host; pull our own TailscaleIPs from status.Self.
+                self_node = status.get("Self") or {}
+                for ip in self_node.get("TailscaleIPs") or []:
+                    if ":" in ip:
+                        host_v6 = host_v6 or ip
+                    else:
+                        host_v4 = host_v4 or ip
+            nat_v4, nat_v6 = find_peer_addrs(status, NAT_HOSTNAME)
+            win_v4, win_v6 = find_peer_addrs(
+                status, lambda hn: hn.startswith(WINDOWS_HOSTNAME_PREFIX))
+            if host_v4 and nat_v4 and (win_v4 or args.allow_missing_windows):
+                break
+            time.sleep(2)
 
         print(f"\n--- discovered tailnet addrs")
         print(f"  host: v4={host_v4}  v6={host_v6}")
         print(f"  nat : v4={nat_v4}   v6={nat_v6}")
         print(f"  win : v4={win_v4}   v6={win_v6}")
-        if not (host_v4 and nat_v4):
-            sys.exit("missing host or nat IPv4 — abort")
+
+        if not host_v4:
+            sys.exit(f"required peer {HOST_HOSTNAME!r} (host 216) was not "
+                     f"discovered in {PEER_DISCOVERY_DEADLINE_S}s — abort")
+        if not nat_v4:
+            sys.exit(f"required peer {NAT_HOSTNAME!r} (nat 36) was not "
+                     f"discovered in {PEER_DISCOVERY_DEADLINE_S}s — abort")
         if not win_v4:
-            print("[warn] Windows peer not yet seen in 216's status — "
-                  "make sure the Windows side has joined this run before "
-                  "starting Linux TSMP, or pings to Windows will time out.")
+            if not args.allow_missing_windows:
+                sys.exit(
+                    f"required peer (Windows, hostname starting with "
+                    f"{WINDOWS_HOSTNAME_PREFIX!r}) was not discovered in "
+                    f"{PEER_DISCOVERY_DEADLINE_S}s. Make sure "
+                    f"`run-w13-windows.ps1 -Mode {args.mode}` is running "
+                    f"on the Windows clean machine before starting the "
+                    f"Linux orchestrator. Pass --allow-missing-windows "
+                    f"to deliberately skip Linux→Win directions.")
+            print("[warn] proceeding without Windows peer per "
+                  "--allow-missing-windows; Linux→Win directions will "
+                  "be skipped.")
 
         # Linux-side TSMP. Eight directions; v6 ones are skipped if a
         # peer has no IPv6 (nat = 36 is IPv4-only; the Windows clean

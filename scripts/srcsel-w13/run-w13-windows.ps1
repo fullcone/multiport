@@ -153,23 +153,52 @@ Write-Host ""
 Write-Host "--- tailscale status (top 4):"
 Invoke-TS status | Select-Object -First 4 | ForEach-Object { Write-Host "  $_" }
 
-$hostIPs = Get-PeerIPs $HostPeer
-$natIPs  = Get-PeerIPs $NatPeer
-$hostV4 = ($hostIPs | Where-Object { $_ -like "*.*" }) | Select-Object -First 1
-$hostV6 = ($hostIPs | Where-Object { $_ -like "*:*" }) | Select-Object -First 1
-$natV4  = ($natIPs  | Where-Object { $_ -like "*.*" }) | Select-Object -First 1
+# Wait up to ~60 s for both required peers to appear in status. Without
+# this, a script run that fires before the data plane finishes warming
+# up would silently skip TSMP and still exit successfully — turning a
+# discovery race into a phase-doc false pass.
+$hostV4 = $null; $hostV6 = $null; $natV4 = $null
+$deadline = (Get-Date).AddSeconds(60)
+while ((Get-Date) -lt $deadline) {
+    $hostIPs = Get-PeerIPs $HostPeer
+    $natIPs  = Get-PeerIPs $NatPeer
+    $hostV4 = ($hostIPs | Where-Object { $_ -like "*.*" }) | Select-Object -First 1
+    $hostV6 = ($hostIPs | Where-Object { $_ -like "*:*" }) | Select-Object -First 1
+    $natV4  = ($natIPs  | Where-Object { $_ -like "*.*" }) | Select-Object -First 1
+    if ($hostV4 -and $natV4) { break }
+    Start-Sleep -Seconds 2
+}
+
+if (-not $hostV4) {
+    throw ("required peer '$HostPeer' was not discovered in 60 s. " +
+           "Check that the host (216) tailscaled is up and that this " +
+           "Windows node is registered against the same headscale.")
+}
+if (-not $natV4) {
+    throw ("required peer '$NatPeer' was not discovered in 60 s. " +
+           "Check that the nat (36) tailscaled is up and that the W13 " +
+           "Linux orchestrator started its restart cycle for the same mode.")
+}
 
 Write-Host ""
 Write-Host "--- discovered peer addrs:"
 Write-Host "  host: v4=$hostV4  v6=$hostV6"
 Write-Host "  nat : v4=$natV4   v6=(n/a, 36 is IPv4-only)"
 
+# IPv6 to host is best-effort — Windows may not have a native v6 path.
 foreach ($t in @(
-    @{Label="win -> host (v4)"; Dst=$hostV4},
-    @{Label="win -> host (v6)"; Dst=$hostV6},
-    @{Label="win -> nat  (v4)"; Dst=$natV4}
+    @{Label="win -> host (v4)"; Dst=$hostV4; Required=$true},
+    @{Label="win -> host (v6)"; Dst=$hostV6; Required=$false},
+    @{Label="win -> nat  (v4)"; Dst=$natV4;  Required=$true}
 )) {
-    if (-not $t.Dst) { continue }
+    if (-not $t.Dst) {
+        if ($t.Required) {
+            throw "missing required destination for '$($t.Label)' — should have been caught above"
+        }
+        Write-Host ""
+        Write-Host "--- skip $($t.Label) (no peer addr; not required)"
+        continue
+    }
     Write-Host ""
     Write-Host "--- TSMP $($t.Label) (-> $($t.Dst))"
     Invoke-TS ping --tsmp --c=$Pings --timeout=${Timeout}s $t.Dst |
