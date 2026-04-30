@@ -108,6 +108,9 @@ func Setenv(envVar, val string) {
 	if p := regDuration[envVar]; p != nil {
 		setDurationLocked(p, envVar, val)
 	}
+	if p := regInt[envVar]; p != nil {
+		setIntLocked(p, envVar, val)
+	}
 }
 
 // String returns the named environment variable, using os.Getenv.

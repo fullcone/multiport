@@ -192,6 +192,9 @@ type Conn struct {
 
 	receiveBatchPool sync.Pool
 
+	sourcePath   sourcePathState
+	sourceProbes sourcePathProbeManager
+
 	// closeDisco4 and closeDisco6 are io.Closers to shut down the raw
 	// disco packet receivers. If nil, no raw disco receiver is
 	// running for the given family.
@@ -1515,6 +1518,23 @@ func (c *Conn) sendUDPBatch(addr epAddr, buffs [][]byte, offset int) (sent bool,
 	return err == nil, err
 }
 
+func (c *Conn) sendUDPBatchFromSource(source sourceRxMeta, addr epAddr, buffs [][]byte, offset int) (sent bool, err error) {
+	if source.isPrimary() {
+		return c.sendUDPBatch(addr, buffs, offset)
+	}
+	if !addr.isDirect() {
+		return false, errSourcePathUnavailable
+	}
+	err = c.sourcePathWriteWireGuardBatchTo(source, addr, buffs, offset)
+	if err != nil {
+		if errGSO, ok := errors.AsType[neterror.ErrUDPGSODisabled](err); ok {
+			c.logf("magicsock: %s", errGSO.Error())
+			err = errGSO.RetryErr
+		}
+	}
+	return err == nil, err
+}
+
 // sendUDP sends UDP packet b to ipp.
 // See sendAddr's docs on the return value meanings.
 func (c *Conn) sendUDP(ipp netip.AddrPort, b []byte, isDisco bool, isGeneveEncap bool) (sent bool, err error) {
@@ -1549,6 +1569,32 @@ func (c *Conn) sendUDP(ipp netip.AddrPort, b []byte, isDisco bool, isGeneveEncap
 					c.metrics.outboundBytesIPv6Total.Add(int64(len(b)))
 				}
 			}
+		}
+	}
+	return
+}
+
+func (c *Conn) sendUDPFromSource(source sourceRxMeta, ipp netip.AddrPort, b []byte, isDisco bool, isGeneveEncap bool) (sent bool, err error) {
+	if source.isPrimary() {
+		return c.sendUDP(ipp, b, isDisco, isGeneveEncap)
+	}
+	if runtime.GOOS == "js" {
+		return false, errNoUDP
+	}
+	if isGeneveEncap {
+		return false, errSourcePathUnavailable
+	}
+	sent, err = c.sendUDPStdFromSource(source, ipp, b)
+	if err != nil {
+		metricSendUDPError.Add(1)
+	} else if sent && !isDisco {
+		switch {
+		case ipp.Addr().Is4():
+			c.metrics.outboundPacketsIPv4Total.Add(1)
+			c.metrics.outboundBytesIPv4Total.Add(int64(len(b)))
+		case ipp.Addr().Is6():
+			c.metrics.outboundPacketsIPv6Total.Add(1)
+			c.metrics.outboundBytesIPv6Total.Add(int64(len(b)))
 		}
 	}
 	return
@@ -1613,6 +1659,25 @@ func (c *Conn) sendUDPStd(addr netip.AddrPort, b []byte) (sent bool, err error) 
 	return err == nil, err
 }
 
+func (c *Conn) sendUDPStdFromSource(source sourceRxMeta, addr netip.AddrPort, b []byte) (sent bool, err error) {
+	if source.isPrimary() {
+		return c.sendUDPStd(addr, b)
+	}
+	if c.onlyTCP443.Load() {
+		return false, nil
+	}
+	_, err = c.sourcePathWriteTo(source, addr, b)
+	if err != nil {
+		switch {
+		case addr.Addr().Is4() && (c.noV4.Load() || neterror.TreatAsLostUDP(err)):
+			return false, nil
+		case addr.Addr().Is6() && (c.noV6.Load() || neterror.TreatAsLostUDP(err)):
+			return false, nil
+		}
+	}
+	return err == nil, err
+}
+
 // sendAddr sends packet b to addr, which is either a real UDP address
 // or a fake UDP address representing a DERP server (see derpmap.go).
 // The provided public key identifies the recipient.
@@ -1665,6 +1730,13 @@ func (c *Conn) sendAddr(addr netip.AddrPort, pubKey key.NodePublic, b []byte, is
 	return false, errDropDerpPacket
 }
 
+func (c *Conn) sendAddrFromSource(source sourceRxMeta, addr netip.AddrPort, pubKey key.NodePublic, b []byte, isDisco bool, isGeneveEncap bool) (sent bool, err error) {
+	if source.isPrimary() || addr.Addr() == tailcfg.DerpMagicIPAddr {
+		return c.sendAddr(addr, pubKey, b, isDisco, isGeneveEncap)
+	}
+	return c.sendUDPFromSource(source, addr, b, isDisco, isGeneveEncap)
+}
+
 type receiveBatch struct {
 	msgs []ipv6.Message
 }
@@ -1707,6 +1779,12 @@ func (c *Conn) receiveIPv6() conn.ReceiveFunc {
 // mkReceiveFunc creates a ReceiveFunc reading from ruc.
 // The provided healthItem and metrics are updated if non-nil.
 func (c *Conn) mkReceiveFunc(ruc *RebindingUDPConn, healthItem *health.ReceiveFuncStats, directPacketMetric, peerRelayPacketMetric, directBytesMetric, peerRelayBytesMetric *expvar.Int) conn.ReceiveFunc {
+	return c.mkReceiveFuncWithSource(ruc, healthItem, directPacketMetric, peerRelayPacketMetric, directBytesMetric, peerRelayBytesMetric, func() sourceRxMeta {
+		return primarySourceRxMeta
+	})
+}
+
+func (c *Conn) mkReceiveFuncWithSource(ruc *RebindingUDPConn, healthItem *health.ReceiveFuncStats, directPacketMetric, peerRelayPacketMetric, directBytesMetric, peerRelayBytesMetric *expvar.Int, rxMeta func() sourceRxMeta) conn.ReceiveFunc {
 	// epCache caches an epAddr->endpoint for hot flows.
 	var epCache epAddrEndpointCache
 
@@ -1742,7 +1820,7 @@ func (c *Conn) mkReceiveFunc(ruc *RebindingUDPConn, healthItem *health.ReceiveFu
 					continue
 				}
 				ipp := msg.Addr.(*net.UDPAddr).AddrPort()
-				if ep, size, isGeneveEncap, ok := c.receiveIP(msg.Buffers[0][:msg.N], ipp, &epCache); ok {
+				if ep, size, isGeneveEncap, ok := c.receiveIPWithSource(msg.Buffers[0][:msg.N], ipp, &epCache, rxMeta()); ok {
 					if isGeneveEncap {
 						if peerRelayPacketMetric != nil {
 							peerRelayPacketMetric.Add(1)
@@ -1790,12 +1868,19 @@ func looksLikeInitiationMsg(b []byte) bool {
 // ok is whether this read should be reported up to wireguard-go (our
 // caller).
 func (c *Conn) receiveIP(b []byte, ipp netip.AddrPort, cache *epAddrEndpointCache) (_ conn.Endpoint, size int, isGeneveEncap bool, ok bool) {
+	return c.receiveIPWithSource(b, ipp, cache, primarySourceRxMeta)
+}
+
+func (c *Conn) receiveIPWithSource(b []byte, ipp netip.AddrPort, cache *epAddrEndpointCache, rxMeta sourceRxMeta) (_ conn.Endpoint, size int, isGeneveEncap bool, ok bool) {
 	var ep *endpoint
 	size = len(b)
 
 	var geneve packet.GeneveHeader
 	pt, isGeneveEncap := packetLooksLike(b)
 	src := epAddr{ap: ipp}
+	if !rxMeta.isPrimary() && pt == packetLooksLikeWireGuard {
+		metricSourcePathAuxWireGuardRx.Add(1)
+	}
 	if isGeneveEncap {
 		err := geneve.Decode(b)
 		if err != nil {
@@ -1816,7 +1901,7 @@ func (c *Conn) receiveIP(b []byte, ipp netip.AddrPort, cache *epAddrEndpointCach
 		// have yet to open the encrypted disco payload to determine the
 		// [disco.MessageType], but we assert it should be handshake-related.
 		shouldByRelayHandshakeMsg := geneve.Control == true
-		c.handleDiscoMessage(b, src, shouldByRelayHandshakeMsg, key.NodePublic{}, discoRXPathUDP)
+		c.handleDiscoMessageWithSource(b, src, shouldByRelayHandshakeMsg, key.NodePublic{}, discoRXPathUDP, rxMeta)
 		return nil, 0, false, false
 	case packetLooksLikeSTUNBinding:
 		c.netChecker.ReceiveSTUNPacket(b, ipp)
@@ -1929,6 +2014,13 @@ func (c *Conn) sendDiscoAllocateUDPRelayEndpointRequest(dst epAddr, dstKey key.N
 // The dstKey should only be non-zero if the dstDisco key
 // unambiguously maps to exactly one peer.
 func (c *Conn) sendDiscoMessage(dst epAddr, dstKey key.NodePublic, dstDisco key.DiscoPublic, m disco.Message, logLevel discoLogLevel) (sent bool, err error) {
+	return c.sendDiscoMessageFromSource(primarySourceRxMeta, dst, dstKey, dstDisco, m, logLevel)
+}
+
+func (c *Conn) sendDiscoMessageFromSource(source sourceRxMeta, dst epAddr, dstKey key.NodePublic, dstDisco key.DiscoPublic, m disco.Message, logLevel discoLogLevel) (sent bool, err error) {
+	if !source.isPrimary() && !dst.isDirect() {
+		return false, errSourcePathUnavailable
+	}
 	isDERP := dst.ap.Addr() == tailcfg.DerpMagicIPAddr
 	if _, isPong := m.(*disco.Pong); isPong && !isDERP && dst.ap.Addr().Is4() {
 		time.Sleep(debugIPv4DiscoPingPenalty())
@@ -1992,7 +2084,7 @@ func (c *Conn) sendDiscoMessage(dst epAddr, dstKey key.NodePublic, dstDisco key.
 	box := di.sharedKey.Seal(m.AppendMarshal(nil))
 	pkt = append(pkt, box...)
 	const isDisco = true
-	sent, err = c.sendAddr(dst.ap, dstKey, pkt, isDisco, dst.vni.IsSet())
+	sent, err = c.sendAddrFromSource(source, dst.ap, dstKey, pkt, isDisco, dst.vni.IsSet())
 	if sent {
 		if logLevel == discoLog || (logLevel == discoVerboseLog && debugDisco()) {
 			node := "?"
@@ -2011,6 +2103,8 @@ func (c *Conn) sendDiscoMessage(dst epAddr, dstKey key.NodePublic, dstDisco key.
 			metricSentDiscoPing.Add(1)
 		case *disco.Pong:
 			metricSentDiscoPong.Add(1)
+		case *disco.SourcePathProbe:
+			metricSentDiscoSourcePathProbe.Add(1)
 		case *disco.CallMeMaybe:
 			metricSentDiscoCallMeMaybe.Add(1)
 		case *disco.CallMeMaybeVia:
@@ -2041,6 +2135,24 @@ const (
 	discoRXPathDERP      discoRXPath = "DERP"
 	discoRXPathRawSocket discoRXPath = "raw socket"
 )
+
+// SourceSocketID identifies the local socket path that received a packet.
+type SourceSocketID uint32
+
+type sourceGeneration uint64
+
+const (
+	primarySourceSocketID SourceSocketID = iota
+	sourceIPv4SocketID
+	sourceIPv6SocketID
+)
+
+type sourceRxMeta struct {
+	socketID   SourceSocketID
+	generation sourceGeneration
+}
+
+var primarySourceRxMeta = sourceRxMeta{socketID: primarySourceSocketID}
 
 const discoHeaderLen = len(disco.Magic) + key.DiscoPublicRawLen
 
@@ -2153,6 +2265,10 @@ func packetLooksLike(msg []byte) (t packetLooksLikeType, isGeneveEncap bool) {
 // 'shouldBeRelayHandshakeMsg' will be true if 'msg' was encapsulated
 // by a Geneve header with the control bit set.
 func (c *Conn) handleDiscoMessage(msg []byte, src epAddr, shouldBeRelayHandshakeMsg bool, derpNodeSrc key.NodePublic, via discoRXPath) {
+	c.handleDiscoMessageWithSource(msg, src, shouldBeRelayHandshakeMsg, derpNodeSrc, via, primarySourceRxMeta)
+}
+
+func (c *Conn) handleDiscoMessageWithSource(msg []byte, src epAddr, shouldBeRelayHandshakeMsg bool, derpNodeSrc key.NodePublic, via discoRXPath, rxMeta sourceRxMeta) {
 	sender := key.DiscoPublicFromRaw32(mem.B(msg[len(disco.Magic):discoHeaderLen]))
 
 	c.mu.Lock()
@@ -2268,8 +2384,14 @@ func (c *Conn) handleDiscoMessage(msg []byte, src epAddr, shouldBeRelayHandshake
 	case *disco.Ping:
 		metricRecvDiscoPing.Add(1)
 		c.handlePingLocked(dm, src, di, derpNodeSrc)
+	case *disco.SourcePathProbe:
+		metricRecvDiscoSourcePathProbe.Add(1)
+		c.handleSourcePathProbeLocked(dm, src, di)
 	case *disco.Pong:
 		metricRecvDiscoPong.Add(1)
+		if c.sourceProbes.handlePongLocked(dm, sender, src, rxMeta) {
+			return
+		}
 		// There might be multiple nodes for the sender's DiscoKey.
 		// Ask each to handle it, stopping once one reports that
 		// the Pong's TxID was theirs.
@@ -2578,6 +2700,62 @@ func (c *Conn) handlePingLocked(dm *disco.Ping, src epAddr, di *discoInfo, derpN
 	ipDst := src
 	discoDest := di.discoKey
 	go c.sendDiscoMessage(ipDst, dstKey, discoDest, &disco.Pong{
+		TxID: dm.TxID,
+		Src:  src.ap,
+	}, discoVerboseLog)
+}
+
+// handleSourcePathProbeLocked replies to a source-path probe without admitting
+// the probe's source address as a candidate endpoint. Auxiliary sockets do not
+// accept WireGuard traffic, so treating their ports as ordinary endpoints can
+// blackhole peer data until endpoint discovery recovers.
+func (c *Conn) handleSourcePathProbeLocked(dm *disco.SourcePathProbe, src epAddr, di *discoInfo) {
+	isDerp := src.ap.Addr() == tailcfg.DerpMagicIPAddr
+	if src.vni.IsSet() || isDerp {
+		c.logf("[unexpected] got source-path disco probe from %v", src)
+		return
+	}
+	if debugNeverDirectUDP() {
+		return
+	}
+
+	var dstKey key.NodePublic
+	var numNodes int
+	if !dm.NodeKey.IsZero() {
+		if ep, ok := c.peerMap.endpointForNodeKey(dm.NodeKey); ok {
+			epDisco := ep.disco.Load()
+			if epDisco != nil && epDisco.key == di.discoKey {
+				dstKey = dm.NodeKey
+				numNodes = 1
+			}
+		}
+	}
+	if numNodes == 0 {
+		c.peerMap.forEachEndpointWithDiscoKey(di.discoKey, func(ep *endpoint) (keepGoing bool) {
+			numNodes++
+			if numNodes == 1 {
+				dstKey = ep.publicKey
+			}
+			return true
+		})
+	}
+	if numNodes == 0 {
+		c.logf("[unexpected] got source-path disco probe from %v for node not in peers", src)
+		return
+	}
+	if numNodes > 1 {
+		dstKey = key.NodePublic{}
+	}
+
+	if debugDisco() {
+		probeNodeSrcStr := dstKey.ShortString()
+		if numNodes > 1 {
+			probeNodeSrcStr = "[one-of-multi]"
+		}
+		c.dlogf("[v1] magicsock: disco: %v<-%v (%v, %v) got source-path-probe tx=%x padding=%v", c.discoAtomic.Short(), di.discoShort, probeNodeSrcStr, src, dm.TxID[:6], dm.Padding)
+	}
+
+	go c.sendDiscoMessage(src, dstKey, di.discoKey, &disco.Pong{
 		TxID: dm.TxID,
 		Src:  src.ap,
 	}, discoVerboseLog)
@@ -3389,7 +3567,9 @@ func (c *connBind) Open(ignoredPort uint16) ([]conn.ReceiveFunc, uint16, error) 
 		return nil, 0, errors.New("magicsock: connBind already open")
 	}
 	c.closed = false
-	fns := []conn.ReceiveFunc{c.receiveIPv4(), c.receiveIPv6(), c.receiveDERP}
+	fns := []conn.ReceiveFunc{c.receiveIPv4(), c.receiveIPv6()}
+	fns = append(fns, c.sourcePathReceiveFuncs()...)
+	fns = append(fns, c.receiveDERP)
 	if runtime.GOOS == "js" {
 		fns = []conn.ReceiveFunc{c.receiveDERP}
 	}
@@ -3419,6 +3599,7 @@ func (c *connBind) Close() error {
 	// Unblock all outstanding receives.
 	c.pconn4.Close()
 	c.pconn6.Close()
+	c.closeSourcePathSockets()
 	if c.closeDisco4 != nil {
 		c.closeDisco4.Close()
 	}
@@ -3475,6 +3656,8 @@ func (c *Conn) Close() error {
 	// They will frequently have been closed already by a call to connBind.Close.
 	c.pconn6.Close()
 	c.pconn4.Close()
+	c.closeSourcePathSockets()
+	c.sourceProbes.clearLocked()
 	if c.closeDisco4 != nil {
 		c.closeDisco4.Close()
 	}
@@ -3717,6 +3900,9 @@ func (c *Conn) rebind(curPortFate currentPortFate) error {
 	}
 	if err := c.bindSocket(&c.pconn4, "udp4", curPortFate); err != nil {
 		return fmt.Errorf("magicsock: Rebind IPv4 failed: %w", err)
+	}
+	if err := c.rebindSourcePathSockets(); err != nil {
+		c.logf("magicsock: srcsel: auxiliary socket setup failed: %v", err)
 	}
 	if c.portMapper != nil {
 		c.portMapper.SetLocalPort(c.LocalPort())
@@ -4100,18 +4286,31 @@ var (
 	metricSendDERP      = clientmetric.NewAggregateCounter("magicsock_send_derp")
 
 	// Data packets (non-disco)
-	metricSendData                     = clientmetric.NewCounter("magicsock_send_data")
-	metricSendDataNetworkDown          = clientmetric.NewCounter("magicsock_send_data_network_down")
-	metricRecvDataPacketsDERP          = clientmetric.NewAggregateCounter("magicsock_recv_data_derp")
-	metricRecvDataPacketsIPv4          = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv4")
-	metricRecvDataPacketsIPv6          = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv6")
-	metricRecvDataPacketsPeerRelayIPv4 = clientmetric.NewAggregateCounter("magicsock_recv_data_peer_relay_ipv4")
-	metricRecvDataPacketsPeerRelayIPv6 = clientmetric.NewAggregateCounter("magicsock_recv_data_peer_relay_ipv6")
-	metricSendDataPacketsDERP          = clientmetric.NewAggregateCounter("magicsock_send_data_derp")
-	metricSendDataPacketsIPv4          = clientmetric.NewAggregateCounter("magicsock_send_data_ipv4")
-	metricSendDataPacketsIPv6          = clientmetric.NewAggregateCounter("magicsock_send_data_ipv6")
-	metricSendDataPacketsPeerRelayIPv4 = clientmetric.NewAggregateCounter("magicsock_send_data_peer_relay_ipv4")
-	metricSendDataPacketsPeerRelayIPv6 = clientmetric.NewAggregateCounter("magicsock_send_data_peer_relay_ipv6")
+	metricSendData                          = clientmetric.NewCounter("magicsock_send_data")
+	metricSendDataNetworkDown               = clientmetric.NewCounter("magicsock_send_data_network_down")
+	metricSourcePathDataSendAuxSelected     = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_selected")
+	metricSourcePathDataSendAuxSucceeded    = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_succeeded")
+	metricSourcePathDataSendAuxFallback     = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_fallback")
+	metricSourcePathProbePongAccepted       = clientmetric.NewCounter("magicsock_srcsel_probe_pong_accepted")
+	metricSourcePathProbePendingExpired     = clientmetric.NewCounter("magicsock_srcsel_probe_pending_expired")
+	metricSourcePathProbePongExpired        = clientmetric.NewCounter("magicsock_srcsel_probe_pong_expired")
+	metricSourcePathProbePeerBudgetDropped  = clientmetric.NewCounter("magicsock_srcsel_probe_peer_budget_dropped")
+	metricSourcePathProbeBurstBudgetDropped = clientmetric.NewCounter("magicsock_srcsel_probe_burst_budget_dropped")
+	metricSourcePathProbeHardCapDropped     = clientmetric.NewCounter("magicsock_srcsel_probe_hard_cap_dropped")
+	metricSourcePathProbeSamplesExpired     = clientmetric.NewCounter("magicsock_srcsel_probe_samples_expired")
+	metricSourcePathProbeSamplesEvicted     = clientmetric.NewCounter("magicsock_srcsel_probe_samples_evicted")
+	metricSourcePathAuxWireGuardRx          = clientmetric.NewCounter("magicsock_srcsel_aux_wireguard_rx")
+	metricSourcePathSendFailureInvalidated  = clientmetric.NewCounter("magicsock_srcsel_send_failure_invalidated_samples")
+	metricRecvDataPacketsDERP               = clientmetric.NewAggregateCounter("magicsock_recv_data_derp")
+	metricRecvDataPacketsIPv4               = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv4")
+	metricRecvDataPacketsIPv6               = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv6")
+	metricRecvDataPacketsPeerRelayIPv4      = clientmetric.NewAggregateCounter("magicsock_recv_data_peer_relay_ipv4")
+	metricRecvDataPacketsPeerRelayIPv6      = clientmetric.NewAggregateCounter("magicsock_recv_data_peer_relay_ipv6")
+	metricSendDataPacketsDERP               = clientmetric.NewAggregateCounter("magicsock_send_data_derp")
+	metricSendDataPacketsIPv4               = clientmetric.NewAggregateCounter("magicsock_send_data_ipv4")
+	metricSendDataPacketsIPv6               = clientmetric.NewAggregateCounter("magicsock_send_data_ipv6")
+	metricSendDataPacketsPeerRelayIPv4      = clientmetric.NewAggregateCounter("magicsock_send_data_peer_relay_ipv4")
+	metricSendDataPacketsPeerRelayIPv6      = clientmetric.NewAggregateCounter("magicsock_send_data_peer_relay_ipv6")
 
 	// Data bytes (non-disco)
 	metricRecvDataBytesDERP          = clientmetric.NewAggregateCounter("magicsock_recv_data_bytes_derp")
@@ -4132,6 +4331,9 @@ var (
 	metricSentDiscoDERP                          = clientmetric.NewCounter("magicsock_disco_sent_derp")
 	metricSentDiscoPing                          = clientmetric.NewCounter("magicsock_disco_sent_ping")
 	metricSentDiscoPong                          = clientmetric.NewCounter("magicsock_disco_sent_pong")
+	metricSentDiscoSourcePathProbe               = clientmetric.NewCounter("magicsock_disco_sent_source_path_probe")
+	metricSentDiscoSourcePathProbePadded         = clientmetric.NewCounter("magicsock_disco_sent_source_path_probe_padded")
+	metricSentDiscoSourcePathProbeBytes          = clientmetric.NewCounter("magicsock_disco_sent_source_path_probe_bytes")
 	metricSentDiscoPeerMTUProbes                 = clientmetric.NewCounter("magicsock_disco_sent_peer_mtu_probes")
 	metricSentDiscoPeerMTUProbeBytes             = clientmetric.NewCounter("magicsock_disco_sent_peer_mtu_probe_bytes")
 	metricSentDiscoCallMeMaybe                   = clientmetric.NewCounter("magicsock_disco_sent_callmemaybe")
@@ -4149,6 +4351,7 @@ var (
 	metricRecvDiscoDERP                                  = clientmetric.NewCounter("magicsock_disco_recv_derp")
 	metricRecvDiscoPing                                  = clientmetric.NewCounter("magicsock_disco_recv_ping")
 	metricRecvDiscoPong                                  = clientmetric.NewCounter("magicsock_disco_recv_pong")
+	metricRecvDiscoSourcePathProbe                       = clientmetric.NewCounter("magicsock_disco_recv_source_path_probe")
 	metricRecvDiscoCallMeMaybe                           = clientmetric.NewCounter("magicsock_disco_recv_callmemaybe")
 	metricRecvDiscoCallMeMaybeVia                        = clientmetric.NewCounter("magicsock_disco_recv_callmemaybevia")
 	metricRecvDiscoCallMeMaybeBadNode                    = clientmetric.NewCounter("magicsock_disco_recv_callmemaybe_bad_node")

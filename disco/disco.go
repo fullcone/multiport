@@ -51,6 +51,7 @@ const (
 	TypeCallMeMaybeVia                   = MessageType(0x07)
 	TypeAllocateUDPRelayEndpointRequest  = MessageType(0x08)
 	TypeAllocateUDPRelayEndpointResponse = MessageType(0x09)
+	TypeSourcePathProbe                  = MessageType(0x0a)
 )
 
 const v0 = byte(0)
@@ -103,6 +104,8 @@ func Parse(p []byte) (Message, error) {
 		return parseAllocateUDPRelayEndpointRequest(ver, p)
 	case TypeAllocateUDPRelayEndpointResponse:
 		return parseAllocateUDPRelayEndpointResponse(ver, p)
+	case TypeSourcePathProbe:
+		return parseSourcePathProbe(ver, p)
 	default:
 		return nil, fmt.Errorf("unknown message type 0x%02x", byte(t))
 	}
@@ -181,6 +184,42 @@ func parsePing(ver uint8, p []byte) (m *Ping, err error) {
 		m.Padding -= key.NodePublicRawLen
 	}
 	return m, nil
+}
+
+// SourcePathProbe is a Ping-like probe used to test an alternate local UDP
+// source socket. Peers reply with a Pong but must not treat the probe's source
+// address as a candidate endpoint for WireGuard traffic.
+type SourcePathProbe struct {
+	TxID    [12]byte
+	NodeKey key.NodePublic
+	Padding int
+}
+
+func (m *SourcePathProbe) AppendMarshal(b []byte) []byte {
+	dataLen := 12
+	hasKey := !m.NodeKey.IsZero()
+	if hasKey {
+		dataLen += key.NodePublicRawLen
+	}
+
+	ret, d := appendMsgHeader(b, TypeSourcePathProbe, v0, dataLen+m.Padding)
+	n := copy(d, m.TxID[:])
+	if hasKey {
+		m.NodeKey.AppendTo(d[:n])
+	}
+	return ret
+}
+
+func parseSourcePathProbe(ver uint8, p []byte) (m *SourcePathProbe, err error) {
+	ping, err := parsePing(ver, p)
+	if err != nil {
+		return nil, err
+	}
+	return &SourcePathProbe{
+		TxID:    ping.TxID,
+		NodeKey: ping.NodeKey,
+		Padding: ping.Padding,
+	}, nil
 }
 
 // CallMeMaybe is a message sent only over DERP to request that the recipient try
@@ -283,6 +322,8 @@ func MessageSummary(m Message) string {
 	switch m := m.(type) {
 	case *Ping:
 		return fmt.Sprintf("ping tx=%x padding=%v", m.TxID[:6], m.Padding)
+	case *SourcePathProbe:
+		return fmt.Sprintf("source-path-probe tx=%x padding=%v", m.TxID[:6], m.Padding)
 	case *Pong:
 		return fmt.Sprintf("pong tx=%x", m.TxID[:6])
 	case *CallMeMaybe:

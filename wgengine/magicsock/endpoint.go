@@ -1077,12 +1077,27 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 	}
 	var err error
 	if udpAddr.ap.IsValid() {
-		_, err = de.c.sendUDPBatch(udpAddr, buffs, offset)
+		source := de.c.sourcePathDataSendSource(udpAddr)
+		usingSourcePathAux := !source.isPrimary()
+		if usingSourcePathAux {
+			metricSourcePathDataSendAuxSelected.Add(1)
+		}
+		usedPrimarySend := source.isPrimary()
+		_, err = de.c.sendUDPBatchFromSource(source, udpAddr, buffs, offset)
+		if err != nil && usingSourcePathAux {
+			metricSourcePathDataSendAuxFallback.Add(1)
+			de.c.logf("magicsock: srcsel: data send from source %d to %v failed, retrying primary: %v", source.socketID, udpAddr, err)
+			de.c.noteSourcePathSendFailure(udpAddr, source)
+			usedPrimarySend = true
+			_, err = de.c.sendUDPBatch(udpAddr, buffs, offset)
+		} else if usingSourcePathAux {
+			metricSourcePathDataSendAuxSucceeded.Add(1)
+		}
 
 		// If the error is known to indicate that the endpoint is no longer
 		// usable, clear the endpoint statistics so that the next send will
 		// re-evaluate the best endpoint.
-		if err != nil && isBadEndpointErr(err) {
+		if err != nil && usedPrimarySend && isBadEndpointErr(err) {
 			de.noteBadEndpoint(udpAddr)
 		}
 
@@ -1349,6 +1364,13 @@ func (de *endpoint) startDiscoPingLocked(ep epAddr, now mono.Time, purpose disco
 			de.probeUDPLifetime.lastTxID = txid
 		}
 		go de.sendDiscoPing(ep, epDisco.key, txid, s, logLevel)
+
+		if purpose != pingCLI && ep.isDirect() {
+			for _, source := range de.c.sourcePathProbeSources(ep.ap.Addr().Is4()) {
+				probeTxID := stun.NewTxID()
+				go de.c.sendSourcePathDiscoPing(source, ep, de.publicKey, epDisco.key, probeTxID, s, logLevel)
+			}
+		}
 	}
 
 }

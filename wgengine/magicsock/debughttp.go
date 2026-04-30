@@ -31,13 +31,15 @@ func (c *Conn) ServeHTTPDebug(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	now := time.Now()
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, "<h1>magicsock</h1>")
+
+	c.printSourcePathDebugHTML(w)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	fmt.Fprintf(w, "<h2 id=derp><a href=#derp>#</a> DERP</h2><ul>")
 	if c.derpMap != nil {
@@ -190,6 +192,105 @@ func printEndpointHTML(w io.Writer, ep *endpoint) {
 	}
 	io.WriteString(w, "</ul>")
 
+}
+
+type sourcePathDebugSnapshot struct {
+	generation     sourceGeneration
+	auxSocketCount int
+	maxProbePeers  int
+	maxProbeBurst  int
+	pendingProbes  int
+	samples        int
+	aux4           sourcePathSocketDebugSnapshot
+	aux6           sourcePathSocketDebugSnapshot
+}
+
+type sourcePathSocketDebugSnapshot struct {
+	label      string
+	bound      bool
+	socketID   SourceSocketID
+	generation sourceGeneration
+	localAddr  string
+}
+
+func (c *Conn) sourcePathDebugSnapshot() sourcePathDebugSnapshot {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	s := sourcePathDebugSnapshot{
+		auxSocketCount: sourcePathAuxSocketCount(),
+		maxProbePeers:  sourcePathProbeMaxPeerCount(),
+		maxProbeBurst:  sourcePathProbeMaxBurstCount(),
+		pendingProbes:  c.sourceProbes.pendingLenLocked(),
+		samples:        c.sourceProbes.samplesLenLocked(),
+	}
+
+	c.sourcePath.mu.Lock()
+	defer c.sourcePath.mu.Unlock()
+	s.generation = c.sourcePath.generation
+	s.aux4 = sourcePathSocketDebugSnapshotLocked("auxiliary IPv4", &c.sourcePath.aux4, c.sourcePath.aux4Bound)
+	s.aux6 = sourcePathSocketDebugSnapshotLocked("auxiliary IPv6", &c.sourcePath.aux6, c.sourcePath.aux6Bound)
+	return s
+}
+
+func sourcePathSocketDebugSnapshotLocked(label string, s *sourcePathSocket, bound bool) sourcePathSocketDebugSnapshot {
+	meta := s.rxMeta()
+	return sourcePathSocketDebugSnapshot{
+		label:      label,
+		bound:      bound,
+		socketID:   meta.socketID,
+		generation: meta.generation,
+		localAddr:  sourcePathDebugLocalAddr(&s.pconn),
+	}
+}
+
+func sourcePathDebugLocalAddr(ruc *RebindingUDPConn) string {
+	ruc.mu.Lock()
+	defer ruc.mu.Unlock()
+	if ruc.pconn == nil {
+		return "-"
+	}
+	return ruc.localAddrLocked().String()
+}
+
+func (c *Conn) printSourcePathDebugHTML(w io.Writer) {
+	s := c.sourcePathDebugSnapshot()
+	fmt.Fprintf(w, "<h2 id=srcsel><a href=#srcsel>#</a> Source selection</h2><ul>")
+	fmt.Fprintf(w, "<li>generation: %d</li>\n", s.generation)
+	fmt.Fprintf(w, "<li>enabled auxiliary sockets: %d</li>\n", s.auxSocketCount)
+	fmt.Fprintf(w, "<li>pending probes: %d</li>\n", s.pendingProbes)
+	fmt.Fprintf(w, "<li>samples: %d</li>\n", s.samples)
+	fmt.Fprintf(w, "<li>probe peer budget: %d</li>\n", s.maxProbePeers)
+	fmt.Fprintf(w, "<li>probe burst budget: %d</li>\n", s.maxProbeBurst)
+	sourcePathSocketDebugHTML(w, s.aux4)
+	sourcePathSocketDebugHTML(w, s.aux6)
+	fmt.Fprintf(w, "</ul>\n")
+}
+
+func sourcePathSocketDebugHTML(w io.Writer, s sourcePathSocketDebugSnapshot) {
+	state := "not bound"
+	if s.bound {
+		state = "bound"
+	}
+	fmt.Fprintf(w, "<li>%s: %s, socketID %s, generation %d, local %s</li>\n",
+		html.EscapeString(s.label),
+		state,
+		html.EscapeString(sourceSocketIDDebugString(s.socketID)),
+		s.generation,
+		html.EscapeString(s.localAddr))
+}
+
+func sourceSocketIDDebugString(id SourceSocketID) string {
+	switch id {
+	case primarySourceSocketID:
+		return "primary"
+	case sourceIPv4SocketID:
+		return "aux4"
+	case sourceIPv6SocketID:
+		return "aux6"
+	default:
+		return fmt.Sprintf("unknown(%d)", id)
+	}
 }
 
 func peerDebugName(p tailcfg.NodeView) string {

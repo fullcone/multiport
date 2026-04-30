@@ -122,8 +122,14 @@ var errEMSGSIZE error = unix.EMSGSIZE
 func pmtuShouldLogDiscoTxErr(m disco.Message, err error) bool {
 	// Large disco.Ping packets used to probe path MTU may result in
 	// an EMSGSIZE error fairly regularly which can pollute logs.
-	p, ok := m.(*disco.Ping)
-	if !ok || p.Padding == 0 || !errors.Is(err, errEMSGSIZE) || debugPMTUD() {
+	var padding int
+	switch m := m.(type) {
+	case *disco.Ping:
+		padding = m.Padding
+	case *disco.SourcePathProbe:
+		padding = m.Padding
+	}
+	if padding == 0 || !errors.Is(err, errEMSGSIZE) || debugPMTUD() {
 		return true
 	}
 	return false

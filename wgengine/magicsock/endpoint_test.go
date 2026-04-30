@@ -687,3 +687,45 @@ func Test_endpoint_handlePongConnLocked(t *testing.T) {
 		})
 	}
 }
+
+func Test_endpoint_handlePongConnLocked_unknownTxIDNoop(t *testing.T) {
+	pongFrom := epAddr{ap: netip.MustParseAddrPort("192.0.2.44:443")}
+	c := &Conn{
+		logf:    func(msg string, args ...any) {},
+		peerMap: newPeerMap(),
+	}
+	c.discoAtomic.Set(key.NewDisco())
+
+	de := &endpoint{
+		c:                  c,
+		bestAddr:           addrQuality{epAddr: pongFrom, latency: 50 * time.Millisecond},
+		trustBestAddrUntil: mono.Now().Add(time.Hour),
+		sentPing:           make(map[stun.TxID]sentPing),
+		endpointState:      make(map[netip.AddrPort]*endpointState),
+		debugUpdates:       ringlog.New[EndpointChange](10),
+	}
+	beforeBestAddr := de.bestAddr
+	beforeTrustBestAddrUntil := de.trustBestAddrUntil
+
+	di := &discoInfo{
+		discoKey:   key.NewDisco().Public(),
+		discoShort: "test",
+	}
+	pong := &disco.Pong{
+		TxID: stun.NewTxID(),
+		Src:  pongFrom.ap,
+	}
+
+	if de.handlePongConnLocked(pong, di, pongFrom) {
+		t.Fatal("expected unknown TxID to report knownTxID=false")
+	}
+	if len(de.sentPing) != 0 {
+		t.Fatalf("unknown TxID mutated sentPing: len=%d", len(de.sentPing))
+	}
+	if de.bestAddr != beforeBestAddr {
+		t.Fatalf("unknown TxID mutated bestAddr: got %v, want %v", de.bestAddr, beforeBestAddr)
+	}
+	if de.trustBestAddrUntil != beforeTrustBestAddrUntil {
+		t.Fatalf("unknown TxID mutated trustBestAddrUntil: got %v, want %v", de.trustBestAddrUntil, beforeTrustBestAddrUntil)
+	}
+}
