@@ -3,9 +3,10 @@ magicsock_srcsel_* metrics from both ends. Re-run after each mode switch
 (baseline / force / auto). Set LABEL env to tag the output.
 
 Tailnet IPv4 / IPv6 addresses are discovered at run time from each side's
-own `tailscale status --json`, so the test is correct regardless of the
-order in which headscale allocated 100.64.0.x / fd7a:115c:a1e0::x to the
-two nodes (or whether the headscale instance had prior nodes)."""
+own `tailscale status --json`, matched by the explicit hostnames the W10
+helpers register with headscale (`srcsel-pair-host` and
+`srcsel-pair-client`). This stays correct on tailnets that already have
+unrelated nodes from earlier runs."""
 from __future__ import annotations
 
 import ipaddress
@@ -16,6 +17,8 @@ import sys
 import _pair
 
 LABEL = os.environ.get("LABEL", "run")
+HOST_HOSTNAME = os.environ.get("SRCSEL_W10_HOST_HOSTNAME", "srcsel-pair-host")
+CLIENT_HOSTNAME = os.environ.get("SRCSEL_W10_CLIENT_HOSTNAME", "srcsel-pair-client")
 
 
 def ts(c, *args):
@@ -58,20 +61,22 @@ def main() -> None:
     h = _pair.open_host()
     cl = _pair.open_client()
     try:
-        host_self, host_peers = discover_ips(h)
-        client_self, client_peers = discover_ips(cl)
+        _, host_peers = discover_ips(h)
+        _, client_peers = discover_ips(cl)
 
-        # From the host's POV the client is one of host_peers values; from the
-        # client's POV the host is one of client_peers values. Match by Self
-        # ip presence to avoid name guesses.
-        def _peer_for(self_ips: list[str], peers: dict[str, list[str]]) -> list[str]:
-            for ips in peers.values():
-                if not any(ip in set(self_ips) for ip in ips):
-                    return ips
-            sys.exit("no peer found in tailscale status — is the other side joined?")
+        # Match by exact hostname so reused tailnets with unrelated peers do
+        # not steer the test at the wrong node.
+        def _peer_by_name(peers: dict[str, list[str]], wanted: str, view_label: str) -> list[str]:
+            ips = peers.get(wanted)
+            if not ips:
+                sys.exit(
+                    f"{view_label} sees no peer named {wanted!r}; "
+                    f"available peers: {sorted(peers.keys())}"
+                )
+            return ips
 
-        client_ips_from_host = _peer_for(host_self, host_peers)
-        host_ips_from_client = _peer_for(client_self, client_peers)
+        client_ips_from_host = _peer_by_name(host_peers, CLIENT_HOSTNAME, "host")
+        host_ips_from_client = _peer_by_name(client_peers, HOST_HOSTNAME, "client")
         host_v4, host_v6 = split_v4_v6(host_ips_from_client)
         client_v4, client_v6 = split_v4_v6(client_ips_from_host)
         print(f"discovered host  v4={host_v4} v6={host_v6}")

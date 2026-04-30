@@ -3,16 +3,21 @@ capture host-side srcsel metrics. Used in W10 to exercise Phase 20's
 primary-baseline gate under low-RTT direct paths.
 
 The peer's tailnet IPv4 is discovered at run time from
-`tailscale status --json` so the script targets the actual peer
-regardless of headscale's IP allocation order."""
+`tailscale status --json` and matched by exact hostname (default
+`srcsel-pair-client`, override via SRCSEL_W10_CLIENT_HOSTNAME) so the
+script targets the W10 client even on tailnets that already have
+unrelated peers."""
 from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import sys
 import time
 
 import _pair
+
+CLIENT_HOSTNAME = os.environ.get("SRCSEL_W10_CLIENT_HOSTNAME", "srcsel-pair-client")
 
 
 def discover_peer_ipv4(c) -> str:
@@ -23,17 +28,18 @@ def discover_peer_ipv4(c) -> str:
     if not out:
         sys.exit(f"could not read tailscale status JSON: {err}")
     data = json.loads(out)
-    self_ips = set(data.get("Self", {}).get("TailscaleIPs") or [])
     for peer in (data.get("Peer") or {}).values():
+        host = peer.get("HostName") or peer.get("DNSName") or ""
+        if host != CLIENT_HOSTNAME:
+            continue
         for ip in peer.get("TailscaleIPs") or []:
-            if ip in self_ips:
-                continue
             try:
                 if ipaddress.ip_address(ip).version == 4:
                     return ip
             except ValueError:
                 pass
-    sys.exit("no peer IPv4 address found in tailscale status — is the other side joined?")
+        sys.exit(f"peer {CLIENT_HOSTNAME!r} has no IPv4 TailscaleIPs in tailscale status")
+    sys.exit(f"no peer named {CLIENT_HOSTNAME!r} in tailscale status — is 04-both-up.py done?")
 
 
 def main() -> None:
