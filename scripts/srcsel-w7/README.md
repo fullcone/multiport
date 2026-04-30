@@ -91,17 +91,23 @@ $env:SRCSEL_W7_AUTH_KEY = "hskey-auth-..."
 python 07-setup-key.py
 $env:SRCSEL_W7_KEY = "$env:USERPROFILE\.ssh\id_ed25519_srcsel-w7"
 
-# server-side baseline
+# --- baseline (no srcsel) -------------------------------------------------
 $env:SRCSEL_W7_MODE = "baseline"; $env:_FIRST_RUN = "1"
 python 05-server-up.py
 Remove-Item Env:\_FIRST_RUN
 
-# windows-side baseline
 $env:SRCSEL_W7_MODE = "baseline"; $env:SRCSEL_W7_FIRST_RUN = "1"
 .\08-windows-up.ps1
 Remove-Item Env:\SRCSEL_W7_FIRST_RUN
 
-# automatic mode
+# --- forced-aux mode ------------------------------------------------------
+$env:SRCSEL_W7_MODE = "force"
+python 05-server-up.py
+.\08-windows-up.ps1
+python 06-server-metrics.py
+& "<repo>\.w7-bins\tailscale-srcsel.exe" --socket=\\.\pipe\srcsel-w7 ping --tsmp --c=5 --timeout=10s 100.64.0.1
+
+# --- automatic mode -------------------------------------------------------
 $env:SRCSEL_W7_MODE = "auto"
 python 05-server-up.py
 .\08-windows-up.ps1

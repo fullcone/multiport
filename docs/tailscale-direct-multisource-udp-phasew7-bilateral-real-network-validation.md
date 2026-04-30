@@ -360,6 +360,8 @@ plus `SRCSEL_W7_AUTH_KEY`) and the run order:
 
 ```
 scripts/srcsel-w7/
+  README.md               # prerequisites + env-var contract + run order
+  .gitignore              # excludes __pycache__/ and *.pyc
   _common.py              # shared paramiko helper (env-driven config)
   01-recon.py             # initial server recon
   02-upload-binaries.py   # sftp Linux binaries to /usr/local/bin
