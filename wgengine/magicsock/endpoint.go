@@ -85,6 +85,7 @@ type endpoint struct {
 	lastSendAny               mono.Time      // last time there were outgoing packets sent this peer from any trigger, internal or external to magicsock
 	lastFullPing              mono.Time      // last time we pinged all disco or wireguard only endpoints
 	lastUDPRelayPathDiscovery mono.Time      // last time we ran UDP relay path discovery
+	lastDirectVsRelaySwap     mono.Time      // Phase 22 v2: last time bestAddr crossed the direct↔relay category boundary; zero before any cross-category swap. See wouldAllowDirectVsRelaySwapLocked.
 	lastDiscoKeyAdvertisement mono.Time      // last time we sent a TSMPDiscoAdvertisement or not to this endpoint
 	derpAddr                  netip.AddrPort // fallback/bootstrap path, if non-zero (non-zero for well-behaved clients)
 
@@ -116,9 +117,8 @@ func (de *endpoint) udpRelayEndpointReady(maybeBest addrQuality) {
 	curBestAddrTrusted := now.Before(de.trustBestAddrUntil)
 	sameRelayServer := de.bestAddr.vni.IsSet() && maybeBest.relayServerDisco.Compare(de.bestAddr.relayServerDisco) == 0
 
-	if !curBestAddrTrusted ||
-		sameRelayServer ||
-		betterAddr(maybeBest, de.bestAddr) {
+	bypassHysteresis := !curBestAddrTrusted || sameRelayServer
+	if bypassHysteresis || betterAddr(maybeBest, de.bestAddr) {
 		// We must set maybeBest as de.bestAddr if:
 		//   1. de.bestAddr is untrusted. betterAddr does not consider
 		//      time-based trust.
@@ -129,9 +129,21 @@ func (de *endpoint) udpRelayEndpointReady(maybeBest addrQuality) {
 		//
 		// TODO(jwhited): add observability around !curBestAddrTrusted and sameRelayServer
 		// TODO(jwhited): collapse path change logging with endpoint.handlePongConnLocked()
+		//
+		// Phase 22 v2: when the swap is driven only by betterAddr (not by
+		// curBestAddr being untrusted, and not by sameRelayServer), apply
+		// the per-peer direct↔relay hysteresis window. Untrusted/sameRelay
+		// always bypass hysteresis — those are correctness-required
+		// transitions, not latency-optimization swaps.
+		if !bypassHysteresis && !de.wouldAllowDirectVsRelaySwapLocked(de.bestAddr, maybeBest, now) {
+			metricDirectVsRelayHoldRejected.Add(1)
+			return
+		}
+		prev := de.bestAddr
 		de.c.logf("magicsock: disco: node %v %v now using %v mtu=%v", de.publicKey.ShortString(), de.discoShort(), maybeBest.epAddr, maybeBest.wireMTU)
 		de.setBestAddrLocked(maybeBest)
 		de.trustBestAddrUntil = now.Add(trustUDPAddrDuration)
+		de.noteDirectVsRelaySwapLocked(prev, maybeBest, now)
 	}
 }
 
@@ -925,7 +937,31 @@ func (de *endpoint) wantUDPRelayPathDiscoveryLocked(now mono.Time) bool {
 		return false
 	}
 	if de.bestAddr.isDirect() && now.Before(de.trustBestAddrUntil) {
-		return false
+		// Phase 22 v2: when TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE=true,
+		// don't suppress relay-path discovery unconditionally just because
+		// a trusted direct path is held. Run discovery at the (longer)
+		// comparison interval so betterAddr can compare direct vs relay
+		// latency across categories. With the env knob false (default),
+		// behaviour is bit-identical to before.
+		//
+		// Operator-tunable comparison interval is floored at the existing
+		// discoverUDPRelayPathsInterval (30 s) so a low
+		// TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE_INTERVAL_S cannot exceed
+		// the rate-limit that the non-direct branch applies for the same
+		// reason (probe overhead).
+		if !directVsRelayCompareEnabled() {
+			return false
+		}
+		effectiveInterval := directVsRelayCompareIntervalValue()
+		if effectiveInterval < discoverUDPRelayPathsInterval {
+			effectiveInterval = discoverUDPRelayPathsInterval
+		}
+		if !de.lastUDPRelayPathDiscovery.IsZero() &&
+			now.Sub(de.lastUDPRelayPathDiscovery) < effectiveInterval {
+			return false
+		}
+		metricDirectVsRelayCompared.Add(1)
+		return true
 	}
 	if !de.lastUDPRelayPathDiscovery.IsZero() && now.Sub(de.lastUDPRelayPathDiscovery) < discoverUDPRelayPathsInterval {
 		return false
@@ -1667,11 +1703,18 @@ func (de *endpoint) addCandidateEndpoint(ep netip.AddrPort, forRxPingTxID stun.T
 // clearBestAddrLocked clears the bestAddr and related fields such that future
 // packets will re-evaluate the best address to send to next.
 //
+// Also resets lastDirectVsRelaySwap because the per-peer direct↔relay
+// hysteresis state describes flap-against the now-cleared path; carrying
+// it forward into the next path's install would block legitimate cross-
+// category swaps right after a state-clear event for up to the hold
+// window. See PR #16 round 5 (Codex P2).
+//
 // de.mu must be held.
 func (de *endpoint) clearBestAddrLocked() {
 	de.setBestAddrLocked(addrQuality{})
 	de.bestAddrAt = 0
 	de.trustBestAddrUntil = 0
+	de.lastDirectVsRelaySwap = 0
 }
 
 // noteBadEndpoint marks udpAddr as a bad endpoint that would need to be
@@ -1817,14 +1860,25 @@ func (de *endpoint) handlePongConnLocked(m *disco.Pong, di *discoInfo, src epAdd
 		}
 		bestUntrusted := now.After(de.trustBestAddrUntil)
 		if betterAddr(thisPong, de.bestAddr) || bestUntrusted {
-			de.c.logf("magicsock: disco: node %v %v now using %v mtu=%v tx=%x", de.publicKey.ShortString(), de.discoShort(), sp.to, thisPong.wireMTU, m.TxID[:6])
-			de.debugUpdates.Add(EndpointChange{
-				When: time.Now(),
-				What: "handlePongConnLocked-bestAddr-update",
-				From: de.bestAddr,
-				To:   thisPong,
-			})
-			de.setBestAddrLocked(thisPong)
+			// Phase 22 v2: betterAddr-driven swap goes through the
+			// hysteresis check. bestUntrusted bypasses hysteresis
+			// because it is a correctness transition (current bestAddr
+			// is no longer trustworthy), not a latency-optimization
+			// swap.
+			if !bestUntrusted && !de.wouldAllowDirectVsRelaySwapLocked(de.bestAddr, thisPong, now) {
+				metricDirectVsRelayHoldRejected.Add(1)
+			} else {
+				prev := de.bestAddr
+				de.c.logf("magicsock: disco: node %v %v now using %v mtu=%v tx=%x", de.publicKey.ShortString(), de.discoShort(), sp.to, thisPong.wireMTU, m.TxID[:6])
+				de.debugUpdates.Add(EndpointChange{
+					When: time.Now(),
+					What: "handlePongConnLocked-bestAddr-update",
+					From: de.bestAddr,
+					To:   thisPong,
+				})
+				de.setBestAddrLocked(thisPong)
+				de.noteDirectVsRelaySwapLocked(prev, thisPong, now)
+			}
 		}
 		if de.bestAddr.epAddr == thisPong.epAddr {
 			de.debugUpdates.Add(EndpointChange{
@@ -1875,6 +1929,71 @@ func (a addrQuality) String() string {
 	return fmt.Sprintf("%v@%v+%v", a.epAddr, a.latency, a.wireMTU)
 }
 
+// wouldAllowDirectVsRelaySwapLocked reports whether moving bestAddr from
+// `cur` to `maybe` is permitted by the per-peer direct↔relay hysteresis
+// window.
+//
+// Same-category moves (direct→direct, relay→relay) always return true —
+// the hysteresis is specifically about damping cross-category flap when
+// one category's RTT is hovering near the 10 % gate boundary.
+//
+// Cross-category moves return true only if either:
+//   - directVsRelayCompareEnabled() is false (knob off; behaviour unchanged
+//     from before Phase 22 v2), OR
+//   - the configured hold window (directVsRelayHoldDurationValue, default
+//     5 min) has elapsed since the last cross-category swap, OR
+//   - this is the first cross-category swap (lastDirectVsRelaySwap is
+//     zero).
+//
+// Caller must hold de.mu.
+func (de *endpoint) wouldAllowDirectVsRelaySwapLocked(cur, maybe addrQuality, now mono.Time) bool {
+	if !directVsRelayCompareEnabled() {
+		return true
+	}
+	// If cur is empty / invalid (no real current path), hysteresis does not
+	// apply — there is nothing to dampen against. Without this guard, an
+	// invalid cur would be classified as "direct" (since its zero-value
+	// vni is unset), and a relay maybe would then look like a cross-category
+	// swap, potentially blocked by the hold window when no real current
+	// direct path exists. See PR #16 round 3 (Codex P2).
+	if !cur.ap.IsValid() {
+		return true
+	}
+	curIsDirect := !cur.vni.IsSet()
+	maybeIsDirect := !maybe.vni.IsSet()
+	if curIsDirect == maybeIsDirect {
+		return true
+	}
+	if de.lastDirectVsRelaySwap.IsZero() {
+		return true
+	}
+	return now.Sub(de.lastDirectVsRelaySwap) >= directVsRelayHoldDurationValue()
+}
+
+// noteDirectVsRelaySwapLocked records the current time as the last
+// cross-category swap timestamp if the swap from `prev` to `nowAddr`
+// actually crossed the direct↔relay category boundary. Caller must hold
+// de.mu and have just called setBestAddrLocked.
+//
+// If `prev` is invalid (zero-value addrQuality from a cleared bestAddr),
+// the transition is the *first* path being installed, not a swap from
+// an established direct or relay path — there is nothing to flap from.
+// Recording it as a swap would suppress the next legitimate cross-
+// category transition for up to the hold window, e.g. blocking a fresh
+// direct candidate from preempting an initial relay path after a state-
+// clear event. See PR #16 round 4 (Codex P2).
+func (de *endpoint) noteDirectVsRelaySwapLocked(prev, nowAddr addrQuality, now mono.Time) {
+	if !directVsRelayCompareEnabled() {
+		return
+	}
+	if !prev.ap.IsValid() {
+		return
+	}
+	if prev.vni.IsSet() != nowAddr.vni.IsSet() {
+		de.lastDirectVsRelaySwap = now
+	}
+}
+
 // betterAddr reports whether a is a better addr to use than b.
 func betterAddr(a, b addrQuality) bool {
 	if a.epAddr == b.epAddr {
@@ -1896,11 +2015,35 @@ func betterAddr(a, b addrQuality) bool {
 	}
 
 	// Geneve-encapsulated paths (UDP relay servers) are lower preference in
-	// relation to non.
+	// relation to non-Geneve direct paths by default.
+	//
+	// Phase 22 v2: when TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE=true, allow
+	// the relay path to win if its measured latency is at least the gate
+	// threshold (default 10 %) lower than the direct path's. Otherwise
+	// preserve today's hard direct-preference. With the env knob false
+	// (default), behaviour is bit-identical to before.
 	if !a.vni.IsSet() && b.vni.IsSet() {
+		// a is direct; b is relay.
+		if directVsRelayCompareEnabled() &&
+			relayBeatsDirectByThresholdLocked(a.latency, b.latency, directVsRelayThresholdValue()) {
+			metricDirectVsRelayGateRelayPreferred.Add(1)
+			return false
+		}
+		if directVsRelayCompareEnabled() {
+			metricDirectVsRelayGateDirectPreferred.Add(1)
+		}
 		return true
 	}
 	if a.vni.IsSet() && !b.vni.IsSet() {
+		// a is relay; b is direct.
+		if directVsRelayCompareEnabled() &&
+			relayBeatsDirectByThresholdLocked(b.latency, a.latency, directVsRelayThresholdValue()) {
+			metricDirectVsRelayGateRelayPreferred.Add(1)
+			return true
+		}
+		if directVsRelayCompareEnabled() {
+			metricDirectVsRelayGateDirectPreferred.Add(1)
+		}
 		return false
 	}
 
