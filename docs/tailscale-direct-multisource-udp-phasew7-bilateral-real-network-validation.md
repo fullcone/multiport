@@ -305,16 +305,18 @@ Reading the auto-mode behavior end to end:
 | Row | Description                       | Status                                            |
 |-----|-----------------------------------|---------------------------------------------------|
 | 1   | both ends public, no NAT          | not testable here (server is behind upstream NAT) |
-| 2   | client single-side hard NAT       | covered by automatic-mode result above            |
+| 2   | client single-side hard NAT       | not testable here (server is also behind NAT, so the run is dual-NAT not single-sided) |
 | 3   | both sides NAT                    | **covered**                                        |
 | 4   | Wi-Fi / 4G switch on the client   | not exercised (host is wired only)                |
 | 5   | Modern Standby suspend / resume   | not testable on Server SKU (covered as N/A in W5) |
 | 6   | AV / EDR enabled                  | Defender installed, RTP off (covered in W5)       |
 
-W7 acceptance "≥1 bilateral matrix row" is satisfied by row 3 / 2:
+W7 acceptance "≥1 bilateral matrix row" is satisfied by row 3:
 both ends NAT'd, automatic-mode srcsel observed switching to aux on
 the side whose probe path was reachable, and bidirectional WireGuard
-data plane confirmed via `tailscale ping --tsmp`.
+data plane confirmed via `tailscale ping --tsmp`. Row 2 (single-side
+hard NAT) requires a topology with at least one publicly reachable
+end and is left for a future test bed.
 
 ## Findings
 
