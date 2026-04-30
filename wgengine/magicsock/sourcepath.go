@@ -21,6 +21,18 @@ const (
 	sourcePathProbeHistoryLimit = 32
 	sourcePathProbeMaxPeers     = 32
 	sourcePathProbeMaxBurst     = 1
+
+	// sourcePathSampleTTL is the maximum age of a probe sample considered by
+	// the scorer. Older samples are skipped so a stale lucky measurement does
+	// not pin auxiliary selection on a path whose NAT mapping or routing has
+	// since changed.
+	sourcePathSampleTTL = 60 * time.Second
+
+	// sourcePathMinSamplesForUse is the minimum number of TTL-fresh samples a
+	// (dst, source) pair must have before automatic source selection is
+	// allowed to use it. The gate keeps a single lucky probe from steering
+	// real WireGuard traffic.
+	sourcePathMinSamplesForUse = 3
 )
 
 var (
@@ -160,6 +172,22 @@ func (pm *sourcePathProbeManager) clearLocked() {
 	pm.samples = nil
 }
 
+// noteSourcePathSendFailure invalidates probe samples for (dst, source) after
+// a real-data send through that source failed. This forces the scorer to wait
+// for fresh probe evidence before steering data back to the failed pair.
+// No-op for the primary source.
+func (c *Conn) noteSourcePathSendFailure(dst epAddr, source sourceRxMeta) {
+	if source.isPrimary() {
+		return
+	}
+	c.mu.Lock()
+	dropped := c.sourceProbes.invalidateLocked(dst, source)
+	c.mu.Unlock()
+	if dropped > 0 {
+		metricSourcePathSendFailureInvalidated.Add(int64(dropped))
+	}
+}
+
 func (c *Conn) sourcePathBestCandidate(dst epAddr) (sourcePathCandidateScore, bool) {
 	if !dst.isDirect() {
 		return sourcePathCandidateScore{}, false
@@ -172,10 +200,10 @@ func (c *Conn) sourcePathBestCandidate(dst epAddr) (sourcePathCandidateScore, bo
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.sourceProbes.bestCandidateLocked(dst, sources)
+	return c.sourceProbes.bestCandidateLocked(dst, sources, mono.Now())
 }
 
-func (pm *sourcePathProbeManager) bestCandidateLocked(dst epAddr, sources []sourceRxMeta) (sourcePathCandidateScore, bool) {
+func (pm *sourcePathProbeManager) bestCandidateLocked(dst epAddr, sources []sourceRxMeta, now mono.Time) (sourcePathCandidateScore, bool) {
 	if !dst.isDirect() {
 		return sourcePathCandidateScore{}, false
 	}
@@ -187,16 +215,22 @@ func (pm *sourcePathProbeManager) bestCandidateLocked(dst epAddr, sources []sour
 			continue
 		}
 
-		var candidate sourcePathCandidateScore
-		var candidateOK bool
+		var (
+			candidate    sourcePathCandidateScore
+			candidateOK  bool
+			sumLatencyNs int64
+		)
 		for _, sample := range pm.samples {
 			if sample.dst != dst || sample.source != source {
 				continue
 			}
+			if now.Sub(sample.at) > sourcePathSampleTTL {
+				continue
+			}
+			sumLatencyNs += sample.latency.Nanoseconds()
 			if !candidateOK {
 				candidate = sourcePathCandidateScore{
 					source:  source,
-					latency: sample.latency,
 					samples: 1,
 					lastAt:  sample.at,
 				}
@@ -204,22 +238,41 @@ func (pm *sourcePathProbeManager) bestCandidateLocked(dst epAddr, sources []sour
 				continue
 			}
 			candidate.samples++
-			if sample.latency < candidate.latency {
-				candidate.latency = sample.latency
-			}
 			if sample.at.Sub(candidate.lastAt) > 0 {
 				candidate.lastAt = sample.at
 			}
 		}
-		if !candidateOK {
+		if !candidateOK || candidate.samples < sourcePathMinSamplesForUse {
 			continue
 		}
+		// Mean latency over TTL-fresh samples. Mean is more representative of
+		// what users will see for real data than the historical minimum, and
+		// it dampens the influence of any single lucky packet.
+		candidate.latency = time.Duration(sumLatencyNs / int64(candidate.samples))
 		if !bestOK || candidate.latency < best.latency || (candidate.latency == best.latency && candidate.lastAt.Sub(best.lastAt) > 0) {
 			best = candidate
 			bestOK = true
 		}
 	}
 	return best, bestOK
+}
+
+// invalidateLocked drops all samples for the given (dst, source) pair. Used
+// when a real-data send via that pair fails so the next selection cycle waits
+// for fresh probe evidence before steering data back to it.
+func (pm *sourcePathProbeManager) invalidateLocked(dst epAddr, source sourceRxMeta) int {
+	n := 0
+	dropped := 0
+	for _, sample := range pm.samples {
+		if sample.dst == dst && sample.source == source {
+			dropped++
+			continue
+		}
+		pm.samples[n] = sample
+		n++
+	}
+	pm.samples = pm.samples[:n]
+	return dropped
 }
 
 func (pm *sourcePathProbeManager) pruneExpiredLocked(now mono.Time) {

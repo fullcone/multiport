@@ -1087,6 +1087,7 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 		if err != nil && usingSourcePathAux {
 			metricSourcePathDataSendAuxFallback.Add(1)
 			de.c.logf("magicsock: srcsel: data send from source %d to %v failed, retrying primary: %v", source.socketID, udpAddr, err)
+			de.c.noteSourcePathSendFailure(udpAddr, source)
 			usedPrimarySend = true
 			_, err = de.c.sendUDPBatch(udpAddr, buffs, offset)
 		} else if usingSourcePathAux {

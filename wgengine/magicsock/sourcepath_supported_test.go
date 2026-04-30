@@ -222,8 +222,11 @@ func TestSourcePathBestCandidateObserveOnlyDoesNotSelectDataSource(t *testing.T)
 		},
 	}
 	c.sourceProbes.samples = []sourcePathProbeSample{
+		{dst: v4, source: sources4[0], latency: 8 * time.Millisecond, at: now.Add(-3 * time.Second)},
 		{dst: v4, source: sources4[0], latency: 9 * time.Millisecond, at: now.Add(-2 * time.Second)},
 		{dst: v4, source: sources4[0], latency: 7 * time.Millisecond, at: now.Add(-1 * time.Second)},
+		{dst: v6, source: sources6[0], latency: 13 * time.Millisecond, at: now.Add(-3 * time.Second)},
+		{dst: v6, source: sources6[0], latency: 9 * time.Millisecond, at: now.Add(-2 * time.Second)},
 		{dst: v6, source: sources6[0], latency: 11 * time.Millisecond, at: now.Add(-1 * time.Second)},
 	}
 	beforePending, beforeSamples := c.sourceProbes.pendingLenLocked(), c.sourceProbes.samplesLenLocked()
@@ -242,8 +245,8 @@ func TestSourcePathBestCandidateObserveOnlyDoesNotSelectDataSource(t *testing.T)
 	if score4.source != sources4[0] {
 		t.Fatalf("IPv4 observe-only candidate source = %+v, want %+v", score4.source, sources4[0])
 	}
-	if score4.latency != 7*time.Millisecond || score4.samples != 2 {
-		t.Fatalf("IPv4 observe-only score = latency %v samples %d, want 7ms and 2 samples", score4.latency, score4.samples)
+	if score4.latency != 8*time.Millisecond || score4.samples != 3 {
+		t.Fatalf("IPv4 observe-only score = latency %v samples %d, want 8ms and 3 samples (mean of 8,9,7)", score4.latency, score4.samples)
 	}
 	if !ok6 {
 		t.Fatal("IPv6 observe-only candidate not found")
@@ -251,8 +254,8 @@ func TestSourcePathBestCandidateObserveOnlyDoesNotSelectDataSource(t *testing.T)
 	if score6.source != sources6[0] {
 		t.Fatalf("IPv6 observe-only candidate source = %+v, want %+v", score6.source, sources6[0])
 	}
-	if score6.latency != 11*time.Millisecond || score6.samples != 1 {
-		t.Fatalf("IPv6 observe-only score = latency %v samples %d, want 11ms and 1 sample", score6.latency, score6.samples)
+	if score6.latency != 11*time.Millisecond || score6.samples != 3 {
+		t.Fatalf("IPv6 observe-only score = latency %v samples %d, want 11ms and 3 samples (mean of 13,9,11)", score6.latency, score6.samples)
 	}
 	if afterPending != beforePending {
 		t.Fatalf("pending probes mutated by observe-only scoring: got %d want %d", afterPending, beforePending)
@@ -322,8 +325,11 @@ func TestSourcePathDataSendSourceAutomaticCandidateDualStack(t *testing.T) {
 		{dst: v4, source: primarySourceRxMeta, latency: time.Millisecond, at: now.Add(-5 * time.Second)},
 		{dst: v4, source: stale4, latency: time.Millisecond, at: now.Add(-4 * time.Second)},
 		{dst: v4Other, source: sources4[0], latency: time.Millisecond, at: now.Add(-3 * time.Second)},
+		{dst: v4, source: sources4[0], latency: 7 * time.Millisecond, at: now.Add(-3 * time.Second)},
 		{dst: v4, source: sources4[0], latency: 8 * time.Millisecond, at: now.Add(-2 * time.Second)},
 		{dst: v4, source: sources4[0], latency: 6 * time.Millisecond, at: now.Add(-1 * time.Second)},
+		{dst: v6, source: sources6[0], latency: 11 * time.Millisecond, at: now.Add(-3 * time.Second)},
+		{dst: v6, source: sources6[0], latency: 9 * time.Millisecond, at: now.Add(-2 * time.Second)},
 		{dst: v6, source: sources6[0], latency: 10 * time.Millisecond, at: now.Add(-1 * time.Second)},
 	}
 	beforePending, beforeSamples := c.sourceProbes.pendingLenLocked(), c.sourceProbes.samplesLenLocked()
@@ -418,7 +424,11 @@ func TestSourcePathDataSendSourceNonDirectGuardDualStack(t *testing.T) {
 		stun.NewTxID(): {dst: direct6, source: source6, at: now},
 	}
 	c.sourceProbes.samples = []sourcePathProbeSample{
+		{dst: direct4, source: source4, latency: 6 * time.Millisecond, at: now.Add(-2 * time.Second)},
+		{dst: direct4, source: source4, latency: 6 * time.Millisecond, at: now.Add(-1 * time.Second)},
 		{dst: direct4, source: source4, latency: 6 * time.Millisecond, at: now},
+		{dst: direct6, source: source6, latency: 7 * time.Millisecond, at: now.Add(-2 * time.Second)},
+		{dst: direct6, source: source6, latency: 7 * time.Millisecond, at: now.Add(-1 * time.Second)},
 		{dst: direct6, source: source6, latency: 7 * time.Millisecond, at: now},
 		{dst: relay4, source: source4, latency: time.Millisecond, at: now},
 		{dst: relay6, source: source6, latency: time.Millisecond, at: now},
@@ -1358,15 +1368,17 @@ func seedSourcePathAutomaticCandidate(t *testing.T, c *Conn, dst epAddr, want4 b
 	}
 	now := mono.Now()
 	c.mu.Lock()
-	c.sourceProbes.samples = append(c.sourceProbes.samples, sourcePathProbeSample{
-		txid:     stun.NewTxID(),
-		dst:      dst,
-		pongFrom: dst,
-		pongSrc:  dst.ap,
-		source:   sources[0],
-		latency:  time.Millisecond,
-		at:       now,
-	})
+	for i := 0; i < sourcePathMinSamplesForUse; i++ {
+		c.sourceProbes.samples = append(c.sourceProbes.samples, sourcePathProbeSample{
+			txid:     stun.NewTxID(),
+			dst:      dst,
+			pongFrom: dst,
+			pongSrc:  dst.ap,
+			source:   sources[0],
+			latency:  time.Millisecond,
+			at:       now.Add(-time.Duration(i) * time.Millisecond),
+		})
+	}
 	c.mu.Unlock()
 	return sources[0]
 }

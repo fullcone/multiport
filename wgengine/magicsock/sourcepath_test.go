@@ -318,54 +318,56 @@ func TestSourcePathProbeManagerBestCandidateDualStackObserveOnly(t *testing.T) {
 		{dst: v4, source: primarySourceRxMeta, latency: time.Millisecond, at: now.Add(-5 * time.Second)},
 		{dst: v4, source: stale4, latency: time.Millisecond, at: now.Add(-4 * time.Second)},
 		{dst: v4Other, source: current4, latency: time.Millisecond, at: now.Add(-3 * time.Second)},
+		{dst: v4, source: current4, latency: 30 * time.Millisecond, at: now.Add(-3 * time.Second)},
 		{dst: v4, source: current4, latency: 20 * time.Millisecond, at: now.Add(-2 * time.Second)},
 		{dst: v4, source: current4, latency: 10 * time.Millisecond, at: now.Add(-1 * time.Second)},
-		{dst: v6, source: current6, latency: 12 * time.Millisecond, at: now.Add(-2 * time.Second)},
-		{dst: v6, source: current6, latency: 15 * time.Millisecond, at: now.Add(-1 * time.Second)},
+		{dst: v6, source: current6, latency: 18 * time.Millisecond, at: now.Add(-3 * time.Second)},
+		{dst: v6, source: current6, latency: 15 * time.Millisecond, at: now.Add(-2 * time.Second)},
+		{dst: v6, source: current6, latency: 12 * time.Millisecond, at: now.Add(-1 * time.Second)},
 	}
 	beforePending, beforeSamples := pm.pendingLenLocked(), pm.samplesLenLocked()
 
-	score4, ok := pm.bestCandidateLocked(v4, []sourceRxMeta{primarySourceRxMeta, current4, current6})
+	score4, ok := pm.bestCandidateLocked(v4, []sourceRxMeta{primarySourceRxMeta, current4, current6}, now)
 	if !ok {
 		t.Fatal("IPv4 candidate not found")
 	}
 	if score4.source != current4 {
 		t.Fatalf("IPv4 candidate source = %+v, want %+v", score4.source, current4)
 	}
-	if score4.latency != 10*time.Millisecond {
-		t.Fatalf("IPv4 candidate latency = %v, want 10ms", score4.latency)
+	if score4.latency != 20*time.Millisecond {
+		t.Fatalf("IPv4 candidate latency = %v, want 20ms (mean of 10ms, 20ms, 30ms)", score4.latency)
 	}
-	if score4.samples != 2 {
-		t.Fatalf("IPv4 candidate sample count = %d, want 2", score4.samples)
+	if score4.samples != 3 {
+		t.Fatalf("IPv4 candidate sample count = %d, want 3", score4.samples)
 	}
 	if got, want := score4.lastAt.Sub(now.Add(-1*time.Second)), time.Duration(0); got != want {
 		t.Fatalf("IPv4 candidate lastAt delta = %v, want %v", got, want)
 	}
 
-	score6, ok := pm.bestCandidateLocked(v6, []sourceRxMeta{current4, current6})
+	score6, ok := pm.bestCandidateLocked(v6, []sourceRxMeta{current4, current6}, now)
 	if !ok {
 		t.Fatal("IPv6 candidate not found")
 	}
 	if score6.source != current6 {
 		t.Fatalf("IPv6 candidate source = %+v, want %+v", score6.source, current6)
 	}
-	if score6.latency != 12*time.Millisecond {
-		t.Fatalf("IPv6 candidate latency = %v, want 12ms", score6.latency)
+	if score6.latency != 15*time.Millisecond {
+		t.Fatalf("IPv6 candidate latency = %v, want 15ms (mean of 12ms, 15ms, 18ms)", score6.latency)
 	}
-	if score6.samples != 2 {
-		t.Fatalf("IPv6 candidate sample count = %d, want 2", score6.samples)
+	if score6.samples != 3 {
+		t.Fatalf("IPv6 candidate sample count = %d, want 3", score6.samples)
 	}
 	if got, want := score6.lastAt.Sub(now.Add(-1*time.Second)), time.Duration(0); got != want {
 		t.Fatalf("IPv6 candidate lastAt delta = %v, want %v", got, want)
 	}
 
-	if _, ok := pm.bestCandidateLocked(v4, []sourceRxMeta{primarySourceRxMeta}); ok {
+	if _, ok := pm.bestCandidateLocked(v4, []sourceRxMeta{primarySourceRxMeta}, now); ok {
 		t.Fatal("primary-only source list returned a candidate")
 	}
-	if _, ok := pm.bestCandidateLocked(v4, []sourceRxMeta{{socketID: sourceIPv4SocketID, generation: 99}}); ok {
+	if _, ok := pm.bestCandidateLocked(v4, []sourceRxMeta{{socketID: sourceIPv4SocketID, generation: 99}}, now); ok {
 		t.Fatal("nonmatching generation source list returned a candidate")
 	}
-	if _, ok := pm.bestCandidateLocked(epAddr{}, []sourceRxMeta{current4}); ok {
+	if _, ok := pm.bestCandidateLocked(epAddr{}, []sourceRxMeta{current4}, now); ok {
 		t.Fatal("non-direct destination returned a candidate")
 	}
 	if got := pm.pendingLenLocked(); got != beforePending {
@@ -373,6 +375,142 @@ func TestSourcePathProbeManagerBestCandidateDualStackObserveOnly(t *testing.T) {
 	}
 	if got := pm.samplesLenLocked(); got != beforeSamples {
 		t.Fatalf("samples mutated by scoring: got %d want %d", got, beforeSamples)
+	}
+}
+
+func TestSourcePathProbeManagerSkipsExpiredSamples(t *testing.T) {
+	var pm sourcePathProbeManager
+	now := mono.Now()
+	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 11}
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+
+	pm.samples = []sourcePathProbeSample{
+		// Old enough to be excluded by the TTL filter.
+		{dst: dst, source: source, latency: 5 * time.Millisecond, at: now.Add(-2 * sourcePathSampleTTL)},
+		{dst: dst, source: source, latency: 5 * time.Millisecond, at: now.Add(-(sourcePathSampleTTL + time.Second))},
+		// Fresh enough to be considered.
+		{dst: dst, source: source, latency: 18 * time.Millisecond, at: now.Add(-3 * time.Second)},
+		{dst: dst, source: source, latency: 22 * time.Millisecond, at: now.Add(-2 * time.Second)},
+		{dst: dst, source: source, latency: 20 * time.Millisecond, at: now.Add(-1 * time.Second)},
+	}
+
+	score, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now)
+	if !ok {
+		t.Fatal("expected a candidate from fresh samples")
+	}
+	if score.samples != 3 {
+		t.Fatalf("candidate sample count = %d, want 3 (expired samples excluded)", score.samples)
+	}
+	if score.latency != 20*time.Millisecond {
+		t.Fatalf("candidate latency = %v, want 20ms (mean of fresh samples 18+22+20)", score.latency)
+	}
+}
+
+func TestSourcePathProbeManagerRequiresMinSamplesForUse(t *testing.T) {
+	var pm sourcePathProbeManager
+	now := mono.Now()
+	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 7}
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+
+	for i := 0; i < sourcePathMinSamplesForUse-1; i++ {
+		pm.samples = append(pm.samples, sourcePathProbeSample{
+			dst:     dst,
+			source:  source,
+			latency: 10 * time.Millisecond,
+			at:      now.Add(-time.Duration(i+1) * time.Second),
+		})
+	}
+	if _, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now); ok {
+		t.Fatalf("candidate selected with only %d fresh samples (min %d required)", sourcePathMinSamplesForUse-1, sourcePathMinSamplesForUse)
+	}
+
+	pm.samples = append(pm.samples, sourcePathProbeSample{
+		dst:     dst,
+		source:  source,
+		latency: 10 * time.Millisecond,
+		at:      now,
+	})
+	score, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now)
+	if !ok {
+		t.Fatalf("candidate not selected with %d fresh samples", sourcePathMinSamplesForUse)
+	}
+	if score.samples != sourcePathMinSamplesForUse {
+		t.Fatalf("candidate sample count = %d, want %d", score.samples, sourcePathMinSamplesForUse)
+	}
+}
+
+func TestSourcePathProbeManagerInvalidateDropsMatching(t *testing.T) {
+	var pm sourcePathProbeManager
+	now := mono.Now()
+	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 5}
+	otherSource := sourceRxMeta{socketID: sourceIPv6SocketID, generation: 5}
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	otherDst := epAddr{ap: netip.MustParseAddrPort("192.0.2.3:41641")}
+
+	pm.samples = []sourcePathProbeSample{
+		{dst: dst, source: source, latency: 10 * time.Millisecond, at: now.Add(-3 * time.Second)},
+		{dst: dst, source: source, latency: 12 * time.Millisecond, at: now.Add(-2 * time.Second)},
+		{dst: dst, source: source, latency: 14 * time.Millisecond, at: now.Add(-1 * time.Second)},
+		{dst: otherDst, source: source, latency: 5 * time.Millisecond, at: now.Add(-1 * time.Second)},
+		{dst: dst, source: otherSource, latency: 6 * time.Millisecond, at: now.Add(-1 * time.Second)},
+	}
+
+	dropped := pm.invalidateLocked(dst, source)
+	if dropped != 3 {
+		t.Fatalf("invalidateLocked dropped = %d, want 3", dropped)
+	}
+	if got := pm.samplesLenLocked(); got != 2 {
+		t.Fatalf("samples after invalidate = %d, want 2", got)
+	}
+	for _, s := range pm.samples {
+		if s.dst == dst && s.source == source {
+			t.Fatalf("invalidated sample remained: %+v", s)
+		}
+	}
+
+	if _, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now); ok {
+		t.Fatal("invalidated (dst, source) still produces a candidate")
+	}
+}
+
+func TestConnNoteSourcePathSendFailureClearsSamples(t *testing.T) {
+	var c Conn
+	now := mono.Now()
+	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 5}
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+
+	c.mu.Lock()
+	c.sourceProbes.samples = []sourcePathProbeSample{
+		{dst: dst, source: source, latency: 10 * time.Millisecond, at: now.Add(-2 * time.Second)},
+		{dst: dst, source: source, latency: 12 * time.Millisecond, at: now.Add(-1 * time.Second)},
+	}
+	c.mu.Unlock()
+
+	before := metricSourcePathSendFailureInvalidated.Value()
+	c.noteSourcePathSendFailure(dst, source)
+
+	c.mu.Lock()
+	got := c.sourceProbes.samplesLenLocked()
+	c.mu.Unlock()
+	if got != 0 {
+		t.Fatalf("samples after send-failure invalidation = %d, want 0", got)
+	}
+	if delta := metricSourcePathSendFailureInvalidated.Value() - before; delta != 2 {
+		t.Fatalf("metric delta = %d, want 2", delta)
+	}
+
+	// Primary should be a no-op.
+	c.mu.Lock()
+	c.sourceProbes.samples = []sourcePathProbeSample{
+		{dst: dst, source: source, latency: 10 * time.Millisecond, at: now},
+	}
+	c.mu.Unlock()
+	c.noteSourcePathSendFailure(dst, primarySourceRxMeta)
+	c.mu.Lock()
+	remaining := c.sourceProbes.samplesLenLocked()
+	c.mu.Unlock()
+	if remaining != 1 {
+		t.Fatalf("primary send-failure should not touch samples; got %d remaining", remaining)
 	}
 }
 
