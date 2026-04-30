@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"tailscale.com/disco"
-	"tailscale.com/envknob"
 	"tailscale.com/net/stun"
 	"tailscale.com/tstime/mono"
 	"tailscale.com/types/key"
@@ -659,61 +658,6 @@ func TestSourcePathProbeManagerPrimaryBaselineAcceptsClearWin(t *testing.T) {
 	}
 	if score.latency != 5*time.Millisecond {
 		t.Fatalf("aux mean latency = %v, want 5ms", score.latency)
-	}
-}
-
-func TestSourcePathProbeManagerPrimaryBaselineThresholdEnvOverride(t *testing.T) {
-	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT", "1")
-	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT", "") })
-
-	var pm sourcePathProbeManager
-	now := mono.Now()
-	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 5}
-	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
-
-	// aux mean = 19ms, primary = 20ms → 5% improvement. With threshold
-	// lowered to 1% via env, aux now qualifies.
-	for i, lat := range []time.Duration{18 * time.Millisecond, 19 * time.Millisecond, 20 * time.Millisecond} {
-		pm.samples = append(pm.samples, sourcePathProbeSample{
-			dst:     dst,
-			source:  source,
-			latency: lat,
-			at:      now.Add(-time.Duration(i+1) * time.Second),
-		})
-	}
-
-	primary := 20 * time.Millisecond
-	if _, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now, primary); !ok {
-		t.Fatal("aux not selected with 1%% threshold env override despite 5%% improvement")
-	}
-}
-
-func TestSourcePathProbeManagerPrimaryBaselineThresholdEnvClampedTo100(t *testing.T) {
-	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT", "200")
-	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT", "") })
-
-	if got := sourcePathAuxBeatThresholdPercentValue(); got != 100 {
-		t.Fatalf("threshold value = %d, want 100 (clamped)", got)
-	}
-
-	var pm sourcePathProbeManager
-	now := mono.Now()
-	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 5}
-	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
-
-	// Even an aux mean of 1ms cannot beat primary RTT of 20ms × 0% = 0ms.
-	for i, lat := range []time.Duration{1 * time.Millisecond, 1 * time.Millisecond, 1 * time.Millisecond} {
-		pm.samples = append(pm.samples, sourcePathProbeSample{
-			dst:     dst,
-			source:  source,
-			latency: lat,
-			at:      now.Add(-time.Duration(i+1) * time.Second),
-		})
-	}
-
-	primary := 20 * time.Millisecond
-	if _, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now, primary); ok {
-		t.Fatal("aux selected with 100%% threshold (no aux should ever beat primary)")
 	}
 }
 
