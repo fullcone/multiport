@@ -168,19 +168,44 @@ of 1000 iterations):
 ...
 ```
 
-Endpoints arrive in tight clusters of three consecutive ports
-(`primary v4` / `aux v4` / `aux v6`), which matches `Conn.connBind.Open`
-binding `pconn4`, then `aux4`, then `aux6` from the same OS ephemeral
-range. Both `127.0.0.1` and `::1` ports show up even when the IPv4
-subtest is the only thing running, because the magicsock open path
-unconditionally binds both address families' aux sockets when
+Endpoints arrive in clusters of four consecutive ephemeral ports
+(`primary v6` / `primary v4` / `aux v4` / `aux v6`), which matches the
+actual bind sequence in `Conn.rebind` followed by
+`Conn.rebindSourcePathSockets`:
+
+```
+rebind()                    -> bindSocket(&pconn6, "udp6", ...)   // primary v6
+                            -> bindSocket(&pconn4, "udp4", ...)   // primary v4
+rebindSourcePathSockets()   -> bindSourcePathSocketLocked(aux4, "udp4")
+                            -> bindSourcePathSocketLocked(aux6, "udp6")
+```
+
+(`magicsock.go:3897-3906` calls into `sourcepath_supported.go:208`.)
+A representative cluster from the captured set, with the bind order
+labeled:
+
+```text
+::1:49178       primary v6   (rebind step 1)
+127.0.0.1:49179 primary v4   (rebind step 2)
+127.0.0.1:49180 aux v4       (rebindSourcePathSockets step 3)
+::1:49181       aux v6       (rebindSourcePathSockets step 4)
+```
+
+`Conn.connBind.Open` itself does not bind sockets — it only appends
+the per-source receive funcs (`magicsock.go:3563`). The actual
+binding has already happened in `rebind` by the time `Open` runs.
+
+Both `127.0.0.1` and `::1` ports show up even when the IPv4 subtest
+is the only thing running, because the bind path unconditionally
+opens both address families when
 `TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=1` is in effect.
 
 This is OS-level evidence that:
 
 - Windows allowed the test process to bind two extra UDP sockets per
-  magicsock instance (aux v4 + aux v6) in addition to the primary
-  pair.
+  magicsock instance (aux v4 + aux v6) in addition to the primary v4
+  + v6 pair, for a total of four sockets per `magicStack` end of the
+  test mesh.
 - The aux sockets are owned by the same `magicsock.test` PID as the
   primary sockets — the injected `recordingPacketListener` is observing
   real OS-bound sockets, not test-internal stand-ins.
