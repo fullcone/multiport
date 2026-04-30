@@ -59,6 +59,17 @@ const (
 	// allowed to use it. The gate keeps a single lucky probe from steering
 	// real WireGuard traffic.
 	sourcePathMinSamplesForUse = 3
+
+	// sourcePathAuxBeatThresholdPercent is the percentage by which an
+	// auxiliary candidate's mean latency must beat the primary path's
+	// observed latency before automatic selection is allowed to use it.
+	// 10 means aux mean must be < primary RTT × 0.90. Override via
+	// TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT (clamped to [0, 100]).
+	// A value of 0 means any improvement is enough; 100 disables aux
+	// selection entirely. The threshold is only applied when the caller
+	// supplies a non-zero primary RTT — when primary latency is unknown
+	// the scorer falls back to absolute aux selection (Phase 19 behavior).
+	sourcePathAuxBeatThresholdPercent = 10
 )
 
 var (
@@ -243,16 +254,36 @@ func (c *Conn) sourcePathBestCandidate(dst epAddr) (sourcePathCandidateScore, bo
 		return sourcePathCandidateScore{}, false
 	}
 
+	primaryRTT := c.primaryRTTForDst(dst)
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.sourceProbes.bestCandidateLocked(dst, sources, mono.Now())
+	return c.sourceProbes.bestCandidateLocked(dst, sources, mono.Now(), primaryRTT)
 }
 
-func (pm *sourcePathProbeManager) bestCandidateLocked(dst epAddr, sources []sourceRxMeta, now mono.Time) (sourcePathCandidateScore, bool) {
+// primaryRTTForDst looks up the endpoint that owns dst and returns its most
+// recent observed primary-path RTT, or 0 if the endpoint, the dst's per-address
+// pong history, and bestAddr all lack a usable measurement. The lookup
+// acquires c.mu and de.mu in the conventional order and releases both before
+// returning, so callers may freely re-enter c.mu afterward.
+func (c *Conn) primaryRTTForDst(dst epAddr) time.Duration {
+	c.mu.Lock()
+	de, ok := c.peerMap.endpointForEpAddr(dst)
+	c.mu.Unlock()
+	if !ok || de == nil {
+		return 0
+	}
+	de.mu.Lock()
+	defer de.mu.Unlock()
+	return de.primaryRTTForLocked(dst)
+}
+
+func (pm *sourcePathProbeManager) bestCandidateLocked(dst epAddr, sources []sourceRxMeta, now mono.Time, primaryRTT time.Duration) (sourcePathCandidateScore, bool) {
 	if !dst.isDirect() {
 		return sourcePathCandidateScore{}, false
 	}
 
+	thresholdPct := sourcePathAuxBeatThresholdPercentValue()
 	var best sourcePathCandidateScore
 	var bestOK bool
 	for _, source := range sources {
@@ -294,6 +325,16 @@ func (pm *sourcePathProbeManager) bestCandidateLocked(dst epAddr, sources []sour
 		// what users will see for real data than the historical minimum, and
 		// it dampens the influence of any single lucky packet.
 		candidate.latency = time.Duration(sumLatencyNs / int64(candidate.samples))
+		if primaryRTT > 0 && thresholdPct > 0 {
+			// aux mean must be strictly less than primaryRTT × (1 - threshold).
+			// Convert the percent threshold into an integer Duration cutoff to
+			// avoid float64 rounding noise on small RTTs.
+			cutoff := primaryRTT - primaryRTT*time.Duration(thresholdPct)/100
+			if candidate.latency >= cutoff {
+				metricSourcePathPrimaryBeatRejected.Add(1)
+				continue
+			}
+		}
 		if !bestOK || candidate.latency < best.latency || (candidate.latency == best.latency && candidate.lastAt.Sub(best.lastAt) > 0) {
 			best = candidate
 			bestOK = true

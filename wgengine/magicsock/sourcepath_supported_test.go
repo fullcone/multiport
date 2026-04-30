@@ -985,11 +985,17 @@ func TestSourcePathAutomaticAuxDualNodeRuntime(t *testing.T) {
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "true")
+			// On loopback the real primary RTT is sub-millisecond, far below
+			// the seeded 1ms aux samples. Disable the primary-baseline gate
+			// so this test exercises automatic-mode selection logic, not
+			// Phase 20's relative-improvement check.
+			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT", "-1")
 			t.Cleanup(func() {
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
+				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT", "")
 			})
 
 			logf := logger.WithPrefix(t.Logf, "srcsel-auto-dual-node-"+tt.name+": ")

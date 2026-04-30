@@ -27,6 +27,8 @@ func sourcePathProbeHardPendingCount() int { return sourcePathProbeHardPendingCa
 
 func sourcePathProbeSampleLimitCount() int { return sourcePathProbeHistoryLimit }
 
+func sourcePathAuxBeatThresholdPercentValue() int { return sourcePathAuxBeatThresholdPercent }
+
 func (c *Conn) sourcePathWriteWireGuardBatchTo(source sourceRxMeta, dst epAddr, buffs [][]byte, offset int) error {
 	return errSourcePathUnavailable
 }
