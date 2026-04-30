@@ -396,8 +396,12 @@ but its observable execution count remains zero on Windows just as
 it does on Linux.
 
 This is the third independent platform / topology where the
-structural-zero finding holds; we now consider it a stable invariant
-of the current Tailscale endpoint-discovery model.
+structural-zero observation holds, alongside W10's sustained Linux
+row-1 run and W11's sustained Linux row-2 run. W12 itself only
+exercises short `--c=5` probes per mode, so the Windows-side
+contribution is consistent-with-but-not-yet-sustained evidence; a
+Windows soak run would be needed to upgrade this from a strong
+structural signal to a sustained-traffic invariant.
 
 ## Compliance with Plan v01 § 4.4 Matrix (Updated)
 
@@ -420,26 +424,33 @@ sing-box / TUN interference.
 
 1. **Windows aux socket binding works on a clean machine.** Force
    and auto modes each produce four UDP sockets (primary v4 + v6 +
-   aux v4 + aux v6) on the Windows tailscaled process. The W2 / W4
-   / W5 / W6 sing-box-contaminated reports of "aux socket sometimes
-   not visible" are environmental, not code-level. Phase 9 / 10's
-   Windows-aux implementation is sound.
+   aux v4 + aux v6) on the Windows tailscaled process. Earlier
+   Windows runs (W2 / W4 / W5 / W6) already documented aux socket
+   bind / write on their respective dev-workstation setups; W12 adds
+   the first clean-machine run that lets the aux **send-and-pong
+   cycle** complete end-to-end without the sing-box default-route
+   intercept that those earlier runs co-existed with. Phase 9 / 10's
+   Windows-aux implementation is confirmed sound on bare hardware.
 2. **Phase 20 primary-baseline gate is platform-portable.** The
    `primary_beat_rejected = 22` count from auto-mode on Windows
-   matches the qualitative behavior of W10's 41 and W11's 67 firings.
-   The 10 % relative threshold rejects indistinguishable aux RTT
-   measurements regardless of platform.
+   matches the qualitative behavior of W10 (host: 28) and W11
+   (host: 42, client: 25). The 10 % relative threshold rejects
+   indistinguishable aux RTT measurements regardless of platform.
 3. **Force-mode source-path probe cycle works on Windows aux.**
    `probe_pong_accepted = 61` in force, `68` in auto — Windows aux
    sends source-path probes and receives pong replies on the aux
    socket, then attributes them to the correct `(dst, source)`
    sample bucket. Phase 19's TTL / min-samples / mean-latency scorer
    sees real data on Windows.
-4. **`aux_wireguard_rx = 0` is a stable structural invariant.**
-   Three independent platform / topology combinations now show the
-   counter remains zero under sustained srcsel use; we treat this
-   as a confirmed property of the Tailscale endpoint-discovery
-   model rather than a per-platform coincidence.
+4. **`aux_wireguard_rx = 0` is a structural-zero observation across
+   the validation runs to date.** W10 ran a sustained 40-ping host
+   loop, W11 ran a sustained 40-ping host loop, and W12 ran short
+   `--c=5` probes per mode. The receive-side fallthrough Phase 19
+   added has not fired in any of the runs. We treat this as a
+   strong structural signal about Tailscale's current endpoint-
+   discovery behavior, but stop short of calling it a sustained-use
+   invariant for W12 specifically — a sustained Windows-side soak
+   would be needed to make that stronger claim.
 5. **Force-mode safety profile expands.** W11 demonstrated that
    force-aux is not a catastrophic blackhole when the NAT'd peer
    has port-forward; W12 demonstrates that the *client*'s NAT also
