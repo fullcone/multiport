@@ -187,13 +187,26 @@ client-initiated outbound mapping bound to server-primary, which
 rejected server-aux's inbound. W11 row 2 does not exhibit this
 because the NAT'd end's primary port is explicitly forwarded.
 
-**This means forced-aux is safer than W7 portrayed it: as long as
-the NAT'd peer's primary port is reachable from outside (port
+**This means forced-aux is safer than W7 portrayed it for the
+W11 row-2 topology specifically: when one end is fully public *and*
+the other (NAT'd) end's primary port is externally reachable (port
 forward, full-cone NAT, or DMZ), the source-path probe replies can
-return via primary even when sending from aux.** Force-mode only
-catastrophically fails when both sides are NAT'd *and* neither side's
-primary is reachable from arbitrary source ports — i.e. the strict
-W7 row 3 case.
+return via primary even when sending from aux.**
+
+W7's row-3 catastrophic failure remains valid as a distinct
+condition: in W7 the server end actually did have an explicit UDP
+41641 port-forward, yet forced mode still blackholed bidirectionally
+because the **client** end was on enterprise CGNAT that did not
+accept inbound from the server-aux's source IP/port. The W7 failure
+mode is therefore not "both ends unreachable" but rather "any single
+NAT-traversed end whose NAT rejects the reverse aux flow" — in W7's
+case that was the Windows enterprise CGNAT side.
+
+Operators considering forced-aux should verify per deployment that
+**every** NAT-traversed end accepts inbound aux replies, not just
+that one end has port-forward. Row 2 with port-forward on the NAT'd
+end is the safest of the topologies measured so far; row 3 with even
+one CGNAT-class end remains a structural blackhole risk.
 
 ## Result 4 — Automatic Mode Under Sustained Traffic
 
@@ -247,30 +260,37 @@ indistinguishable aux measurements regardless of the absolute RTT.
 
 ## Compliance with Plan v01 § 4.4 Matrix (Updated)
 
-| Row | Description                       | Status                            |
-|-----|-----------------------------------|-----------------------------------|
-| 1   | both ends public (IPv4 + IPv6)    | covered by W10                    |
-| 2   | client single-side hard NAT       | **Covered by W11**                |
-| 3   | both sides NAT                    | covered by W7                     |
-| 4   | Wi-Fi / 4G switch on the client   | not exercised (wired hosts)       |
-| 5   | Modern Standby suspend / resume   | covered N/A by W5 (Server SKU)    |
-| 6   | AV / EDR enabled                  | covered by W5 (Defender RTP off)  |
+| Row | Description                       | Status                                                                        |
+|-----|-----------------------------------|-------------------------------------------------------------------------------|
+| 1   | both ends public (IPv4 + IPv6)    | covered by W10                                                                |
+| 2   | client single-side hard NAT       | **Partially covered by W11** (port-forwarded NAT'd client; CGNAT-only variant deferred) |
+| 3   | both sides NAT                    | covered by W7                                                                 |
+| 4   | Wi-Fi / 4G switch on the client   | not exercised (wired hosts)                                                   |
+| 5   | Modern Standby suspend / resume   | covered N/A by W5 (Server SKU)                                                |
+| 6   | AV / EDR enabled                  | covered by W5 (Defender RTP off)                                              |
 
-W7's "≥ 1 row" acceptance is now upgraded to **rows 1, 2, and 3 all
-covered**, with the IPv6 path validated end-to-end on the row-1
-bilateral run.
+W7's "≥ 1 row" acceptance is now upgraded to **rows 1 + 2
+(port-forwarded variant) + 3 covered**, with the IPv6 path validated
+end-to-end on the row-1 bilateral run. A CGNAT-only row-2 variant
+(NAT'd client whose primary is *not* externally reachable) remains
+deferred — see Out Of Scope.
 
 ## Findings
 
 1. **Row 2 srcsel data plane works in all three modes.** Baseline,
    force, and auto all keep TSMP bidirectional on both stacks at
    ~180 ms RTT (NAT-traversal cost on top of W10's 2 ms baseline).
-2. **Force-aux is safer than W7 implied** for the realistic case
-   where the NAT'd peer's primary port is port-forwarded (a common
-   homelab / VPS setup). The reverse-path-blackhole risk W7
-   documented requires *both* ends to be NAT'd *and* neither
-   primary port to be externally reachable — a strict double-NAT
-   without explicit forwarding.
+2. **Force-aux is safer than W7 implied** for the W11 row-2
+   topology — one fully public end and one NAT'd end whose primary
+   port is externally reachable (port-forward, full-cone, or DMZ),
+   a common homelab / VPS setup. W7's row-3 reverse-path-blackhole
+   was triggered by the *Windows enterprise CGNAT* end refusing the
+   reverse aux flow even though the *server* end of W7 had its own
+   port-forward; the blackhole condition is therefore "any single
+   NAT-traversed end whose NAT rejects the reverse aux flow", not
+   "both ends unreachable". Row 2 with port-forward on the NAT'd
+   client is verified safe; row 3 with even one CGNAT-class end
+   remains a structural blackhole risk.
 3. **Phase 20 primary-baseline gate is RTT-scale-invariant.** The
    10 % relative threshold rejects indistinguishable aux measurements
    at 2 ms (W10) and at 182 ms (W11) alike. The gate's design works
@@ -292,12 +312,15 @@ The `aux_wireguard_rx` correction Phase W10 added remains the
 authoritative position; W11 reaffirms that finding under row 2.
 
 Phase 19's `force-aux mode reverse-path blackhole` framing in its
-"operators carry full responsibility" caveat should ideally be
-softened to say the blackhole is specifically the **double-NAT**
-case where neither primary is externally reachable; W7 + W11 +
-W10 together now cover the matrix and show forced-aux is a
-catastrophic risk only in the strict W7 topology, not in row 1
-or row 2.
+"operators carry full responsibility" caveat should be refined to
+say the blackhole is specifically the case where **any** single
+NAT-traversed end refuses inbound from the peer-aux's source IP/port
+(e.g. enterprise CGNAT, symmetric NAT, or port-restricted NAT
+without explicit forwarding for the aux's port). W7 + W11 + W10
+together now cover the matrix and show forced-aux works on row 1
+(both public) and row 2 (NAT'd end port-forwarded) but remains a
+catastrophic risk on row 3 where the blocking end is the Windows
+enterprise CGNAT side, not the port-forwarded server side.
 
 ## Out Of Scope For W11
 
