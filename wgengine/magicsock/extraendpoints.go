@@ -59,17 +59,29 @@ var (
 )
 
 const (
-	// extraEndpointsDefaultMax is the default cap on how many extra
-	// endpoints from the file are honored per parse cycle. Operators tune
-	// via TS_EXPERIMENTAL_EXTRA_ENDPOINTS_MAX. <= 0 → use this default.
-	extraEndpointsDefaultMax = 32
+	// extraEndpointsDefaultMax is the default policy cap on how many
+	// extra endpoints from the file are honored per parse cycle.
+	//
+	// 0 means *unlimited*: the watcher honors every entry the file lists
+	// (subject only to the file-size memory-safety cap). This matches the
+	// project's permissive-caps stance — operators with hundreds or
+	// thousands of front-door entries don't have to remember to widen a
+	// policy knob, and small deployments pay nothing extra. Operators who
+	// want a hard policy cap (e.g. defense-in-depth against a misconfigured
+	// upstream that stuffs the file with junk) can set
+	// TS_EXPERIMENTAL_EXTRA_ENDPOINTS_MAX explicitly.
+	extraEndpointsDefaultMax = 0
 
-	// extraEndpointsMaxFileSize is a hard ceiling on file size to read
-	// (the parser refuses anything larger). Even the default-cap of 32
-	// endpoints with ~50-byte JSON strings each only needs ~2 KB; a
-	// generous 64 KB ceiling guards against a misconfigured runaway file
-	// pinning memory.
-	extraEndpointsMaxFileSize = 64 * 1024
+	// extraEndpointsMaxFileSize is the memory-safety ceiling on file size
+	// to read (the parser refuses anything larger). Sized for several
+	// thousand IPv6 entries with formatting room to spare:
+	//
+	//   "[2001:0db8:0000:0000:0000:0000:0000:0001]:65535",
+	//
+	// is ~50 bytes; 4 MB / 50 ≈ 80k entries — far above any plausible
+	// deployment. The ceiling exists only to bound memory use against a
+	// runaway / corrupt file, not as a policy constraint.
+	extraEndpointsMaxFileSize = 4 * 1024 * 1024
 )
 
 // extraEndpointsFile is the JSON shape parsed from
@@ -171,6 +183,10 @@ func (c *Conn) stopExtraEndpointsWatcher() {
 	// re-enter stopOnce.Do as a no-op and wg.Wait returns immediately.
 }
 
+// extraEndpointsMaxFromEnv returns the operator-configured per-cycle
+// endpoint cap, or 0 (= unlimited) when the env knob is unset or
+// non-positive. The parser interprets a returned value of 0 as "no
+// policy cap; honor every parsed entry below the file-size ceiling".
 func extraEndpointsMaxFromEnv() int {
 	n := envknobExtraEndpointsMax()
 	if n <= 0 {
@@ -347,7 +363,9 @@ func (s *extraEndpointsState) parseAndApply() ([]netip.AddrPort, error) {
 			dropped++
 			continue
 		}
-		if len(parsed) >= s.max {
+		if s.max > 0 && len(parsed) >= s.max {
+			// Policy cap from TS_EXPERIMENTAL_EXTRA_ENDPOINTS_MAX. Skipped
+			// entirely when the env is unset (s.max == 0 = unlimited).
 			dropped++
 			continue
 		}
