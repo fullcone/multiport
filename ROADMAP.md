@@ -149,6 +149,177 @@ That dynamic case is the load-bearing requirement; a static one-shot
 
 ---
 
-## Phase 22+ (future)
+## Phase 22 (candidate) — Total-path latency-aware peer-relay selection
+
+**Problem.** When two peers A and C cannot establish a direct UDP
+path (or the operator wants to deliberately avoid the direct path),
+Tailscale today relays the traffic through either DERP (centralized
+servers in fixed regions) or a peer-relay (any node that has
+`tailcfg.Hostinfo.PeerRelay = true`). The peer-relay candidate set
+can be large — anyone on the tailnet who opted in. **Selection
+between candidate peer-relays is single-segment A↔relay only**: the
+existing `relayManager` ranks relay candidates by the RTT each one
+returns on its `CallMeMaybeVia` reply (the round-trip A → relay →
+A), without any signal on what happens *after* the relay sends the
+packet onward to C.
+
+In practice this can pick badly. Concrete scenario the user
+described:
+
+```
+   A ↔ N (peer relay, RTT 10 ms)         N ↔ C (geographically far,   80 ms)
+   A ↔ M (peer relay, RTT 20 ms)         M ↔ C (close to C in Asia,  10 ms)
+
+   Optimal end-to-end: A → M → C  total 30 ms
+   Tailscale today picks: A → N → C  total 90 ms (because A↔N has the lowest first-hop RTT)
+```
+
+**Why neither Tailscale nor ZeroTier has it today.**
+
+- *Tailscale*: `relayManager.startUDPRelayPathDiscoveryFor` (in
+  `wgengine/magicsock/relayserver*.go`) runs disco probes with each
+  relay candidate and ranks by the round-trip `A → relay → A` RTT.
+  It does not query the relay for "what is *your* RTT to peer C".
+  No protocol exists for that question.
+- *ZeroTier* (verified against `zerotier/ZeroTierOne` HEAD,
+  `node/Topology.cpp::getUpstreamPeer` + `node/Peer.hpp::relayQuality`):
+  the relay-selection score is
+  `latency_to_relay * (staleness_factor + 1)`. Single-segment only,
+  exactly the same gap. ZeroTier's `Bond.cpp` is a separate
+  multi-physical-path bonding for the A↔B link, not multi-relay
+  selection.
+
+**Why this is *not* covered by Phase 21.** Phase 21 (multi-endpoint
+advertise) lets a node publish *its own* extra DNAT'd entry points.
+It does not change how clients pick *which relay* to forward through,
+nor does it introduce any A→peer→C end-to-end probing. Phase 21 and
+Phase 22 are orthogonal.
+
+### Sketch
+
+1. **New disco frame `PeerRTTQuery` / `PeerRTTReport`**:
+   - `PeerRTTQuery{target_pubkey: NodeKey}` sent A → B, asking
+     "what is your most-recent RTT to C?".
+   - `PeerRTTReport{target_pubkey, mean_rtt_ms, sample_age_ms,
+     sample_count}` returned B → A. B reports its 60-s mean RTT to
+     C (reusing Phase 19's existing per-(dst, source) sample window
+     it already maintains for srcsel scoring).
+   - Frames carry the same encryption / replay-protection envelope
+     as existing disco messages. No new key material.
+2. **Aggregation layer in `relayManager`** (existing struct in
+   magicsock):
+   - For each candidate relay B already discovered via the existing
+     `CallMeMaybeVia` flow, periodically issue `PeerRTTQuery(C)` for
+     each direct-undeliverable peer C the local node has.
+   - Build a sparse table `peerRTT[B][C]` = (mean_rtt_ms,
+     sample_age_ms). Stale entries (>60 s) get discarded on lookup.
+3. **Total-path scoring**:
+   - For each candidate relay B reachable from A:
+     `score(B) = rtt_A_B + peerRTT[B][C].mean_rtt_ms`
+   - Pick `argmin score`. Apply Phase 20-style relative gate: only
+     switch to a new relay choice if its score beats the current
+     relay's score by ≥10 %.
+   - If no `PeerRTTReport` is available for a (B, C) pair within the
+     TTL, fall back to the current "single-segment A↔B RTT" ranking
+     for that pair only.
+4. **Force-relay env knob**:
+   - `TS_DEBUG_NEVER_DIRECT_UDP` *already exists* (in
+     `wgengine/magicsock/debugknobs.go:65-68`) and disables direct
+     UDP entirely, forcing DERP or peer-relay. Phase 22 reuses it
+     and does not introduce a new global force-relay knob.
+   - For finer control (force-relay per-destination instead of
+     globally), expose `TS_EXPERIMENTAL_RELAY_PATH_OPTIMIZE_HINTS`
+     accepting a comma-separated list of NodeKeys for which the
+     optimizer should always be preferred even when direct is
+     working.
+5. **New metrics**:
+   - `magicsock_relay_total_path_query_sent`,
+     `..._report_received`,
+     `..._relay_switched_due_to_total_path`,
+     `..._relay_kept_due_to_gate`.
+6. **Opt-in default**: gated on
+   `TS_EXPERIMENTAL_RELAY_PATH_OPTIMIZE=true`. Off by default;
+   without it, the existing single-segment scoring runs unchanged.
+
+### Open questions
+
+- **Probe overhead**. A relay B carries traffic for many peers
+  simultaneously. Querying B for "RTT to every C in your peer
+  list" creates O(peers) probe load on each relay. Mitigations:
+  rate-limit per (A, B) at one query per 30 s; piggy-back the
+  query in existing keep-alive frames; cap the candidate-relay set
+  size.
+- **Relay honesty**. A malicious relay could lie about its RTT to
+  C to attract traffic (or repel it). Same threat model as
+  endpoint advertising: WireGuard handshake at the destination
+  authenticates payload, so a lying relay can route *garbage* but
+  not impersonate. Operators in zero-trust deployments who care
+  about path-honesty can disable Phase 22 and stick with
+  single-segment scoring.
+- **Sample-source consistency**. Phase 19's per-(dst, source)
+  sample window is keyed by *the source socket B used*, not by the
+  relay function. Reusing those samples in `PeerRTTReport` is
+  fine for the "B → C primary path" reading but doesn't capture
+  "B → C via aux source", which may be different. v1 of Phase 22
+  reports primary-source mean only; aux-source per-(B, C, source)
+  is a v2 enhancement.
+- **TTL window vs. relay selection cadence**. The existing 60-s
+  TTL for srcsel samples is the natural reuse here. Relay
+  selection change cadence should be slower (suggest 2× the
+  sample TTL = 120 s minimum dwell time) to avoid flap when
+  multiple relays' total-path RTT are within the gate threshold.
+- **Interaction with `TS_DEBUG_NEVER_DIRECT_UDP`**. When the global
+  force-relay knob is on, every peer must go via *some* relay.
+  Phase 22's optimizer applies to all peers in that case, not just
+  hint-listed ones. Document explicitly.
+- **Metric blowup with N peers**. The `peerRTT` table is O(relays
+  × peers). For a tailnet with 30 relays and 1000 peers, that is
+  30 000 entries with TTL=60 s — manageable. For larger tailnets
+  the cap should be at most the top-K relays (by single-segment
+  score) actively probed.
+
+### Out of scope for the candidate
+
+- Beyond-2-hop relay chains (A → B1 → B2 → C). Phase 22 only
+  measures the immediate next-hop relay. Multi-hop chaining would
+  need a recursive query/report flow and a path-quality protocol.
+- Bandwidth-aware selection. Phase 22 measures latency only, not
+  throughput or packet-loss. A relay with low latency but a
+  congested last-mile to C still gets picked. v2 could add
+  loss-rate from existing send-failure counters.
+- Geographic / political routing constraints. Phase 22 picks the
+  relay with the lowest *measured* total RTT, regardless of which
+  jurisdiction the relay sits in. Operators with regulatory
+  constraints would need a per-relay allow/deny policy
+  layer above Phase 22's selector.
+- Cross-tailnet relays. Phase 22 only considers peer-relays inside
+  the same headscale-coordinated tailnet (same `Hostinfo` set).
+  Cross-tailnet federation is a separate piece.
+
+### Estimated effort
+
+- New disco frames + relayManager aggregation + selection rewrite:
+  ~400 LoC Go.
+- env knob plumbing + tests: ~150 LoC test.
+- Phase doc + multi-relay bilateral validation harness (would need
+  ≥3 relays + ≥2 endpoints to demonstrate the picking): ~400 LoC
+  Python + 1 phase doc.
+- Total: roughly the size of Phase 19 (TTL/min-samples scorer) +
+  Phase 21 combined.
+
+### Why this matters operationally
+
+The single-segment-only scoring works fine when the relay set is
+geographically clustered or when the destination C is reachable
+from any relay at uniform latency. It fails when **the relay set is
+geographically diverse** (the typical "global relay mesh" topology
+operators build to handle international tailnets). In that case a
+nearby-by-A relay can be far-from-C and a far-by-A relay can be
+near-C; without total-path probing the optimizer has no way to see
+the second cost. Phase 22 closes that visibility.
+
+---
+
+## Phase 23+ (future)
 
 (reserved for later candidates)
