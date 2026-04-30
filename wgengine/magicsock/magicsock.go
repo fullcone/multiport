@@ -402,6 +402,11 @@ type Conn struct {
 	// to the node.
 	staticEndpoints views.Slice[netip.AddrPort]
 
+	// extraEndpoints holds the Phase 21 dynamic-multi-endpoint-advertise
+	// watcher state, or nil if TS_EXPERIMENTAL_EXTRA_ENDPOINTS_FILE is
+	// unset. See extraendpoints.go.
+	extraEndpoints *extraEndpointsState
+
 	// metrics contains the metrics for the magicsock instance.
 	metrics *metrics
 
@@ -724,6 +729,11 @@ func NewConn(opts Options) (*Conn, error) {
 	}
 
 	c.logf("magicsock: disco key = %v", c.discoAtomic.Short())
+
+	// Phase 21: start the dynamic-multi-endpoint-advertise watcher. No-op
+	// when TS_EXPERIMENTAL_EXTRA_ENDPOINTS_FILE is unset.
+	c.startExtraEndpointsWatcher()
+
 	return c, nil
 }
 
@@ -1358,6 +1368,14 @@ func (c *Conn) determineEndpoints(ctx context.Context) ([]tailcfg.Endpoint, erro
 	eps = c.endpointTracker.update(time.Now(), eps)
 
 	for _, ep := range c.staticEndpoints.All() {
+		addAddr(ep, tailcfg.EndpointExplicitConf)
+	}
+
+	// Phase 21: dynamic-multi-endpoint-advertise. Inject any operator-
+	// provided extra endpoints from the file watcher. Treated as
+	// EndpointExplicitConf (the existing operator-supplied bucket) so
+	// downstream control plane / peer code paths require no change.
+	for _, ep := range c.extraEndpointsCurrent() {
 		addAddr(ep, tailcfg.EndpointExplicitConf)
 	}
 
@@ -3631,6 +3649,12 @@ func (c *Conn) Close() error {
 	//     Conn.Close() behaviors.
 	c.eventClient.Close()
 
+	// Phase 21: tear down the extra-endpoints watcher before acquiring
+	// c.mu — the watcher's file-change handler calls c.ReSTUN, which
+	// would deadlock if the goroutine were still running once we hold
+	// c.mu.
+	c.stopExtraEndpointsWatcher()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -4308,6 +4332,9 @@ var (
 	metricDirectVsRelayGateRelayPreferred  = clientmetric.NewCounter("magicsock_direct_vs_relay_gate_relay_preferred")
 	metricDirectVsRelayGateDirectPreferred = clientmetric.NewCounter("magicsock_direct_vs_relay_gate_direct_preferred")
 	metricDirectVsRelayHoldRejected        = clientmetric.NewCounter("magicsock_direct_vs_relay_hold_rejected")
+	// Phase 21: dynamic-multi-endpoint-advertise file watcher counters.
+	metricExtraEndpointsReads   = clientmetric.NewCounter("magicsock_extra_endpoints_reads")
+	metricExtraEndpointsReloads = clientmetric.NewCounter("magicsock_extra_endpoints_reloads")
 	metricRecvDataPacketsDERP               = clientmetric.NewAggregateCounter("magicsock_recv_data_derp")
 	metricRecvDataPacketsIPv4               = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv4")
 	metricRecvDataPacketsIPv6               = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv6")
