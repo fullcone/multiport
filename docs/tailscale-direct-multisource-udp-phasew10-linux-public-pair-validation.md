@@ -146,10 +146,10 @@ All four TSMP ping directions over both stacks **succeed**, in
 2-11 ms (same RTT range as baseline):
 
 ```
-client> ping --tsmp --c=5 100.64.0.1     pong via TSMP in 11ms
-host>   ping --tsmp --c=5 100.64.0.2     pong via TSMP in 2ms
-client> ping --tsmp --c=3 fd7a:..::1     pong via TSMP in 2ms
-host>   ping --tsmp --c=3 fd7a:..::2     pong via TSMP in 2ms
+client> tailscale ping --tsmp --c=5 100.64.0.1   pong via TSMP in 11ms
+host>   tailscale ping --tsmp --c=5 100.64.0.2   pong via TSMP in 2ms
+client> tailscale ping --tsmp --c=3 fd7a:..::1   pong via TSMP in 2ms
+host>   tailscale ping --tsmp --c=3 fd7a:..::2   pong via TSMP in 2ms
 ```
 
 **Crucially, forced-aux mode in row 1 does NOT exhibit the W7
