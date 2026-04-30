@@ -471,8 +471,12 @@ func (c *Conn) sendSourcePathDiscoPing(source sourceRxMeta, dst epAddr, dstKey k
 	metricSentDiscoUDP.Add(1)
 	metricSentDiscoSourcePathProbe.Add(1)
 	if size != 0 {
-		metricSentDiscoPeerMTUProbes.Add(1)
-		metricSentDiscoPeerMTUProbeBytes.Add(int64(pingSizeToPktLen(size, dst)))
+		// Track padded source-path probes separately. They share the
+		// padding mechanism with disco peer-MTU probes but are not the
+		// same thing; folding them into peerMTU* counters poisons the
+		// MTU dashboard once srcsel is enabled.
+		metricSentDiscoSourcePathProbePadded.Add(1)
+		metricSentDiscoSourcePathProbeBytes.Add(int64(pingSizeToPktLen(size, dst)))
 	}
 	return true, nil
 }

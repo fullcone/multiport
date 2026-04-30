@@ -4332,6 +4332,8 @@ var (
 	metricSentDiscoPing                          = clientmetric.NewCounter("magicsock_disco_sent_ping")
 	metricSentDiscoPong                          = clientmetric.NewCounter("magicsock_disco_sent_pong")
 	metricSentDiscoSourcePathProbe               = clientmetric.NewCounter("magicsock_disco_sent_source_path_probe")
+	metricSentDiscoSourcePathProbePadded         = clientmetric.NewCounter("magicsock_disco_sent_source_path_probe_padded")
+	metricSentDiscoSourcePathProbeBytes          = clientmetric.NewCounter("magicsock_disco_sent_source_path_probe_bytes")
 	metricSentDiscoPeerMTUProbes                 = clientmetric.NewCounter("magicsock_disco_sent_peer_mtu_probes")
 	metricSentDiscoPeerMTUProbeBytes             = clientmetric.NewCounter("magicsock_disco_sent_peer_mtu_probe_bytes")
 	metricSentDiscoCallMeMaybe                   = clientmetric.NewCounter("magicsock_disco_sent_callmemaybe")
