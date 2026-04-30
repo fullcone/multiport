@@ -173,6 +173,16 @@ Phase 15: final dual-node runtime revalidation.
 
 ## Behavior Now Guaranteed In Scope
 
+> **Note (added 2026-04-30, post Phase 19):** A re-review after closeout
+> identified that auxiliary WireGuard receive was dropped while the data
+> plane was permitted to send through auxiliary sockets, leaving
+> blackhole risk on the reverse path. Phase 19 (`phase19-bidirectional-aux-data.md`)
+> removed the auxiliary receive drop, hardened the scorer with sample
+> TTL / minimum count / mean latency, lifted the policy budgets in
+> favor of memory-safety hard caps, and separated SourcePathProbe
+> padded counters from peer-MTU counters. Read the guarantees below
+> alongside that document.
+
 The completed Linux implementation guarantees the following within the current
 scope:
 
