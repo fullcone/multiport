@@ -4302,6 +4302,11 @@ var (
 	metricSourcePathAuxWireGuardRx          = clientmetric.NewCounter("magicsock_srcsel_aux_wireguard_rx")
 	metricSourcePathSendFailureInvalidated  = clientmetric.NewCounter("magicsock_srcsel_send_failure_invalidated_samples")
 	metricSourcePathPrimaryBeatRejected     = clientmetric.NewCounter("magicsock_srcsel_primary_beat_rejected")
+	// Phase 22 v2: direct-vs-relay latency-aware switching counters.
+	// Only incremented when TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE=true.
+	metricDirectVsRelayCompared            = clientmetric.NewCounter("magicsock_direct_vs_relay_compared")
+	metricDirectVsRelayGateRelayPreferred  = clientmetric.NewCounter("magicsock_direct_vs_relay_gate_relay_preferred")
+	metricDirectVsRelayGateDirectPreferred = clientmetric.NewCounter("magicsock_direct_vs_relay_gate_direct_preferred")
 	metricRecvDataPacketsDERP               = clientmetric.NewAggregateCounter("magicsock_recv_data_derp")
 	metricRecvDataPacketsIPv4               = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv4")
 	metricRecvDataPacketsIPv6               = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv6")

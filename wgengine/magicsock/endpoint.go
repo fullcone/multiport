@@ -925,7 +925,21 @@ func (de *endpoint) wantUDPRelayPathDiscoveryLocked(now mono.Time) bool {
 		return false
 	}
 	if de.bestAddr.isDirect() && now.Before(de.trustBestAddrUntil) {
-		return false
+		// Phase 22 v2: when TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE=true,
+		// don't suppress relay-path discovery unconditionally just because
+		// a trusted direct path is held. Run discovery at the (longer)
+		// comparison interval so betterAddr can compare direct vs relay
+		// latency across categories. With the env knob false (default),
+		// behaviour is bit-identical to before.
+		if !directVsRelayCompareEnabled() {
+			return false
+		}
+		if !de.lastUDPRelayPathDiscovery.IsZero() &&
+			now.Sub(de.lastUDPRelayPathDiscovery) < directVsRelayCompareIntervalValue() {
+			return false
+		}
+		metricDirectVsRelayCompared.Add(1)
+		return true
 	}
 	if !de.lastUDPRelayPathDiscovery.IsZero() && now.Sub(de.lastUDPRelayPathDiscovery) < discoverUDPRelayPathsInterval {
 		return false
@@ -1896,11 +1910,35 @@ func betterAddr(a, b addrQuality) bool {
 	}
 
 	// Geneve-encapsulated paths (UDP relay servers) are lower preference in
-	// relation to non.
+	// relation to non-Geneve direct paths by default.
+	//
+	// Phase 22 v2: when TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE=true, allow
+	// the relay path to win if its measured latency is at least the gate
+	// threshold (default 10 %) lower than the direct path's. Otherwise
+	// preserve today's hard direct-preference. With the env knob false
+	// (default), behaviour is bit-identical to before.
 	if !a.vni.IsSet() && b.vni.IsSet() {
+		// a is direct; b is relay.
+		if directVsRelayCompareEnabled() &&
+			relayBeatsDirectByThresholdLocked(a.latency, b.latency, directVsRelayThresholdValue()) {
+			metricDirectVsRelayGateRelayPreferred.Add(1)
+			return false
+		}
+		if directVsRelayCompareEnabled() {
+			metricDirectVsRelayGateDirectPreferred.Add(1)
+		}
 		return true
 	}
 	if a.vni.IsSet() && !b.vni.IsSet() {
+		// a is relay; b is direct.
+		if directVsRelayCompareEnabled() &&
+			relayBeatsDirectByThresholdLocked(b.latency, a.latency, directVsRelayThresholdValue()) {
+			metricDirectVsRelayGateRelayPreferred.Add(1)
+			return true
+		}
+		if directVsRelayCompareEnabled() {
+			metricDirectVsRelayGateDirectPreferred.Add(1)
+		}
 		return false
 	}
 
