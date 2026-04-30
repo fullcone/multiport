@@ -62,8 +62,28 @@ def env_for_mode(mode: str) -> str:
 
 
 def restart_remote(client, env: str, mode: str, role: str) -> None:
+    # NOTE: We match tailscaled by its kernel `comm` (15-char truncation
+    # of the executable name = "tailscaled-srcs"), NOT by `pkill -f` on
+    # the absolute path. `-f` matches against the full /proc/PID/cmdline,
+    # which on the bash invocation that runs *this* compound command
+    # also contains the path to tailscaled-srcsel as part of the nohup
+    # arguments — so `pkill -f tailscaled-srcsel` would happily SIGTERM
+    # its own bash and abort the rest of the sequence (no rm, no nohup,
+    # no log) before tailscaled is even relaunched. `pkill <comm>`
+    # matches /proc/PID/comm only, which for bash is "bash", so it
+    # safely skips the calling shell.
+    #
+    # We also wait for the port to be released by the kernel before
+    # relaunching, otherwise the new tailscaled hits "address already
+    # in use" while the old one finishes its graceful shutdown.
     cmd = (
-        f"pkill -f tailscaled-srcsel || true; sleep 1; "
+        f"pkill tailscaled-srcs 2>/dev/null || true; "
+        f"for i in 1 2 3 4 5 6 7 8 9 10; do "
+        f"  if ! pgrep -x tailscaled-srcs >/dev/null 2>&1 "
+        f"     && ! ss -lunp 2>/dev/null | grep -q ':41641 '; then break; fi; "
+        f"  sleep 1; "
+        f"done; "
+        f"echo 'port released after '${{i}}'s'; "
         f"rm -f /var/log/srcsel-tailscaled.log; "
         f"mkdir -p /var/lib/srcsel; "
         f"{env}"
@@ -71,9 +91,15 @@ def restart_remote(client, env: str, mode: str, role: str) -> None:
         f"--tun=userspace-networking --socket=/tmp/srcsel.sock "
         f"--statedir=/var/lib/srcsel --port=41641 "
         f"> /var/log/srcsel-tailscaled.log 2>&1 < /dev/null & "
-        f"echo started pid $!; sleep 3; pgrep -af tailscaled-srcsel"
+        f"echo 'started pid='$!; "
+        f"sleep 4; "
+        f"if pgrep -x tailscaled-srcs >/dev/null 2>&1; then "
+        f"  echo 'verified running'; pgrep -af /usr/local/bin/tailscaled-srcsel; "
+        f"else "
+        f"  echo 'FAILED to start'; tail -20 /var/log/srcsel-tailscaled.log; exit 1; "
+        f"fi"
     )
-    _pair.run_named(client, f"restart {role} (mode={mode})", cmd)
+    _pair.run_named(client, f"restart {role} (mode={mode})", cmd, timeout=30)
 
 
 def ts_status_json(client) -> dict:
