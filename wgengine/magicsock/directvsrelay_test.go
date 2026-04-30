@@ -288,6 +288,41 @@ func TestWouldAllowDirectVsRelaySwapLockedHoldElapsed(t *testing.T) {
 	}
 }
 
+// TestWouldAllowDirectVsRelaySwapLockedInvalidCurBypassesHold is a regression
+// test for Codex P2 round 3 on PR #16: when bestAddr has been cleared (zero
+// value, invalid ap) but trustBestAddrUntil is still in the future, a relay
+// candidate must NOT be blocked by the hysteresis hold window — there is no
+// real current path to flap away from. Without this guard, the zero-value
+// vni would classify cur as "direct" and the relay candidate as a cross-
+// category swap, suppressing relay promotion for up to the hold duration.
+func TestWouldAllowDirectVsRelaySwapLockedInvalidCurBypassesHold(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_HOLD_S", "300")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_HOLD_S", "")
+	})
+
+	de := &endpoint{}
+	now := mono.Now()
+	de.lastDirectVsRelaySwap = now.Add(-30 * time.Second) // very recent swap
+
+	// Empty cur: zero-value addrQuality, ap is invalid.
+	var emptyCur addrQuality
+	relay := addrQuality{epAddr: withVNI(epAddr{ap: netip.MustParseAddrPort("198.51.100.1:41641")}, 1234)}
+
+	if !de.wouldAllowDirectVsRelaySwapLocked(emptyCur, relay, now) {
+		t.Fatal("invalid cur.ap with recent swap: hysteresis must NOT block (no real current path to flap from)")
+	}
+
+	// Sanity: same hysteresis with a valid direct cur is still blocked under
+	// the same conditions.
+	directCur := addrQuality{epAddr: epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}}
+	if de.wouldAllowDirectVsRelaySwapLocked(directCur, relay, now) {
+		t.Fatal("valid direct cur with recent swap: hysteresis must block (cross-category, hold window active)")
+	}
+}
+
 func TestNoteDirectVsRelaySwapLocked(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "true")
 	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "") })

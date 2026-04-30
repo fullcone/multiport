@@ -1943,6 +1943,15 @@ func (de *endpoint) wouldAllowDirectVsRelaySwapLocked(cur, maybe addrQuality, no
 	if !directVsRelayCompareEnabled() {
 		return true
 	}
+	// If cur is empty / invalid (no real current path), hysteresis does not
+	// apply — there is nothing to dampen against. Without this guard, an
+	// invalid cur would be classified as "direct" (since its zero-value
+	// vni is unset), and a relay maybe would then look like a cross-category
+	// swap, potentially blocked by the hold window when no real current
+	// direct path exists. See PR #16 round 3 (Codex P2).
+	if !cur.ap.IsValid() {
+		return true
+	}
 	curIsDirect := !cur.vni.IsSet()
 	maybeIsDirect := !maybe.vni.IsSet()
 	if curIsDirect == maybeIsDirect {
