@@ -36,10 +36,13 @@ def main() -> None:
          "iptables -L INPUT -n | head -8"),
         ("public reachability self-test",
          f"curl -sS -m 5 {server_url}/health"),
-        ("create user 'srcsel-pair'",
-         "headscale users create srcsel-pair 2>&1 | head -3 && headscale users list 2>&1 | head -5"),
-        ("generate preauth key (24h reusable)",
-         "headscale preauthkeys create --user 1 --reusable --expiration 24h 2>&1 | tail -3"),
+        ("create user 'srcsel-pair' (idempotent)",
+         "headscale users create srcsel-pair 2>&1 | head -3; headscale users list 2>&1 | head -5"),
+        ("generate preauth key for srcsel-pair (24h reusable)",
+         "USER_ID=$(headscale users list 2>/dev/null | awk -F'|' '$3 ~ /srcsel-pair/ {gsub(/[^0-9]/,\"\",$1); print $1; exit}'); "
+         "if [ -z \"$USER_ID\" ]; then echo 'error: srcsel-pair user ID not found'; exit 1; fi; "
+         "echo \"resolved srcsel-pair user ID = $USER_ID\"; "
+         "headscale preauthkeys create --user \"$USER_ID\" --reusable --expiration 24h 2>&1 | tail -3"),
     ]
 
     client = _pair.open_host()
