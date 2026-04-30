@@ -73,15 +73,21 @@ const (
 	extraEndpointsDefaultMax = 0
 
 	// extraEndpointsMaxFileSize is the memory-safety ceiling on file size
-	// to read (the parser refuses anything larger). Sized for several
-	// thousand IPv6 entries with formatting room to spare:
+	// to read (the parser refuses anything larger). Sized to hold a
+	// 100 000-entry baseline deployment with ~10× headroom for both
+	// formatting overhead and growth:
 	//
 	//   "[2001:0db8:0000:0000:0000:0000:0000:0001]:65535",
 	//
-	// is ~50 bytes; 4 MB / 50 ≈ 80k entries — far above any plausible
-	// deployment. The ceiling exists only to bound memory use against a
-	// runaway / corrupt file, not as a policy constraint.
-	extraEndpointsMaxFileSize = 4 * 1024 * 1024
+	// is ~50–60 bytes including the trailing comma + newline; 100k of
+	// these is ~6 MB. 64 MB / 60 ≈ 1.1 M entries — far above any
+	// plausible deployment, while still bounding memory against a
+	// runaway / corrupt file (e.g. an upstream that accidentally
+	// concatenates a system log into the endpoints file). This is a
+	// pure memory-safety guard, not a policy constraint — the policy
+	// cap lives in TS_EXPERIMENTAL_EXTRA_ENDPOINTS_MAX (default 0 =
+	// unlimited).
+	extraEndpointsMaxFileSize = 64 * 1024 * 1024
 )
 
 // extraEndpointsFile is the JSON shape parsed from

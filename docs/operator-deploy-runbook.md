@@ -254,10 +254,13 @@ sudo journalctl -u tailscaled-srcsel -f | grep -E "extra-endpoints|ReSTUN"
 # magicsock: starting endpoint update (extra-endpoints-changed)
 ```
 
-**Capacity**: hundreds-to-thousands of endpoints are fine.
+**Capacity**: tens of thousands of endpoints are fine.
 `TS_EXPERIMENTAL_EXTRA_ENDPOINTS_MAX` is unset by default = unlimited;
-the only guard is the 4 MB file-size memory ceiling (~80k entries with
-formatting room to spare).
+the only guard is the 64 MB file-size memory ceiling, sized for a
+100 000-entry baseline deployment with ~10× headroom (an IPv6
+`"[v6-addr]:port"` entry is ~50–60 bytes; 64 MB ≈ 1.1 M entries far
+above any plausible deployment, while still bounding memory against a
+runaway / corrupt file).
 
 ### 3.2 Phase 21 verification checklist
 

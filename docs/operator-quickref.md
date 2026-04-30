@@ -53,7 +53,7 @@ chown root:root /etc/tailscaled/extra-endpoints.json
 **Safety**:
 
 - File mode must NOT be group- or world-writable on Linux/macOS — watcher refuses 0660 / 0666 etc. Use 0644 (or stricter 0640 / 0600).
-- File-size memory ceiling: 4 MB (~80k entries with formatting). Files larger than that are refused at read.
+- File-size memory ceiling: 64 MB. Sized for a 100 000-entry baseline with ~10× headroom; files larger than 64 MB are refused at read. Pure memory-safety guard, not a policy constraint.
 - WireGuard handshake at the destination still authenticates the data plane, so a peer publishing fictional endpoints can route garbage but can't impersonate.
 
 **Metrics**:
