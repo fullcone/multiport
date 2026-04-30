@@ -395,6 +395,26 @@ func TestNoteDirectVsRelaySwapLockedInvalidPrevDoesNotRecord(t *testing.T) {
 	}
 }
 
+// TestClearBestAddrLockedResetsHysteresis is a regression test for Codex P2
+// round 5 on PR #16: clearBestAddrLocked must also reset
+// lastDirectVsRelaySwap, otherwise after a path-clear event the next
+// cross-category swap can be blocked by stale hysteresis state from the
+// (already-cleared) prior endpoint configuration.
+func TestClearBestAddrLockedResetsHysteresis(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "true")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "") })
+
+	de := &endpoint{}
+	now := mono.Now()
+	de.lastDirectVsRelaySwap = now.Add(-30 * time.Second) // recent prior swap
+
+	de.clearBestAddrLocked()
+
+	if !de.lastDirectVsRelaySwap.IsZero() {
+		t.Fatalf("clearBestAddrLocked must reset lastDirectVsRelaySwap; got %v", de.lastDirectVsRelaySwap)
+	}
+}
+
 // TestDirectVsRelayInvalidPrevAllowsImmediateFollowupSwap is the end-to-end
 // regression test for PR #16 round 4: from empty bestAddr state, install a
 // relay path, then install a direct path immediately after. With the

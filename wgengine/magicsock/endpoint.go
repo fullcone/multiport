@@ -1703,11 +1703,18 @@ func (de *endpoint) addCandidateEndpoint(ep netip.AddrPort, forRxPingTxID stun.T
 // clearBestAddrLocked clears the bestAddr and related fields such that future
 // packets will re-evaluate the best address to send to next.
 //
+// Also resets lastDirectVsRelaySwap because the per-peer direct↔relay
+// hysteresis state describes flap-against the now-cleared path; carrying
+// it forward into the next path's install would block legitimate cross-
+// category swaps right after a state-clear event for up to the hold
+// window. See PR #16 round 5 (Codex P2).
+//
 // de.mu must be held.
 func (de *endpoint) clearBestAddrLocked() {
 	de.setBestAddrLocked(addrQuality{})
 	de.bestAddrAt = 0
 	de.trustBestAddrUntil = 0
+	de.lastDirectVsRelaySwap = 0
 }
 
 // noteBadEndpoint marks udpAddr as a bad endpoint that would need to be
