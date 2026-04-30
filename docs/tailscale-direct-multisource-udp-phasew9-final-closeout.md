@@ -62,11 +62,16 @@ primary-baseline gate, and the W-series Windows port.
   `TS_EXPERIMENTAL_SRCSEL_ENABLE` and `dst.isDirect()`:
     1. **Forced mode.**
        `TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE` (`aux`, `aux4` /
-       `ipv4` / `v4`, or `aux6` / `ipv6` / `v6`) selects the
-       requested family's auxiliary source unconditionally for
-       direct destinations matching the family. The scorer is not
-       consulted in this mode; operators carry full responsibility
-       for the choice.
+       `ipv4` / `v4`, or `aux6` / `ipv6` / `v6`) requests the
+       matching family's auxiliary source for direct destinations,
+       bypassing the scorer. The actual return is the requested
+       auxiliary if its `auxNBound` flag is true; otherwise
+       `sourcePathForcedDataSendSource`'s default branch falls back
+       to primary (see `sourcepath_supported.go:131-142` — aux that
+       failed to bind, or aux disabled by
+       `TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=0`, both return primary).
+       Operators selecting forced mode therefore get aux when the
+       socket is healthy and primary when it is not.
     2. **Automatic mode.** If forced mode is unset and
        `TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE` is enabled, the
        scorer is consulted. Auto mode selects an auxiliary source
