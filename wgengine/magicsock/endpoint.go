@@ -1964,11 +1964,22 @@ func (de *endpoint) wouldAllowDirectVsRelaySwapLocked(cur, maybe addrQuality, no
 }
 
 // noteDirectVsRelaySwapLocked records the current time as the last
-// cross-category swap timestamp if the swap from `prev` to `now_addr`
+// cross-category swap timestamp if the swap from `prev` to `nowAddr`
 // actually crossed the direct↔relay category boundary. Caller must hold
 // de.mu and have just called setBestAddrLocked.
+//
+// If `prev` is invalid (zero-value addrQuality from a cleared bestAddr),
+// the transition is the *first* path being installed, not a swap from
+// an established direct or relay path — there is nothing to flap from.
+// Recording it as a swap would suppress the next legitimate cross-
+// category transition for up to the hold window, e.g. blocking a fresh
+// direct candidate from preempting an initial relay path after a state-
+// clear event. See PR #16 round 4 (Codex P2).
 func (de *endpoint) noteDirectVsRelaySwapLocked(prev, nowAddr addrQuality, now mono.Time) {
 	if !directVsRelayCompareEnabled() {
+		return
+	}
+	if !prev.ap.IsValid() {
 		return
 	}
 	if prev.vni.IsSet() != nowAddr.vni.IsSet() {

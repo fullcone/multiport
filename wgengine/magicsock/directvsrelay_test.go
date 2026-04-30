@@ -355,6 +355,81 @@ func TestNoteDirectVsRelaySwapLocked(t *testing.T) {
 	}
 }
 
+// TestNoteDirectVsRelaySwapLockedInvalidPrevDoesNotRecord is a regression
+// test for Codex P2 round 4 on PR #16: when prev is invalid (e.g. an
+// initial bestAddr being installed from zero state), the transition to
+// any first path — direct or relay — must NOT be recorded as a category
+// swap. Otherwise the very next legitimate cross-category transition can
+// be blocked by the hold window despite there being no prior category to
+// flap from.
+func TestNoteDirectVsRelaySwapLockedInvalidPrevDoesNotRecord(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "true")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "") })
+
+	de := &endpoint{}
+	now := mono.Now()
+	var emptyPrev addrQuality
+	relay := addrQuality{epAddr: withVNI(epAddr{ap: netip.MustParseAddrPort("198.51.100.1:41641")}, 1234)}
+	direct := addrQuality{epAddr: epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}}
+
+	// Initial promotion to relay from empty state must NOT be recorded.
+	de.lastDirectVsRelaySwap = mono.Time(0)
+	de.noteDirectVsRelaySwapLocked(emptyPrev, relay, now)
+	if !de.lastDirectVsRelaySwap.IsZero() {
+		t.Fatal("invalid prev → relay: must not record a swap (no real prior category)")
+	}
+
+	// Initial promotion to direct from empty state must NOT be recorded.
+	de.lastDirectVsRelaySwap = mono.Time(0)
+	de.noteDirectVsRelaySwapLocked(emptyPrev, direct, now)
+	if !de.lastDirectVsRelaySwap.IsZero() {
+		t.Fatal("invalid prev → direct: must not record a swap (no real prior category)")
+	}
+
+	// Sanity: with a valid prev (real direct path), a relay nowAddr DOES
+	// record a swap.
+	de.lastDirectVsRelaySwap = mono.Time(0)
+	de.noteDirectVsRelaySwapLocked(direct, relay, now)
+	if de.lastDirectVsRelaySwap != now {
+		t.Fatalf("valid direct prev → relay: expected swap recorded at %v; got %v", now, de.lastDirectVsRelaySwap)
+	}
+}
+
+// TestDirectVsRelayInvalidPrevAllowsImmediateFollowupSwap is the end-to-end
+// regression test for PR #16 round 4: from empty bestAddr state, install a
+// relay path, then install a direct path immediately after. With the
+// round-3 + round-4 fixes both in place, the second swap is allowed
+// (because round 4 prevented the first transition from being recorded as a
+// "swap"). Without the round-4 fix, lastDirectVsRelaySwap would have been
+// stamped during the relay install, blocking the direct install for up to
+// the hold window.
+func TestDirectVsRelayInvalidPrevAllowsImmediateFollowupSwap(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_HOLD_S", "300")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_HOLD_S", "")
+	})
+
+	de := &endpoint{}
+	now := mono.Now()
+	var empty addrQuality
+	relay := addrQuality{epAddr: withVNI(epAddr{ap: netip.MustParseAddrPort("198.51.100.1:41641")}, 1234)}
+	direct := addrQuality{epAddr: epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}}
+
+	// Initial relay install from empty state.
+	if !de.wouldAllowDirectVsRelaySwapLocked(empty, relay, now) {
+		t.Fatal("initial relay install from empty state must be allowed")
+	}
+	de.noteDirectVsRelaySwapLocked(empty, relay, now)
+
+	// Now relay is the current path. Direct candidate arrives 5 s later.
+	later := now.Add(5 * time.Second)
+	if !de.wouldAllowDirectVsRelaySwapLocked(relay, direct, later) {
+		t.Fatal("direct install 5s after relay install from empty state must be allowed (round-4 regression)")
+	}
+}
+
 // TestDirectVsRelayCompareIntervalFloorRespectsDiscoverUDPRelayPathsInterval is
 // a regression test for Codex P2 on PR #16: even when the operator sets a low
 // TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE_INTERVAL_S, the actual probe rate
