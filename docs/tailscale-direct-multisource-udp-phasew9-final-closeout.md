@@ -67,7 +67,7 @@ primary-baseline gate, and the W-series Windows port.
        bypassing the scorer. The actual return is the requested
        auxiliary if its `auxNBound` flag is true; otherwise
        `sourcePathForcedDataSendSource`'s default branch falls back
-       to primary (see `sourcepath_supported.go:131-142` — aux that
+       to primary (see `sourcepath_supported.go:186-197` — aux that
        failed to bind, or aux disabled by
        `TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=0`, both return primary).
        Operators selecting forced mode therefore get aux when the
