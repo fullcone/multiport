@@ -1879,7 +1879,7 @@ func (c *Conn) receiveIPWithSource(b []byte, ipp netip.AddrPort, cache *epAddrEn
 	pt, isGeneveEncap := packetLooksLike(b)
 	src := epAddr{ap: ipp}
 	if !rxMeta.isPrimary() && pt == packetLooksLikeWireGuard {
-		return nil, 0, false, false
+		metricSourcePathAuxWireGuardRx.Add(1)
 	}
 	if isGeneveEncap {
 		err := geneve.Decode(b)
@@ -4296,6 +4296,7 @@ var (
 	metricSourcePathProbePongExpired        = clientmetric.NewCounter("magicsock_srcsel_probe_pong_expired")
 	metricSourcePathProbePeerBudgetDropped  = clientmetric.NewCounter("magicsock_srcsel_probe_peer_budget_dropped")
 	metricSourcePathProbeBurstBudgetDropped = clientmetric.NewCounter("magicsock_srcsel_probe_burst_budget_dropped")
+	metricSourcePathAuxWireGuardRx          = clientmetric.NewCounter("magicsock_srcsel_aux_wireguard_rx")
 	metricRecvDataPacketsDERP               = clientmetric.NewAggregateCounter("magicsock_recv_data_derp")
 	metricRecvDataPacketsIPv4               = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv4")
 	metricRecvDataPacketsIPv6               = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv6")

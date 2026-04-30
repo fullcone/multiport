@@ -376,6 +376,35 @@ func TestSourcePathProbeManagerBestCandidateDualStackObserveOnly(t *testing.T) {
 	}
 }
 
+func TestReceiveIPAuxiliaryAcceptsWireGuard(t *testing.T) {
+	var c Conn
+	c.havePrivateKey.Store(true)
+	var cache epAddrEndpointCache
+	aux := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 1}
+	src := netip.MustParseAddrPort("192.0.2.2:41641")
+
+	// A non-disco, non-STUN, non-Geneve packet is classified as WireGuard.
+	// msg[7] != 0 disqualifies the Geneve check so this falls through to the
+	// naked-WireGuard branch in packetLooksLike.
+	pkt := []byte{0x04, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef}
+
+	before := metricSourcePathAuxWireGuardRx.Value()
+	ep, size, _, ok := c.receiveIPWithSource(pkt, src, &cache, aux)
+
+	if got := metricSourcePathAuxWireGuardRx.Value() - before; got != 1 {
+		t.Fatalf("aux WG rx metric delta = %d, want 1 (auxiliary WireGuard receive drop is still in place)", got)
+	}
+	if !ok {
+		t.Fatal("aux receive returned ok=false for a WireGuard-shaped packet; the previous unconditional drop is still in effect")
+	}
+	if size != len(pkt) {
+		t.Fatalf("size = %d, want %d", size, len(pkt))
+	}
+	if _, isLazy := ep.(*lazyEndpoint); !isLazy {
+		t.Fatalf("returned endpoint type = %T, want *lazyEndpoint", ep)
+	}
+}
+
 func TestSourcePathBestCandidateRequiresCurrentProbeSources(t *testing.T) {
 	var c Conn
 	now := mono.Now()
