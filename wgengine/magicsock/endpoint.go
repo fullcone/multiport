@@ -931,11 +931,21 @@ func (de *endpoint) wantUDPRelayPathDiscoveryLocked(now mono.Time) bool {
 		// comparison interval so betterAddr can compare direct vs relay
 		// latency across categories. With the env knob false (default),
 		// behaviour is bit-identical to before.
+		//
+		// Operator-tunable comparison interval is floored at the existing
+		// discoverUDPRelayPathsInterval (30 s) so a low
+		// TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE_INTERVAL_S cannot exceed
+		// the rate-limit that the non-direct branch applies for the same
+		// reason (probe overhead).
 		if !directVsRelayCompareEnabled() {
 			return false
 		}
+		effectiveInterval := directVsRelayCompareIntervalValue()
+		if effectiveInterval < discoverUDPRelayPathsInterval {
+			effectiveInterval = discoverUDPRelayPathsInterval
+		}
 		if !de.lastUDPRelayPathDiscovery.IsZero() &&
-			now.Sub(de.lastUDPRelayPathDiscovery) < directVsRelayCompareIntervalValue() {
+			now.Sub(de.lastUDPRelayPathDiscovery) < effectiveInterval {
 			return false
 		}
 		metricDirectVsRelayCompared.Add(1)

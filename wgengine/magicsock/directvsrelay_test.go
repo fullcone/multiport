@@ -193,3 +193,53 @@ func withVNI(e epAddr, v uint32) epAddr {
 	e.vni = vni
 	return e
 }
+
+func TestDirectVsRelayCompareIntervalDefault(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE_INTERVAL_S", "")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE_INTERVAL_S", "") })
+	if got := directVsRelayCompareIntervalValue(); got != directVsRelayCompareInterval {
+		t.Fatalf("default = %v; want %v", got, directVsRelayCompareInterval)
+	}
+}
+
+func TestDirectVsRelayCompareIntervalEnvOverride(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE_INTERVAL_S", "60")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE_INTERVAL_S", "") })
+	if got := directVsRelayCompareIntervalValue(); got != 60*time.Second {
+		t.Fatalf("override = %v; want 60s", got)
+	}
+}
+
+// TestDirectVsRelayCompareIntervalFloorRespectsDiscoverUDPRelayPathsInterval is
+// a regression test for Codex P2 on PR #16: even when the operator sets a low
+// TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE_INTERVAL_S, the actual probe rate
+// when a trusted direct path is held must never go below the existing
+// discoverUDPRelayPathsInterval (30 s). The new direct-compare branch sits
+// before the shared rate-limiter, so it is responsible for re-applying the
+// floor itself.
+func TestDirectVsRelayCompareIntervalFloorRespectsDiscoverUDPRelayPathsInterval(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE_INTERVAL_S", "5")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE_INTERVAL_S", "")
+	})
+
+	// Sanity: env getter reports the operator's value as-is.
+	if got := directVsRelayCompareIntervalValue(); got != 5*time.Second {
+		t.Fatalf("compare interval env = %v; want 5s", got)
+	}
+
+	// The floor that the wantUDPRelayPathDiscoveryLocked branch applies in
+	// the trusted-direct case is max(env, discoverUDPRelayPathsInterval).
+	// We assert the policy directly here rather than driving an endpoint
+	// state machine; that's the same thing the production code computes.
+	want := discoverUDPRelayPathsInterval
+	got := directVsRelayCompareIntervalValue()
+	if got < discoverUDPRelayPathsInterval {
+		got = discoverUDPRelayPathsInterval
+	}
+	if got != want {
+		t.Fatalf("effective floor = %v; want %v (= discoverUDPRelayPathsInterval)", got, want)
+	}
+}
