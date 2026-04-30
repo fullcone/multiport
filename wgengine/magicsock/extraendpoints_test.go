@@ -22,6 +22,63 @@ func TestExtraEndpointsMaxFromEnvDefault(t *testing.T) {
 	if got := extraEndpointsMaxFromEnv(); got != extraEndpointsDefaultMax {
 		t.Fatalf("default = %d; want %d", got, extraEndpointsDefaultMax)
 	}
+	if extraEndpointsDefaultMax != 0 {
+		t.Fatalf("policy default must be 0 (unlimited); got %d", extraEndpointsDefaultMax)
+	}
+}
+
+// TestExtraEndpointsParseAndApplyDefaultUnlimited regression-tests that
+// the unset-env default applies *no* policy cap on the number of
+// endpoints honored. With the default (extraEndpointsMaxFromEnv() = 0)
+// the parser must accept all 200 entries.
+func TestExtraEndpointsParseAndApplyDefaultUnlimited(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_EXTRA_ENDPOINTS_MAX", "")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_EXTRA_ENDPOINTS_MAX", "") })
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "extra.json")
+
+	const N = 200
+	var sb strings.Builder
+	sb.WriteString(`{"endpoints":[`)
+	for i := 0; i < N; i++ {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		// Use port=i+1 to dedup; IP fixed.
+		sb.WriteString(`"1.2.3.4:`)
+		sb.WriteString(itoa(i + 1))
+		sb.WriteByte('"')
+	}
+	sb.WriteString(`]}`)
+	if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newTestExtraEndpointsState(path, extraEndpointsMaxFromEnv())
+	got, err := s.parseAndApply()
+	if err != nil {
+		t.Fatalf("parseAndApply: %v", err)
+	}
+	if len(got) != N {
+		t.Fatalf("default (unlimited) cap should accept all %d entries; got %d", N, len(got))
+	}
+}
+
+// itoa is a tiny dependency-free int formatter for the test JSON
+// builder — avoids strconv import shuffling in this file.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [10]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
 }
 
 func TestExtraEndpointsMaxFromEnvOverride(t *testing.T) {
