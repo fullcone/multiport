@@ -4301,6 +4301,7 @@ var (
 	metricSourcePathProbeSamplesEvicted     = clientmetric.NewCounter("magicsock_srcsel_probe_samples_evicted")
 	metricSourcePathAuxWireGuardRx          = clientmetric.NewCounter("magicsock_srcsel_aux_wireguard_rx")
 	metricSourcePathSendFailureInvalidated  = clientmetric.NewCounter("magicsock_srcsel_send_failure_invalidated_samples")
+	metricSourcePathPrimaryBeatRejected     = clientmetric.NewCounter("magicsock_srcsel_primary_beat_rejected")
 	metricRecvDataPacketsDERP               = clientmetric.NewAggregateCounter("magicsock_recv_data_derp")
 	metricRecvDataPacketsIPv4               = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv4")
 	metricRecvDataPacketsIPv6               = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv6")

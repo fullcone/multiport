@@ -25,6 +25,69 @@ import (
 	"tailscale.com/types/nettype"
 )
 
+// TestSourcePathProbeManagerPrimaryBaselineThresholdEnvOverride and
+// TestSourcePathProbeManagerPrimaryBaselineThresholdEnvClampedTo100 live here
+// (rather than sourcepath_test.go) because they assume
+// TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT is honored via
+// sourcePathAuxBeatThresholdPercentValue. On non-(linux||windows) builds the
+// stub in sourcepath_default.go always returns the constant default and
+// ignores the env knob, which would make these assertions fail
+// deterministically.
+func TestSourcePathProbeManagerPrimaryBaselineThresholdEnvOverride(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT", "1")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT", "") })
+
+	var pm sourcePathProbeManager
+	now := mono.Now()
+	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 5}
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+
+	// aux mean = 19ms, primary = 20ms → 5% improvement. With threshold
+	// lowered to 1% via env, aux now qualifies.
+	for i, lat := range []time.Duration{18 * time.Millisecond, 19 * time.Millisecond, 20 * time.Millisecond} {
+		pm.samples = append(pm.samples, sourcePathProbeSample{
+			dst:     dst,
+			source:  source,
+			latency: lat,
+			at:      now.Add(-time.Duration(i+1) * time.Second),
+		})
+	}
+
+	primary := 20 * time.Millisecond
+	if _, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now, primary); !ok {
+		t.Fatal("aux not selected with 1%% threshold env override despite 5%% improvement")
+	}
+}
+
+func TestSourcePathProbeManagerPrimaryBaselineThresholdEnvClampedTo100(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT", "200")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT", "") })
+
+	if got := sourcePathAuxBeatThresholdPercentValue(); got != 100 {
+		t.Fatalf("threshold value = %d, want 100 (clamped)", got)
+	}
+
+	var pm sourcePathProbeManager
+	now := mono.Now()
+	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 5}
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+
+	// Even an aux mean of 1ms cannot beat primary RTT of 20ms × 0% = 0ms.
+	for i, lat := range []time.Duration{1 * time.Millisecond, 1 * time.Millisecond, 1 * time.Millisecond} {
+		pm.samples = append(pm.samples, sourcePathProbeSample{
+			dst:     dst,
+			source:  source,
+			latency: lat,
+			at:      now.Add(-time.Duration(i+1) * time.Second),
+		})
+	}
+
+	primary := 20 * time.Millisecond
+	if _, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now, primary); ok {
+		t.Fatal("aux selected with 100%% threshold (no aux should ever beat primary)")
+	}
+}
+
 func TestSourcePathAuxSocketCountBoundaryDualStack(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -985,11 +1048,17 @@ func TestSourcePathAutomaticAuxDualNodeRuntime(t *testing.T) {
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "true")
+			// On loopback the real primary RTT is sub-millisecond, far below
+			// the seeded 1ms aux samples. Disable the primary-baseline gate
+			// so this test exercises automatic-mode selection logic, not
+			// Phase 20's relative-improvement check.
+			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT", "-1")
 			t.Cleanup(func() {
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
+				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT", "")
 			})
 
 			logf := logger.WithPrefix(t.Logf, "srcsel-auto-dual-node-"+tt.name+": ")

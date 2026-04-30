@@ -461,6 +461,22 @@ func (st *endpointState) latencyLocked() (lat time.Duration, ok bool) {
 	return st.recentPongs[st.recentPong].latency, true
 }
 
+// primaryRTTForLocked returns the most recently observed primary-path RTT for
+// dst, or 0 if no usable measurement exists. Prefers the per-address pong
+// history; falls back to bestAddr.latency when dst is the current bestAddr.
+// endpoint.mu must be held.
+func (de *endpoint) primaryRTTForLocked(dst epAddr) time.Duration {
+	if state, ok := de.endpointState[dst.ap]; ok {
+		if rtt, ok := state.latencyLocked(); ok && rtt > 0 {
+			return rtt
+		}
+	}
+	if de.bestAddr.epAddr == dst && de.bestAddr.latency > 0 {
+		return de.bestAddr.latency
+	}
+	return 0
+}
+
 // endpoint.mu must be held.
 func (st *endpointState) addPongReplyLocked(r pongReply) {
 	if n := len(st.recentPongs); n < pongHistoryCount {

@@ -22,8 +22,9 @@ var (
 	envknobSrcSelAutoDataSource  = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE")
 	envknobSrcSelMaxPeers        = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PEERS")
 	envknobSrcSelMaxProbeBurst   = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST")
-	envknobSrcSelMaxPending      = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PENDING")
-	envknobSrcSelMaxSamples      = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_SAMPLES")
+	envknobSrcSelMaxPending           = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PENDING")
+	envknobSrcSelMaxSamples           = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_SAMPLES")
+	envknobSrcSelAuxBeatThresholdPct  = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT")
 )
 
 func sourcePathAuxSocketCount() int {
@@ -76,6 +77,31 @@ func sourcePathProbeSampleLimitCount() int {
 	n := envknobSrcSelMaxSamples()
 	if n == 0 {
 		return sourcePathProbeHistoryLimit
+	}
+	return n
+}
+
+// sourcePathAuxBeatThresholdPercentValue returns the percent by which an
+// auxiliary candidate must beat the primary path's RTT before automatic
+// selection is allowed to use it.
+//
+//	env <  0  → 0 (primary-baseline comparison disabled)
+//	env == 0  → default sourcePathAuxBeatThresholdPercent (also the unset case
+//	             since envknob.Int returns 0 for missing variables)
+//	env >  0  → that value, clamped to [1, 100]
+//
+// Callers treat a return value of 0 as "skip the primary-baseline gate
+// entirely" — useful for tests and for opt-out under operational control.
+func sourcePathAuxBeatThresholdPercentValue() int {
+	n := envknobSrcSelAuxBeatThresholdPct()
+	if n < 0 {
+		return 0
+	}
+	if n == 0 {
+		return sourcePathAuxBeatThresholdPercent
+	}
+	if n > 100 {
+		return 100
 	}
 	return n
 }

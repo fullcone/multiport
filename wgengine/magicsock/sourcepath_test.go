@@ -410,7 +410,7 @@ func TestSourcePathProbeManagerBestCandidateDualStackObserveOnly(t *testing.T) {
 	}
 	beforePending, beforeSamples := pm.pendingLenLocked(), pm.samplesLenLocked()
 
-	score4, ok := pm.bestCandidateLocked(v4, []sourceRxMeta{primarySourceRxMeta, current4, current6}, now)
+	score4, ok := pm.bestCandidateLocked(v4, []sourceRxMeta{primarySourceRxMeta, current4, current6}, now, 0)
 	if !ok {
 		t.Fatal("IPv4 candidate not found")
 	}
@@ -427,7 +427,7 @@ func TestSourcePathProbeManagerBestCandidateDualStackObserveOnly(t *testing.T) {
 		t.Fatalf("IPv4 candidate lastAt delta = %v, want %v", got, want)
 	}
 
-	score6, ok := pm.bestCandidateLocked(v6, []sourceRxMeta{current4, current6}, now)
+	score6, ok := pm.bestCandidateLocked(v6, []sourceRxMeta{current4, current6}, now, 0)
 	if !ok {
 		t.Fatal("IPv6 candidate not found")
 	}
@@ -444,13 +444,13 @@ func TestSourcePathProbeManagerBestCandidateDualStackObserveOnly(t *testing.T) {
 		t.Fatalf("IPv6 candidate lastAt delta = %v, want %v", got, want)
 	}
 
-	if _, ok := pm.bestCandidateLocked(v4, []sourceRxMeta{primarySourceRxMeta}, now); ok {
+	if _, ok := pm.bestCandidateLocked(v4, []sourceRxMeta{primarySourceRxMeta}, now, 0); ok {
 		t.Fatal("primary-only source list returned a candidate")
 	}
-	if _, ok := pm.bestCandidateLocked(v4, []sourceRxMeta{{socketID: sourceIPv4SocketID, generation: 99}}, now); ok {
+	if _, ok := pm.bestCandidateLocked(v4, []sourceRxMeta{{socketID: sourceIPv4SocketID, generation: 99}}, now, 0); ok {
 		t.Fatal("nonmatching generation source list returned a candidate")
 	}
-	if _, ok := pm.bestCandidateLocked(epAddr{}, []sourceRxMeta{current4}, now); ok {
+	if _, ok := pm.bestCandidateLocked(epAddr{}, []sourceRxMeta{current4}, now, 0); ok {
 		t.Fatal("non-direct destination returned a candidate")
 	}
 	if got := pm.pendingLenLocked(); got != beforePending {
@@ -477,7 +477,7 @@ func TestSourcePathProbeManagerSkipsExpiredSamples(t *testing.T) {
 		{dst: dst, source: source, latency: 20 * time.Millisecond, at: now.Add(-1 * time.Second)},
 	}
 
-	score, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now)
+	score, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now, 0)
 	if !ok {
 		t.Fatal("expected a candidate from fresh samples")
 	}
@@ -503,7 +503,7 @@ func TestSourcePathProbeManagerRequiresMinSamplesForUse(t *testing.T) {
 			at:      now.Add(-time.Duration(i+1) * time.Second),
 		})
 	}
-	if _, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now); ok {
+	if _, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now, 0); ok {
 		t.Fatalf("candidate selected with only %d fresh samples (min %d required)", sourcePathMinSamplesForUse-1, sourcePathMinSamplesForUse)
 	}
 
@@ -513,7 +513,7 @@ func TestSourcePathProbeManagerRequiresMinSamplesForUse(t *testing.T) {
 		latency: 10 * time.Millisecond,
 		at:      now,
 	})
-	score, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now)
+	score, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now, 0)
 	if !ok {
 		t.Fatalf("candidate not selected with %d fresh samples", sourcePathMinSamplesForUse)
 	}
@@ -551,7 +551,7 @@ func TestSourcePathProbeManagerInvalidateDropsMatching(t *testing.T) {
 		}
 	}
 
-	if _, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now); ok {
+	if _, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now, 0); ok {
 		t.Fatal("invalidated (dst, source) still produces a candidate")
 	}
 }
@@ -594,6 +594,100 @@ func TestConnNoteSourcePathSendFailureClearsSamples(t *testing.T) {
 	c.mu.Unlock()
 	if remaining != 1 {
 		t.Fatalf("primary send-failure should not touch samples; got %d remaining", remaining)
+	}
+}
+
+func TestSourcePathProbeManagerPrimaryBaselineRejectsClose(t *testing.T) {
+	var pm sourcePathProbeManager
+	now := mono.Now()
+	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 5}
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+
+	// aux mean = 19ms, primary = 20ms → aux beats primary by only 5%, below
+	// the default 10% threshold.
+	for i, lat := range []time.Duration{18 * time.Millisecond, 19 * time.Millisecond, 20 * time.Millisecond} {
+		pm.samples = append(pm.samples, sourcePathProbeSample{
+			dst:     dst,
+			source:  source,
+			latency: lat,
+			at:      now.Add(-time.Duration(i+1) * time.Second),
+		})
+	}
+
+	rejectedBefore := metricSourcePathPrimaryBeatRejected.Value()
+	primary := 20 * time.Millisecond
+	if _, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now, primary); ok {
+		t.Fatal("aux selected despite mean (19ms) not beating primary (20ms) by 10% threshold")
+	}
+	if delta := metricSourcePathPrimaryBeatRejected.Value() - rejectedBefore; delta != 1 {
+		t.Fatalf("primary-beat rejected metric delta = %d, want 1", delta)
+	}
+
+	// Without primary baseline (primaryRTT == 0) the same samples should
+	// still allow aux selection — backward compat with Phase 19 behavior.
+	score, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now, 0)
+	if !ok {
+		t.Fatal("aux not selected when primary RTT is unknown")
+	}
+	if score.latency != 19*time.Millisecond {
+		t.Fatalf("aux mean latency = %v, want 19ms", score.latency)
+	}
+}
+
+func TestSourcePathProbeManagerPrimaryBaselineAcceptsClearWin(t *testing.T) {
+	var pm sourcePathProbeManager
+	now := mono.Now()
+	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 5}
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+
+	// aux mean = 5ms, primary = 20ms → aux beats primary by 75%, well above
+	// the default 10% threshold.
+	for i, lat := range []time.Duration{4 * time.Millisecond, 5 * time.Millisecond, 6 * time.Millisecond} {
+		pm.samples = append(pm.samples, sourcePathProbeSample{
+			dst:     dst,
+			source:  source,
+			latency: lat,
+			at:      now.Add(-time.Duration(i+1) * time.Second),
+		})
+	}
+
+	primary := 20 * time.Millisecond
+	score, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now, primary)
+	if !ok {
+		t.Fatal("aux not selected despite clearly beating primary")
+	}
+	if score.latency != 5*time.Millisecond {
+		t.Fatalf("aux mean latency = %v, want 5ms", score.latency)
+	}
+}
+
+func TestEndpointPrimaryRTTForLockedFallsBackToBestAddr(t *testing.T) {
+	de := &endpoint{}
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+
+	// No state and no bestAddr → 0.
+	if got := de.primaryRTTForLocked(dst); got != 0 {
+		t.Fatalf("primary RTT with no data = %v, want 0", got)
+	}
+
+	// bestAddr matches dst → use bestAddr latency.
+	de.bestAddr = addrQuality{epAddr: dst, latency: 17 * time.Millisecond}
+	if got := de.primaryRTTForLocked(dst); got != 17*time.Millisecond {
+		t.Fatalf("primary RTT from bestAddr = %v, want 17ms", got)
+	}
+
+	// endpointState entry overrides bestAddr.
+	state := &endpointState{}
+	state.addPongReplyLocked(pongReply{latency: 9 * time.Millisecond, pongAt: mono.Now()})
+	de.endpointState = map[netip.AddrPort]*endpointState{dst.ap: state}
+	if got := de.primaryRTTForLocked(dst); got != 9*time.Millisecond {
+		t.Fatalf("primary RTT preferred per-address state = %v, want 9ms", got)
+	}
+
+	// Different dst with no data and bestAddr unrelated → 0.
+	other := epAddr{ap: netip.MustParseAddrPort("192.0.2.99:41641")}
+	if got := de.primaryRTTForLocked(other); got != 0 {
+		t.Fatalf("primary RTT for unrelated dst = %v, want 0", got)
 	}
 }
 
