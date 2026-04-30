@@ -234,7 +234,7 @@ table decision the primary uses. There is no auxiliary-specific NIC
 binding code in
 `wgengine/magicsock/sourcepath_supported.go`; a NIC change that
 triggers `Conn.Rebind` rebinds primary and aux together via
-`rebindSourcePathSockets()` (see `sourcepath_supported.go:175`).
+`rebindSourcePathSockets()` (see `sourcepath_supported.go:231`).
 
 The Linux unit test `TestSourcePathSocketRxMetaConcurrentIDUpdate`
 (in `sourcepath_test.go`) already covers the generation-bumping
@@ -260,7 +260,7 @@ block startup, but the actual single-stack path needs verification.
 This host has both IPv4 and IPv6 stacks active. An IPv6-only
 environment is not available here. The architectural mitigation is
 already present:
-`bindSourcePathSocketLocked` in `sourcepath_supported.go:208` calls
+`bindSourcePathSocketLocked` in `sourcepath_supported.go:263` calls
 `closeLocked` then `listenPacket(network, 0)`; failures on either
 family fall through to `setSourcePathBlockForeverLocked`, which keeps
 the affected family disabled while the other continues. The unit test
