@@ -249,9 +249,10 @@ The structural reason, traced through the code:
    socket is auxiliary (non-primary `rxMeta`).
 2. For a peer to send a WireGuard data packet to my aux address, the
    peer's `endpoint.send` must pick my aux as the destination
-   `udpAddr`. `endpoint.send` reads `udpAddr = de.bestAddr.epAddr`
-   (`endpoint.go:575`). Aux selection only changes the **source**
-   socket, never the **destination**.
+   `udpAddr`. `endpoint.addrForSendLocked` reads
+   `udpAddr = de.bestAddr.epAddr` at `endpoint.go:591` (and a parallel
+   read at `endpoint.go:680`). Aux selection only changes the
+   **source** socket, never the **destination**.
 3. `de.bestAddr` is updated by `handlePongConnLocked` based on the
    RTT of disco Pongs, not by data-path observation. Disco Ping/Pong
    exchange always uses primary (the source-path probe is a
