@@ -4307,6 +4307,7 @@ var (
 	metricDirectVsRelayCompared            = clientmetric.NewCounter("magicsock_direct_vs_relay_compared")
 	metricDirectVsRelayGateRelayPreferred  = clientmetric.NewCounter("magicsock_direct_vs_relay_gate_relay_preferred")
 	metricDirectVsRelayGateDirectPreferred = clientmetric.NewCounter("magicsock_direct_vs_relay_gate_direct_preferred")
+	metricDirectVsRelayHoldRejected        = clientmetric.NewCounter("magicsock_direct_vs_relay_hold_rejected")
 	metricRecvDataPacketsDERP               = clientmetric.NewAggregateCounter("magicsock_recv_data_derp")
 	metricRecvDataPacketsIPv4               = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv4")
 	metricRecvDataPacketsIPv6               = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv6")

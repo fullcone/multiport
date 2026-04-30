@@ -10,6 +10,7 @@ import (
 
 	"tailscale.com/envknob"
 	"tailscale.com/net/packet"
+	"tailscale.com/tstime/mono"
 )
 
 func TestDirectVsRelayCompareEnabledDefaultOff(t *testing.T) {
@@ -207,6 +208,115 @@ func TestDirectVsRelayCompareIntervalEnvOverride(t *testing.T) {
 	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE_INTERVAL_S", "") })
 	if got := directVsRelayCompareIntervalValue(); got != 60*time.Second {
 		t.Fatalf("override = %v; want 60s", got)
+	}
+}
+
+func TestWouldAllowDirectVsRelaySwapLockedKnobOff(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "") })
+
+	de := &endpoint{}
+	now := mono.Now()
+	de.lastDirectVsRelaySwap = now.Add(-1 * time.Second) // very recent swap
+	direct := addrQuality{epAddr: epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}}
+	relay := addrQuality{epAddr: withVNI(epAddr{ap: netip.MustParseAddrPort("198.51.100.1:41641")}, 1234)}
+
+	// With env knob off, hysteresis must not block anything (preserves
+	// pre-Phase-22 behaviour bit-for-bit).
+	if !de.wouldAllowDirectVsRelaySwapLocked(direct, relay, now) {
+		t.Fatal("env-off: cross-category swap must be allowed (no hysteresis)")
+	}
+}
+
+func TestWouldAllowDirectVsRelaySwapLockedFirstSwap(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "true")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "") })
+
+	de := &endpoint{} // lastDirectVsRelaySwap is zero
+	now := mono.Now()
+	direct := addrQuality{epAddr: epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}}
+	relay := addrQuality{epAddr: withVNI(epAddr{ap: netip.MustParseAddrPort("198.51.100.1:41641")}, 1234)}
+
+	// First-ever swap (lastDirectVsRelaySwap zero) must always be allowed.
+	if !de.wouldAllowDirectVsRelaySwapLocked(direct, relay, now) {
+		t.Fatal("env-on, first swap (zero last-swap): must be allowed")
+	}
+}
+
+func TestWouldAllowDirectVsRelaySwapLockedHoldBlocks(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_HOLD_S", "300")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_HOLD_S", "")
+	})
+
+	de := &endpoint{}
+	now := mono.Now()
+	de.lastDirectVsRelaySwap = now.Add(-30 * time.Second) // 30s ago, well within 300s hold
+	direct := addrQuality{epAddr: epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}}
+	relay := addrQuality{epAddr: withVNI(epAddr{ap: netip.MustParseAddrPort("198.51.100.1:41641")}, 1234)}
+
+	// Cross-category swap inside hold window must be blocked.
+	if de.wouldAllowDirectVsRelaySwapLocked(direct, relay, now) {
+		t.Fatal("env-on, hold window not yet elapsed: cross-category swap must be blocked")
+	}
+	// Same-category move (direct→direct) must NOT be blocked by the
+	// hysteresis even inside the hold window.
+	direct2 := addrQuality{epAddr: epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}}
+	if !de.wouldAllowDirectVsRelaySwapLocked(direct, direct2, now) {
+		t.Fatal("env-on, same-category swap: hysteresis must not block")
+	}
+}
+
+func TestWouldAllowDirectVsRelaySwapLockedHoldElapsed(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_HOLD_S", "300")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_HOLD_S", "")
+	})
+
+	de := &endpoint{}
+	now := mono.Now()
+	de.lastDirectVsRelaySwap = now.Add(-301 * time.Second) // just past 300s hold
+	direct := addrQuality{epAddr: epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}}
+	relay := addrQuality{epAddr: withVNI(epAddr{ap: netip.MustParseAddrPort("198.51.100.1:41641")}, 1234)}
+
+	if !de.wouldAllowDirectVsRelaySwapLocked(direct, relay, now) {
+		t.Fatal("env-on, hold window elapsed: cross-category swap must be allowed")
+	}
+}
+
+func TestNoteDirectVsRelaySwapLocked(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "true")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "") })
+
+	de := &endpoint{}
+	now := mono.Now()
+	direct := addrQuality{epAddr: epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}}
+	direct2 := addrQuality{epAddr: epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}}
+	relay := addrQuality{epAddr: withVNI(epAddr{ap: netip.MustParseAddrPort("198.51.100.1:41641")}, 1234)}
+
+	// Same-category move: timestamp must NOT update.
+	de.lastDirectVsRelaySwap = mono.Time(0)
+	de.noteDirectVsRelaySwapLocked(direct, direct2, now)
+	if !de.lastDirectVsRelaySwap.IsZero() {
+		t.Fatal("same-category move: lastDirectVsRelaySwap must remain zero")
+	}
+
+	// Cross-category move: timestamp updates.
+	de.noteDirectVsRelaySwapLocked(direct, relay, now)
+	if de.lastDirectVsRelaySwap != now {
+		t.Fatalf("cross-category move: lastDirectVsRelaySwap = %v; want %v", de.lastDirectVsRelaySwap, now)
+	}
+
+	// Knob off: timestamp must NOT update.
+	envknob.Setenv("TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE", "")
+	de.lastDirectVsRelaySwap = mono.Time(0)
+	de.noteDirectVsRelaySwapLocked(direct, relay, now)
+	if !de.lastDirectVsRelaySwap.IsZero() {
+		t.Fatal("env-off: lastDirectVsRelaySwap must remain zero even on category change")
 	}
 }
 
