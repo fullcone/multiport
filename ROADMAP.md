@@ -231,19 +231,26 @@ the measurement layer.
    experimental knob is on. Replace it with a longer comparison
    interval (suggest 5 min) so direct-on-direct workloads pay only
    minimal overhead.
-2. **Cross-category comparison gate.** `bestAddr` already picks
-   the lowest-latency candidate in its current pool. Phase 22 just
-   ensures both direct and relay candidates are *in* the pool
-   simultaneously. To prevent flap when their latencies are close,
-   apply a Phase 20-style 10 % relative gate for the cross-category
-   transition specifically:
+2. **Lift the unconditional direct preference in `betterAddr`**
+   (`endpoint.go:1898-1905`). Today a non-Geneve (direct) path
+   beats a Geneve-encapsulated (relay) path *before* the
+   points-based latency scoring runs, so even if step (1) gives the
+   pool both candidates, the existing `betterAddr` will still pick
+   direct unconditionally. Under the new env knob, replace the hard
+   `vni.IsSet()` short-circuit with a Phase 20-style 10 % relative
+   gate that applies to the cross-category transition:
      - currently direct, relay candidate's mean latency
-       < `direct.latency × (1 - 10 %)` ⇒ switch to relay.
+       < `direct.latency × (1 - 10 %)` ⇒ relay wins.
      - currently relay, direct candidate's mean latency
-       < `relay.latency × (1 - 10 %)` ⇒ switch to direct.
-     - otherwise stay put.
-   The 60-s sample TTL (`sourcePathSampleTTL`) is the natural
-   smoothing window — reuse it.
+       < `relay.latency × (1 - 10 %)` ⇒ direct wins.
+     - otherwise category preference (direct first) is preserved.
+   With the experimental knob *off*, today's behaviour is unchanged
+   bit-for-bit.
+   Without this step, `bestAddr` ranking still picks direct even if
+   the relay's measured latency is lower — both step (1) and step
+   (2) are needed to actually achieve the proposed switching
+   behaviour. The 60-s sample TTL (`sourcePathSampleTTL`) is the
+   natural smoothing window — reuse it for both candidates.
 3. **Per-peer hysteresis.** After a direct-vs-relay swap, hold the
    choice for at least the comparison interval (5 min default,
    tunable via `TS_EXPERIMENTAL_DIRECT_VS_RELAY_HOLD=300s`). Prevents
@@ -289,6 +296,21 @@ the measurement layer.
   where throughput dominates) shouldn't get the comparison even
   when the global knob is on. A `TS_EXPERIMENTAL_DIRECT_VS_RELAY_OPT_OUT`
   env accepting NodeKeys could exclude them.
+- **Polling vs event-driven trigger.** v1 reuses the existing
+  `discoverUDPRelayPathsInterval` rate-limit and a longer 5-min
+  comparison interval — i.e. periodic polling. The upstream TODO at
+  `endpoint.go:933-939` already flags that periodic polling is the
+  current architecture and that smarter triggers (inbound packets
+  acting as discovery triggers, regular `CallMeMaybeVia` from the
+  remote side, etc.) would need a coordination strategy that doesn't
+  exist yet. v2 alternatives worth thinking about for Phase 22.x:
+  trigger relay re-discovery when direct-path latency variance
+  exceeds a threshold (e.g. `dlpv > primary.dlpv × 2` over the
+  last 60 s), or piggy-back a "current direct latency" hint inside
+  existing keep-alive frames so peers can opportunistically signal
+  "you might want to re-probe me on a different path". v1 keeps it
+  simple to bound implementation and review surface; v2 reduces
+  steady-state probe overhead at the cost of more state machine.
 
 ### Out of scope for the candidate
 
