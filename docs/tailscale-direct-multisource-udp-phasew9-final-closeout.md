@@ -56,11 +56,25 @@ primary-baseline gate, and the W-series Windows port.
   sockets and routes them through the standard `lazyEndpoint` /
   `peerMap` path. The Phase 19 fix removed the unconditional drop;
   `magicsock_srcsel_aux_wireguard_rx` counts admitted frames.
-- `Conn.endpoint.send` may steer real WireGuard data through an
-  auxiliary source socket only when (a) source selection is enabled
-  via `TS_EXPERIMENTAL_SRCSEL_ENABLE`, (b) `dst.isDirect()`, and
-  (c) the candidate satisfies the scorer's TTL, sample-count, and
-  primary-baseline gates.
+- `Conn.endpoint.send` can steer real WireGuard data through an
+  auxiliary source socket via two distinct paths in
+  `Conn.sourcePathDataSendSource`, both gated on
+  `TS_EXPERIMENTAL_SRCSEL_ENABLE` and `dst.isDirect()`:
+    1. **Forced mode.**
+       `TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE` (`aux`, `aux4` /
+       `ipv4` / `v4`, or `aux6` / `ipv6` / `v6`) selects the
+       requested family's auxiliary source unconditionally for
+       direct destinations matching the family. The scorer is not
+       consulted in this mode; operators carry full responsibility
+       for the choice.
+    2. **Automatic mode.** If forced mode is unset and
+       `TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE` is enabled, the
+       scorer is consulted. Auto mode selects an auxiliary source
+       only when the candidate satisfies the TTL, minimum-sample,
+       and primary-baseline gates documented below; otherwise the
+       send falls back to primary.
+  When neither knob is set, `endpoint.send` always uses the primary
+  source.
 - The probe manager retains samples for at most
   `sourcePathSampleTTL = 60s` and rejects auxiliary candidates with
   fewer than `sourcePathMinSamplesForUse = 3` fresh samples. Samples
