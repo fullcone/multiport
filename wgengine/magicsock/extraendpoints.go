@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -93,8 +94,9 @@ type extraEndpointsState struct {
 	mu  sync.RWMutex
 	cur []netip.AddrPort // last successfully-parsed endpoints
 
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	stopCh   chan struct{}
+	stopOnce sync.Once // guards close(stopCh) against concurrent stopExtraEndpointsWatcher calls
+	wg       sync.WaitGroup
 }
 
 // extraEndpointsCurrent returns the current snapshot of operator-provided
@@ -153,15 +155,20 @@ func (c *Conn) startExtraEndpointsWatcher() {
 }
 
 // stopExtraEndpointsWatcher tears down the watcher and waits for the
-// goroutine to exit. Idempotent.
+// goroutine to exit. Safe to call concurrently / multiple times — the
+// stopCh close is guarded by sync.Once so two simultaneous Close calls
+// cannot panic with "close of closed channel".
 func (c *Conn) stopExtraEndpointsWatcher() {
 	s := c.extraEndpoints
 	if s == nil {
 		return
 	}
-	close(s.stopCh)
+	s.stopOnce.Do(func() { close(s.stopCh) })
 	s.wg.Wait()
-	c.extraEndpoints = nil
+	// Note: c.extraEndpoints is intentionally NOT zeroed here, since
+	// other concurrent Close calls may already be observing it. The
+	// closed-and-drained state machine is idempotent: subsequent calls
+	// re-enter stopOnce.Do as a no-op and wg.Wait returns immediately.
 }
 
 func extraEndpointsMaxFromEnv() int {
@@ -281,7 +288,12 @@ func (s *extraEndpointsState) snapshot() []netip.AddrPort {
 // nil when the file is missing — that is treated as "no extra
 // endpoints" rather than as an error).
 func (s *extraEndpointsState) parseAndApply() ([]netip.AddrPort, error) {
-	info, err := os.Stat(s.path)
+	// Open first, then check permissions and size *on the open fd* so
+	// that a writer who replaces or grows the file between stat and read
+	// cannot bypass the size cap (TOCTOU). os.OpenFile on a missing
+	// file returns an error we handle as "feature off" rather than as
+	// a hard failure.
+	f, err := os.Open(s.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			s.applyLocked(nil)
@@ -289,29 +301,39 @@ func (s *extraEndpointsState) parseAndApply() ([]netip.AddrPort, error) {
 		}
 		return nil, err
 	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
 	if info.IsDir() {
 		return nil, errors.New("path is a directory, not a regular file")
-	}
-	if info.Size() > extraEndpointsMaxFileSize {
-		return nil, errors.New("file too large; refusing to read")
 	}
 	if err := s.checkPermissions(info); err != nil {
 		return nil, err
 	}
 
-	data, err := os.ReadFile(s.path)
+	// Read up to extraEndpointsMaxFileSize+1 bytes via LimitReader. If
+	// we got more than the cap we know the actual file exceeded it
+	// (race-free against post-stat growth), so refuse. The +1 is what
+	// distinguishes "exactly at cap" from "over cap".
+	data, err := io.ReadAll(io.LimitReader(f, extraEndpointsMaxFileSize+1))
 	if err != nil {
 		return nil, err
 	}
-	var f extraEndpointsFile
-	if err := json.Unmarshal(data, &f); err != nil {
+	if len(data) > extraEndpointsMaxFileSize {
+		return nil, errors.New("file too large; refusing to read")
+	}
+	var fc extraEndpointsFile
+	if err := json.Unmarshal(data, &fc); err != nil {
 		return nil, err
 	}
 
-	parsed := make([]netip.AddrPort, 0, len(f.Endpoints))
-	seen := make(map[netip.AddrPort]struct{}, len(f.Endpoints))
+	parsed := make([]netip.AddrPort, 0, len(fc.Endpoints))
+	seen := make(map[netip.AddrPort]struct{}, len(fc.Endpoints))
 	dropped := 0
-	for _, raw := range f.Endpoints {
+	for _, raw := range fc.Endpoints {
 		ap, perr := netip.ParseAddrPort(raw)
 		if perr != nil {
 			dropped++

@@ -273,3 +273,72 @@ func TestConnExtraEndpointsCurrentNilWhenWatcherOff(t *testing.T) {
 		t.Fatalf("watcher off: extraEndpointsCurrent must be nil; got %v", got)
 	}
 }
+
+// TestExtraEndpointsParseAndApplyEnforcesSizeCapOnRead is a regression
+// test for Codex P2 round 1 on PR #17: the size cap must be enforced
+// during read (via io.LimitReader), not via a pre-read os.Stat. A pre-
+// read stat creates a TOCTOU window: a concurrent writer could replace
+// the file between stat and read, and the stale stat-based size check
+// would fail to refuse a now-oversized file. The fix uses
+// io.LimitReader on the open fd and asserts post-read length, closing
+// the window.
+//
+// We can't easily simulate a TOCTOU race in a unit test, but we can
+// assert the cap fires on a file that is actually oversized at read
+// time. With the broken stat-based approach + a deliberately stale
+// stat, this would have passed the stat check but failed the read
+// check; with the fix it correctly fails.
+func TestExtraEndpointsParseAndApplyEnforcesSizeCapOnRead(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "extra.json")
+	// Write exactly extraEndpointsMaxFileSize+100 bytes — well over cap.
+	big := strings.Repeat("a", extraEndpointsMaxFileSize+100)
+	if err := os.WriteFile(path, []byte(big), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestExtraEndpointsState(path, extraEndpointsDefaultMax)
+	_, err := s.parseAndApply()
+	if err == nil {
+		t.Fatal("oversized file (cap+100 bytes) must be refused at read time")
+	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Errorf("expected 'too large' error; got %v", err)
+	}
+}
+
+// TestStopExtraEndpointsWatcherIdempotent is a regression test for Codex
+// P1 round 1 on PR #17: concurrent stopExtraEndpointsWatcher calls (or
+// repeated calls from a single goroutine) must not panic. The first
+// implementation called close(stopCh) unconditionally — the second
+// call would crash with "close of closed channel".
+func TestStopExtraEndpointsWatcherIdempotent(t *testing.T) {
+	c := &Conn{
+		extraEndpoints: &extraEndpointsState{
+			logf:   func(string, ...any) {},
+			stopCh: make(chan struct{}),
+		},
+	}
+
+	// First call — closes the channel.
+	c.stopExtraEndpointsWatcher()
+
+	// Second call — must NOT panic. (If sync.Once is missing, this
+	// panics with "close of closed channel".)
+	c.stopExtraEndpointsWatcher()
+
+	// Third call — also fine.
+	c.stopExtraEndpointsWatcher()
+
+	// And concurrent calls — also fine.
+	const N = 8
+	done := make(chan struct{}, N)
+	for i := 0; i < N; i++ {
+		go func() {
+			c.stopExtraEndpointsWatcher()
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < N; i++ {
+		<-done
+	}
+}
