@@ -180,7 +180,10 @@ rebindSourcePathSockets()   -> bindSourcePathSocketLocked(aux4, "udp4")
                             -> bindSourcePathSocketLocked(aux6, "udp6")
 ```
 
-(`magicsock.go:3897-3906` calls into `sourcepath_supported.go:208`.)
+(`Conn.rebind` at `magicsock.go:3897-3906` calls into
+`Conn.rebindSourcePathSockets` at `sourcepath_supported.go:231`,
+which then invokes `bindSourcePathSocketLocked` at
+`sourcepath_supported.go:263` for each `aux4` / `aux6` pconn.)
 A representative cluster from the captured set, with the bind order
 labeled:
 
@@ -191,8 +194,8 @@ labeled:
 ::1:49181       aux v6       (rebindSourcePathSockets step 4)
 ```
 
-`Conn.connBind.Open` itself does not bind sockets — it only appends
-the per-source receive funcs (`magicsock.go:3563`). The actual
+`Conn.connBind.Open` (`magicsock.go:3563`) itself does not bind
+sockets — it only appends the per-source receive funcs. The actual
 binding has already happened in `rebind` by the time `Open` runs.
 
 Both `127.0.0.1` and `::1` ports show up even when the IPv4 subtest
