@@ -353,30 +353,32 @@ end and is left for a future test bed.
 
 ## Reproducibility
 
-The end-to-end orchestration scripts live next to this checkout (not
-committed; ad-hoc helpers):
+The end-to-end orchestration scripts are archived in
+[`scripts/srcsel-w7/`](../scripts/srcsel-w7/) with a README that lists
+the env-var contract (`SRCSEL_W7_HOST` / `_USER` / `_PASS` or `_KEY`
+plus `SRCSEL_W7_AUTH_KEY`) and the run order:
 
 ```
-C:\other_project\zerotier-client\
-  w7-recon.py                # initial server recon via paramiko
-  w7-upload.py               # sftp Linux binaries to /usr/local/bin
-  w7-headscale-install.py    # download + apt install headscale 0.28.0 .deb
-  w7-headscale-start.py      # start systemd service + create user + auth key
-  w7-config-check.py         # verify headscale + DERP reachability
-  w7-server-up.py            # server-side tailscaled bring-up
-  w7-server-srcsel-on.py     # restart server with srcsel forced env
-  w7-server-srcsel-auto.py   # restart server with srcsel auto env
-  w7-server-srcsel-off.py    # baseline restart (no srcsel)
-  w7-server-final-metrics.py # capture server-side metrics + log
-  w7-setup-key.py            # generate ed25519 key + push to server
-  w7-windows-up.ps1          # SSH tunnel + Windows tailscaled + up
-  w7-windows-srcsel-on.ps1   # restart Windows with srcsel forced env
-  w7-windows-srcsel-auto.ps1 # restart Windows with srcsel auto env
-  w7-windows-srcsel-off.ps1  # baseline restart (no srcsel)
+scripts/srcsel-w7/
+  README.md               # prerequisites + env-var contract + run order
+  .gitignore              # excludes __pycache__/ and *.pyc
+  _common.py              # shared paramiko helper (env-driven config)
+  01-recon.py             # initial server recon
+  02-upload-binaries.py   # sftp Linux binaries to /usr/local/bin
+  03-install-headscale.py # download + apt install headscale 0.28.0 .deb
+  04-start-headscale.py   # start systemd service + create user + auth key
+  05-server-up.py         # server-side tailscaled bring-up (baseline/force/auto)
+  06-server-metrics.py    # capture server-side metrics + log lines
+  07-setup-key.py         # generate ed25519 key + push to server
+  08-windows-up.ps1       # SSH tunnel + Windows tailscaled + up (baseline/force/auto)
 ```
 
-Auth key, server credentials, and server topology are recorded in
-the `reference_remote_linux_w7.md` memory entry.
+The mode-switch (baseline / forced-aux / automatic) is now selected
+by the `SRCSEL_W7_MODE` env var on `05-server-up.py` and
+`08-windows-up.ps1` rather than separate per-mode scripts.
+
+These helpers are best-effort, one-time test harness; expect to tweak
+them for any other environment.
 
 ## Out Of Scope For W7
 
