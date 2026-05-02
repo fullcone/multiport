@@ -703,14 +703,48 @@ func TestReceiveIPAuxiliaryAcceptsWireGuard(t *testing.T) {
 	// naked-WireGuard branch in packetLooksLike.
 	pkt := []byte{0x04, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef}
 
+	primaryBefore := metricSourcePathPrimaryWireGuardRx.Value()
 	before := metricSourcePathAuxWireGuardRx.Value()
 	ep, size, _, ok := c.receiveIPWithSource(pkt, src, &cache, aux)
 
+	if got := metricSourcePathPrimaryWireGuardRx.Value() - primaryBefore; got != 0 {
+		t.Fatalf("primary WG rx metric delta = %d, want 0 for auxiliary receive", got)
+	}
 	if got := metricSourcePathAuxWireGuardRx.Value() - before; got != 1 {
 		t.Fatalf("aux WG rx metric delta = %d, want 1 (auxiliary WireGuard receive drop is still in place)", got)
 	}
 	if !ok {
 		t.Fatal("aux receive returned ok=false for a WireGuard-shaped packet; the previous unconditional drop is still in effect")
+	}
+	if size != len(pkt) {
+		t.Fatalf("size = %d, want %d", size, len(pkt))
+	}
+	if _, isLazy := ep.(*lazyEndpoint); !isLazy {
+		t.Fatalf("returned endpoint type = %T, want *lazyEndpoint", ep)
+	}
+}
+
+func TestReceiveIPPrimaryWireGuardMetric(t *testing.T) {
+	var c Conn
+	c.havePrivateKey.Store(true)
+	var cache epAddrEndpointCache
+	src := netip.MustParseAddrPort("192.0.2.2:41641")
+
+	// A non-disco, non-STUN, non-Geneve packet is classified as WireGuard.
+	pkt := []byte{0x04, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef}
+
+	primaryBefore := metricSourcePathPrimaryWireGuardRx.Value()
+	auxBefore := metricSourcePathAuxWireGuardRx.Value()
+	ep, size, _, ok := c.receiveIP(pkt, src, &cache)
+
+	if got := metricSourcePathPrimaryWireGuardRx.Value() - primaryBefore; got != 1 {
+		t.Fatalf("primary WG rx metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathAuxWireGuardRx.Value() - auxBefore; got != 0 {
+		t.Fatalf("aux WG rx metric delta = %d, want 0 for primary receive", got)
+	}
+	if !ok {
+		t.Fatal("primary receive returned ok=false for a WireGuard-shaped packet")
 	}
 	if size != len(pkt) {
 		t.Fatalf("size = %d, want %d", size, len(pkt))
