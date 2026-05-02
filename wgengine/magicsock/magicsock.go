@@ -1569,8 +1569,14 @@ type dualEndpointSendResult struct {
 func (c *Conn) sendUDPBatchDualSource(aux sourceRxMeta, addr epAddr, buffs [][]byte, offset int) sourcePathDualSendResult {
 	metricSourcePathDualSendPackets.Add(int64(len(buffs)))
 
-	_, primaryErr := c.sendUDPBatch(addr, buffs, offset)
-	_, auxErr := c.sendUDPBatchFromSource(aux, addr, buffs, offset)
+	primarySent, primaryErr := c.sendUDPBatch(addr, buffs, offset)
+	auxSent, auxErr := c.sendUDPBatchFromSource(aux, addr, buffs, offset)
+	if primarySent {
+		metricSourcePathDualSendPrimaryPackets.Add(int64(len(buffs)))
+	}
+	if auxSent {
+		metricSourcePathDualSendAuxPackets.Add(int64(len(buffs)))
+	}
 	if primaryErr != nil {
 		metricSourcePathDualSendPrimaryFailed.Add(int64(len(buffs)))
 		c.noteSourcePathPrimarySendFailure(addr, mono.Now())
@@ -4408,6 +4414,8 @@ var (
 	metricSourcePathHardAvoidJitter             = clientmetric.NewCounter("magicsock_srcsel_hard_avoid_jitter")
 	metricSourcePathHardAvoidLoss               = clientmetric.NewCounter("magicsock_srcsel_hard_avoid_loss")
 	metricSourcePathDualSendPackets             = clientmetric.NewCounter("magicsock_srcsel_dual_send_packets")
+	metricSourcePathDualSendPrimaryPackets      = clientmetric.NewCounter("magicsock_srcsel_dual_send_primary_packets")
+	metricSourcePathDualSendAuxPackets          = clientmetric.NewCounter("magicsock_srcsel_dual_send_aux_packets")
 	metricSourcePathDualSendPrimaryFailed       = clientmetric.NewCounter("magicsock_srcsel_dual_send_primary_failed")
 	metricSourcePathDualSendAuxFailed           = clientmetric.NewCounter("magicsock_srcsel_dual_send_aux_failed")
 	metricSourcePathDualSendBothFailed          = clientmetric.NewCounter("magicsock_srcsel_dual_send_both_failed")

@@ -1704,6 +1704,8 @@ func TestSourcePathDualSendSendsPrimaryAndAux(t *testing.T) {
 	payload := []byte("source-path-dual-send")
 	buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
 	copy(buf[packet.GeneveFixedHeaderLength:], payload)
+	primaryPacketsBefore := metricSourcePathDualSendPrimaryPackets.Value()
+	auxPacketsBefore := metricSourcePathDualSendAuxPackets.Value()
 	res := c.sendUDPBatchDualSource(source, dst, [][]byte{buf}, packet.GeneveFixedHeaderLength)
 	if res.err != nil {
 		t.Fatalf("sendUDPBatchDualSource error = %v", res.err)
@@ -1713,6 +1715,12 @@ func TestSourcePathDualSendSendsPrimaryAndAux(t *testing.T) {
 	}
 	if res.auxErr != nil {
 		t.Fatalf("aux send error = %v", res.auxErr)
+	}
+	if got := metricSourcePathDualSendPrimaryPackets.Value() - primaryPacketsBefore; got != 1 {
+		t.Fatalf("dual-send primary packets metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathDualSendAuxPackets.Value() - auxPacketsBefore; got != 1 {
+		t.Fatalf("dual-send aux packets metric delta = %d, want 1", got)
 	}
 
 	wantPrimary := udpConnAddrPort(t, primaryConn.LocalAddr())
