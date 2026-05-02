@@ -4361,6 +4361,7 @@ var (
 	metricSourcePathProbeHardCapDropped      = clientmetric.NewCounter("magicsock_srcsel_probe_hard_cap_dropped")
 	metricSourcePathProbeSamplesExpired      = clientmetric.NewCounter("magicsock_srcsel_probe_samples_expired")
 	metricSourcePathProbeSamplesEvicted      = clientmetric.NewCounter("magicsock_srcsel_probe_samples_evicted")
+	metricSourcePathProbeOutcomesEvicted     = clientmetric.NewCounter("magicsock_srcsel_probe_outcomes_evicted")
 	metricSourcePathAuxWireGuardRx           = clientmetric.NewCounter("magicsock_srcsel_aux_wireguard_rx")
 	metricSourcePathSendFailureInvalidated   = clientmetric.NewCounter("magicsock_srcsel_send_failure_invalidated_samples")
 	metricSourcePathPrimaryBeatRejected      = clientmetric.NewCounter("magicsock_srcsel_primary_beat_rejected")

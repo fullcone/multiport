@@ -26,6 +26,7 @@ var (
 	envknobSrcSelMaxProbeBurst       = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST")
 	envknobSrcSelMaxPending          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PENDING")
 	envknobSrcSelMaxSamples          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_SAMPLES")
+	envknobSrcSelMaxOutcomes         = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_OUTCOMES")
 	envknobSrcSelAuxBeatThresholdPct = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT")
 	envknobSrcSelDualSend            = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND")
 	envknobSrcSelDualSendAuxDrop     = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_AUX_DROP_STREAK")
@@ -93,6 +94,17 @@ func sourcePathProbeSampleLimitCount() int {
 	n := envknobSrcSelMaxSamples()
 	if n == 0 {
 		return sourcePathProbeHistoryLimit
+	}
+	return n
+}
+
+// sourcePathProbeOutcomeLimitCount is the memory-safety hard cap on the total
+// number of probe outcomes retained globally for loss scoring. <= 0 disables
+// the cap.
+func sourcePathProbeOutcomeLimitCount() int {
+	n := envknobSrcSelMaxOutcomes()
+	if n == 0 {
+		return sourcePathProbeOutcomeLimit
 	}
 	return n
 }

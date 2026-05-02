@@ -49,6 +49,13 @@ const (
 	// TS_EXPERIMENTAL_SRCSEL_MAX_PENDING.
 	sourcePathProbeHardPendingCap = 100000
 
+	// sourcePathProbeOutcomeLimit bounds the global probe outcome buffer
+	// used for loss scoring. Freshness is still enforced by
+	// sourcePathLossWindow, but the hard cap keeps high probe rates from
+	// accumulating unbounded outcomes inside that window. Override via
+	// TS_EXPERIMENTAL_SRCSEL_MAX_OUTCOMES.
+	sourcePathProbeOutcomeLimit = 100000
+
 	// sourcePathSampleTTL is the maximum age of a probe sample considered by
 	// the scorer. Older samples are skipped so a stale lucky measurement does
 	// not pin auxiliary selection on a path whose NAT mapping or routing has
@@ -704,6 +711,12 @@ func (pm *sourcePathProbeManager) noteOutcomeLocked(dst epAddr, source sourceRxM
 		lost:   lost,
 	})
 	pm.pruneExpiredOutcomesLocked(at)
+	if hardCap := sourcePathProbeOutcomeLimitCount(); hardCap > 0 && len(pm.outcomes) > hardCap {
+		dropped := int64(len(pm.outcomes) - hardCap)
+		copy(pm.outcomes, pm.outcomes[len(pm.outcomes)-hardCap:])
+		pm.outcomes = pm.outcomes[:hardCap]
+		metricSourcePathProbeOutcomesEvicted.Add(dropped)
+	}
 }
 
 func (pm *sourcePathProbeManager) pruneExpiredOutcomesLocked(now mono.Time) {

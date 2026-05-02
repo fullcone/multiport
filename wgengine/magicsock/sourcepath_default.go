@@ -28,6 +28,8 @@ func sourcePathProbeHardPendingCount() int { return sourcePathProbeHardPendingCa
 
 func sourcePathProbeSampleLimitCount() int { return sourcePathProbeHistoryLimit }
 
+func sourcePathProbeOutcomeLimitCount() int { return sourcePathProbeOutcomeLimit }
+
 func sourcePathAuxBeatThresholdPercentValue() int { return sourcePathAuxBeatThresholdPercent }
 
 func sourcePathMultiMetricEnabled() bool { return false }

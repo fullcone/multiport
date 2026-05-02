@@ -164,6 +164,29 @@ func TestSourcePathProbeManagerMultiMetricHardAvoidLoss(t *testing.T) {
 	}
 }
 
+func TestSourcePathProbeManagerOutcomeHardCap(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MAX_OUTCOMES", "3")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MAX_OUTCOMES", "") })
+
+	var pm sourcePathProbeManager
+	now := mono.Now()
+	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 5}
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	for i := 0; i < 5; i++ {
+		pm.noteOutcomeLocked(dst, source, now.Add(time.Duration(i)*time.Millisecond), i%2 == 0)
+	}
+
+	if got := len(pm.outcomes); got != 3 {
+		t.Fatalf("outcome count = %d, want capped count 3", got)
+	}
+	for i, outcome := range pm.outcomes {
+		wantAt := now.Add(time.Duration(i+2) * time.Millisecond)
+		if outcome.at != wantAt {
+			t.Fatalf("outcome[%d].at = %v, want %v", i, outcome.at, wantAt)
+		}
+	}
+}
+
 func TestSourcePathRealtimeProfileValues(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROFILE", "realtime")
 	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROFILE", "") })
