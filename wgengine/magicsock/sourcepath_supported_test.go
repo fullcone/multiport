@@ -1156,6 +1156,41 @@ func TestSourcePathActivePolicyHourlyRefreshAndPromotionCooldown(t *testing.T) {
 	}
 }
 
+func TestSourcePathActivePolicyInitialSelectionUsesTwoFastestPaths(t *testing.T) {
+	now := mono.Now()
+	dstA := epAddr{ap: netip.MustParseAddrPort("192.0.2.10:41641")}
+	dstB := epAddr{ap: netip.MustParseAddrPort("192.0.2.11:41641")}
+	path := func(dst epAddr, source sourceRxMeta, latency time.Duration) sourcePathSendPath {
+		return sourcePathSendPath{
+			dst:        dst,
+			source:     source,
+			latency:    latency,
+			hasLatency: true,
+			lastAt:     now,
+		}
+	}
+
+	fastA := path(dstA, sourceRxMeta{socketID: sourceIPv4SocketID, generation: 1}, 5*time.Millisecond)
+	secondA := path(dstA, sourceRxMeta{socketID: sourceIPv4ExtraSocketIDBase, generation: 1}, 6*time.Millisecond)
+	slowerB := path(dstB, sourceRxMeta{socketID: sourceIPv4ExtraSocketIDBase + 1, generation: 1}, 25*time.Millisecond)
+
+	de := &endpoint{}
+	de.mu.Lock()
+	selected, ev := de.sourcePathApplyActivePathPolicyLocked(now, []sourcePathSendPath{
+		fastA,
+		secondA,
+		slowerB,
+	})
+	de.mu.Unlock()
+
+	if ev.replaced {
+		t.Fatalf("initial active selection replaced path unexpectedly")
+	}
+	if len(selected) != 2 || !sameSourcePathSendPath(selected[0], fastA) || !sameSourcePathSendPath(selected[1], secondA) {
+		t.Fatalf("initial active paths = %+v, want two fastest paths sharing dstA", selected)
+	}
+}
+
 func TestSourcePathDualSendObservedRemoteEndpointsSkipStaleAlternate(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
