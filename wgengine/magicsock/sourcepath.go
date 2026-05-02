@@ -92,9 +92,10 @@ const (
 	sourcePathAuxBeatThresholdPercent = 10
 
 	// Phase 23 dual-send defaults.
-	sourcePathDualSendAuxDropStreak = 5
-	sourcePathDualSendRecovery      = 30 * time.Second
-	sourcePathDualSendMaxSkew       = 100 * time.Millisecond
+	sourcePathDualSendAuxDropStreak      = 5
+	sourcePathDualSendAuxProbeDropStreak = 2
+	sourcePathDualSendRecovery           = 30 * time.Second
+	sourcePathDualSendMaxSkew            = 100 * time.Millisecond
 
 	// Phase 25 active-backup defaults.
 	sourcePathActiveBackupPrimaryFailStreak = 3
@@ -158,6 +159,7 @@ type sourcePathProbeManager struct {
 	outcomes               []sourcePathProbeOutcome
 	activeBackup           map[epAddr]sourcePathActiveBackupState
 	dualSendAuxFailStreak  map[sourcePathDualSendKey]int
+	dualSendAuxProbeLoss   map[sourcePathDualSendKey]int
 	dualSendDemotedAuxTill map[sourcePathDualSendKey]mono.Time
 	flowMap                map[sourcePathFlowKey]sourcePathFlowState
 	flowRR                 map[epAddr]uint64
@@ -192,6 +194,12 @@ type sourcePathProbeTx struct {
 	source   sourceRxMeta
 	at       mono.Time
 	size     int
+}
+
+type sourcePathAuxRotation struct {
+	dst    epAddr
+	source sourceRxMeta
+	reason string
 }
 
 type sourcePathProbeSample struct {
@@ -248,7 +256,7 @@ func (pm *sourcePathProbeManager) addWithBudgetLocked(tx sourcePathProbeTx, maxP
 	if pm.pending == nil {
 		pm.pending = make(map[stun.TxID]sourcePathProbeTx)
 	}
-	pm.pruneExpiredLocked(tx.at)
+	_ = pm.pruneExpiredLocked(tx.at)
 	if maxBurst <= 0 {
 		maxBurst = sourcePathProbeMaxBurst
 	}
@@ -316,9 +324,67 @@ func (pm *sourcePathProbeManager) clearLocked() {
 	pm.outcomes = nil
 	pm.activeBackup = nil
 	pm.dualSendAuxFailStreak = nil
+	pm.dualSendAuxProbeLoss = nil
 	pm.dualSendDemotedAuxTill = nil
 	pm.flowMap = nil
 	pm.flowRR = nil
+}
+
+func (pm *sourcePathProbeManager) dropSourceLocked(source sourceRxMeta) (samples, outcomes, pending, flows int) {
+	if source.isPrimary() {
+		return 0, 0, 0, 0
+	}
+
+	n := 0
+	for _, sample := range pm.samples {
+		if sample.source == source {
+			samples++
+			continue
+		}
+		pm.samples[n] = sample
+		n++
+	}
+	pm.samples = pm.samples[:n]
+
+	n = 0
+	for _, outcome := range pm.outcomes {
+		if outcome.source == source {
+			outcomes++
+			continue
+		}
+		pm.outcomes[n] = outcome
+		n++
+	}
+	pm.outcomes = pm.outcomes[:n]
+
+	for txid, tx := range pm.pending {
+		if tx.source == source {
+			delete(pm.pending, txid)
+			pending++
+		}
+	}
+	for key, st := range pm.flowMap {
+		if st.source == source {
+			delete(pm.flowMap, key)
+			flows++
+		}
+	}
+	for key := range pm.dualSendAuxFailStreak {
+		if key.source == source {
+			delete(pm.dualSendAuxFailStreak, key)
+		}
+	}
+	for key := range pm.dualSendAuxProbeLoss {
+		if key.source == source {
+			delete(pm.dualSendAuxProbeLoss, key)
+		}
+	}
+	for key := range pm.dualSendDemotedAuxTill {
+		if key.source == source {
+			delete(pm.dualSendDemotedAuxTill, key)
+		}
+	}
+	return samples, outcomes, pending, flows
 }
 
 // noteSourcePathSendFailure invalidates probe samples for (dst, source) after
@@ -933,22 +999,27 @@ func (c *Conn) noteSourcePathDualSendAuxSuccess(dst epAddr, source sourceRxMeta)
 	key := sourcePathDualSendKey{dst: dst, source: source}
 	c.mu.Lock()
 	delete(c.sourceProbes.dualSendAuxFailStreak, key)
+	delete(c.sourceProbes.dualSendAuxProbeLoss, key)
 	c.mu.Unlock()
 }
 
-func (c *Conn) noteSourcePathDualSendAuxFailure(dst epAddr, source sourceRxMeta, now mono.Time) {
+func (c *Conn) noteSourcePathDualSendAuxFailure(dst epAddr, source sourceRxMeta, now mono.Time, sendErr error) {
 	key := sourcePathDualSendKey{dst: dst, source: source}
 	dropStreak := sourcePathDualSendAuxDropStreakValue()
 	recovery := sourcePathDualSendRecoveryValue()
+	var rotate bool
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.sourceProbes.dualSendAuxFailStreak == nil {
 		c.sourceProbes.dualSendAuxFailStreak = make(map[sourcePathDualSendKey]int)
 	}
 	streak := c.sourceProbes.dualSendAuxFailStreak[key] + 1
 	c.sourceProbes.dualSendAuxFailStreak[key] = streak
-	if streak < dropStreak {
+	if sendErr != nil || streak >= dropStreak {
+		rotate = true
+	}
+	if !rotate {
+		c.mu.Unlock()
 		return
 	}
 	delete(c.sourceProbes.dualSendAuxFailStreak, key)
@@ -956,7 +1027,84 @@ func (c *Conn) noteSourcePathDualSendAuxFailure(dst epAddr, source sourceRxMeta,
 		c.sourceProbes.dualSendDemotedAuxTill = make(map[sourcePathDualSendKey]mono.Time)
 	}
 	c.sourceProbes.dualSendDemotedAuxTill[key] = now.Add(recovery)
-	metricSourcePathDualSendDemotedAuxStreak.Add(1)
+	c.mu.Unlock()
+
+	if streak >= dropStreak {
+		metricSourcePathDualSendDemotedAuxStreak.Add(1)
+	}
+	c.rotateSourcePathAuxSocket(dst, source, "dual-send-aux-send-failure", sendErr)
+}
+
+func (pm *sourcePathProbeManager) noteProbeExpirationsLocked(expired []sourcePathProbeTx, now mono.Time) []sourcePathAuxRotation {
+	if len(expired) == 0 {
+		return nil
+	}
+	threshold := sourcePathDualSendAuxProbeDropStreakValue()
+	if threshold <= 0 {
+		return nil
+	}
+
+	var rotations []sourcePathAuxRotation
+	seen := map[sourceRxMeta]struct{}{}
+	for _, tx := range expired {
+		if tx.source.isPrimary() || !pm.hasRecentSampleLocked(tx.dst, tx.source, now) {
+			continue
+		}
+		key := sourcePathDualSendKey{dst: tx.dst, source: tx.source}
+		if pm.dualSendAuxProbeLoss == nil {
+			pm.dualSendAuxProbeLoss = make(map[sourcePathDualSendKey]int)
+		}
+		streak := pm.dualSendAuxProbeLoss[key] + 1
+		pm.dualSendAuxProbeLoss[key] = streak
+		if streak < threshold {
+			continue
+		}
+		delete(pm.dualSendAuxProbeLoss, key)
+		if _, ok := seen[tx.source]; ok {
+			continue
+		}
+		seen[tx.source] = struct{}{}
+		rotations = append(rotations, sourcePathAuxRotation{
+			dst:    tx.dst,
+			source: tx.source,
+			reason: "source-path-probe-timeout",
+		})
+	}
+	return rotations
+}
+
+func (pm *sourcePathProbeManager) hasRecentSampleLocked(dst epAddr, source sourceRxMeta, now mono.Time) bool {
+	for _, sample := range pm.samples {
+		if sample.dst == dst && sample.source == source && now.Sub(sample.at) <= sourcePathSampleTTLValue() {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Conn) rotateSourcePathAuxSocket(dst epAddr, source sourceRxMeta, reason string, cause error) {
+	newSource, rebound, err := c.rebindSourcePathSocket(source)
+	if !rebound {
+		return
+	}
+	if err != nil {
+		metricSourcePathDualSendAuxRebindFailed.Add(1)
+		if c.logf != nil {
+			c.logf("magicsock: srcsel: auxiliary source %d generation=%d rebind failed dst=%v reason=%s cause=%v: %v", source.socketID, source.generation, dst, reason, cause, err)
+		}
+		return
+	}
+
+	c.mu.Lock()
+	samples, outcomes, pending, flows := c.sourceProbes.dropSourceLocked(source)
+	c.mu.Unlock()
+	metricSourcePathDualSendAuxRebinds.Add(1)
+	if flows > 0 {
+		metricSourcePathFlowEvictedSourceFailure.Add(int64(flows))
+	}
+	if c.logf != nil {
+		c.logf("magicsock: srcsel: auxiliary source %d rotated generation=%d->%d dst=%v reason=%s cause=%v dropped_samples=%d dropped_outcomes=%d dropped_pending=%d dropped_flows=%d", source.socketID, source.generation, newSource.generation, dst, reason, cause, samples, outcomes, pending, flows)
+	}
 }
 
 func (pm *sourcePathProbeManager) dualSendDemotedLocked(key sourcePathDualSendKey, now mono.Time) bool {
@@ -974,18 +1122,21 @@ func (pm *sourcePathProbeManager) dualSendDemotedLocked(key sourcePathDualSendKe
 	return true
 }
 
-func (pm *sourcePathProbeManager) pruneExpiredLocked(now mono.Time) {
+func (pm *sourcePathProbeManager) pruneExpiredLocked(now mono.Time) []sourcePathProbeTx {
 	var expired int64
+	var expiredTxs []sourcePathProbeTx
 	for txid, tx := range pm.pending {
 		if now.Sub(tx.at) >= pingTimeoutDuration {
 			delete(pm.pending, txid)
 			pm.noteOutcomeLocked(tx.dst, tx.source, now, true)
+			expiredTxs = append(expiredTxs, tx)
 			expired++
 		}
 	}
 	if expired > 0 {
 		metricSourcePathProbePendingExpired.Add(expired)
 	}
+	return expiredTxs
 }
 
 // pruneExpiredSamplesLocked drops samples older than sourcePathSampleTTL.
@@ -1032,6 +1183,7 @@ func (pm *sourcePathProbeManager) handlePongLocked(pong *disco.Pong, sender key.
 	}
 	delete(pm.pending, txid)
 	pm.noteOutcomeLocked(tx.dst, tx.source, now, false)
+	delete(pm.dualSendAuxProbeLoss, sourcePathDualSendKey{dst: tx.dst, source: tx.source})
 	pm.pruneExpiredSamplesLocked(now)
 
 	pm.samples = append(pm.samples, sourcePathProbeSample{
@@ -1126,12 +1278,15 @@ func (c *Conn) sendSourcePathDiscoPing(source sourceRxMeta, dst epAddr, dstKey k
 		return false, errors.New("unknown peer")
 	}
 	di := c.discoInfoForKnownPeerLocked(dstDisco)
+	now := mono.Now()
+	expired := c.sourceProbes.pruneExpiredLocked(now)
+	rotations := c.sourceProbes.noteProbeExpirationsLocked(expired, now)
 	addResult := c.sourceProbes.addLocked(sourcePathProbeTx{
 		txid:     txid,
 		dst:      dst,
 		dstDisco: dstDisco,
 		source:   source,
-		at:       mono.Now(),
+		at:       now,
 		size:     size,
 	})
 	switch addResult {
@@ -1147,6 +1302,16 @@ func (c *Conn) sendSourcePathDiscoPing(source sourceRxMeta, dst epAddr, dstKey k
 		return false, errSourcePathUnavailable
 	}
 	c.mu.Unlock()
+	var rotatedCurrentSource bool
+	for _, rotation := range rotations {
+		if rotation.source == source {
+			rotatedCurrentSource = true
+		}
+		c.rotateSourcePathAuxSocket(rotation.dst, rotation.source, rotation.reason, nil)
+	}
+	if rotatedCurrentSource {
+		return false, errSourcePathUnavailable
+	}
 
 	pkt := make([]byte, 0, 512)
 	pkt = append(pkt, disco.Magic...)

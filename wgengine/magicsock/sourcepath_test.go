@@ -973,6 +973,33 @@ func TestClassifySourcePathRemoteSlotReplacesDeletedEndpointSlot(t *testing.T) {
 	}
 }
 
+func TestNoteSourcePathObservedEndpointFailureClearsSlot(t *testing.T) {
+	now := mono.Now()
+	primary := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
+	secondary := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:51641")}
+	ep := &endpoint{
+		c:                     &Conn{},
+		sourcePathRemoteSlots: [2]epAddr{primary, secondary},
+		sourcePathRemoteSeen:  [2]mono.Time{now, now},
+	}
+	removedBefore := metricSourcePathDualEndpointObservedRemoved.Value()
+
+	ep.noteSourcePathObservedEndpointFailure(secondary, errSourcePathUnavailable)
+
+	if ep.sourcePathRemoteSlots[0] != primary {
+		t.Fatalf("slot0 = %v, want primary %v", ep.sourcePathRemoteSlots[0], primary)
+	}
+	if ep.sourcePathRemoteSlots[1] != (epAddr{}) {
+		t.Fatalf("slot1 = %v, want cleared", ep.sourcePathRemoteSlots[1])
+	}
+	if !ep.sourcePathRemoteSeen[1].IsZero() {
+		t.Fatal("slot1 seen time was not cleared")
+	}
+	if got := metricSourcePathDualEndpointObservedRemoved.Value() - removedBefore; got != 1 {
+		t.Fatalf("observed endpoint removed metric delta = %d, want 1", got)
+	}
+}
+
 func TestSourcePathDualSendAvailabilityLogsDegradeAndRecovery(t *testing.T) {
 	var logs tstest.MemLogger
 	de := &endpoint{

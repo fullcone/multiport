@@ -645,6 +645,35 @@ func (de *endpoint) dualSendObservedEndpointAddrsForSendLocked(primary epAddr, n
 	return nil
 }
 
+func (de *endpoint) noteSourcePathObservedEndpointFailure(addr epAddr, err error) {
+	if !addr.isDirect() {
+		return
+	}
+
+	var removed bool
+	var slot int
+	de.mu.Lock()
+	for i, observed := range de.sourcePathRemoteSlots {
+		if observed != addr {
+			continue
+		}
+		de.sourcePathRemoteSlots[i] = epAddr{}
+		de.sourcePathRemoteSeen[i] = 0
+		removed = true
+		slot = i
+		break
+	}
+	de.mu.Unlock()
+
+	if !removed {
+		return
+	}
+	metricSourcePathDualEndpointObservedRemoved.Add(1)
+	if de.c.logf != nil {
+		de.c.logf("magicsock: srcsel: peer %s removed observed fanout endpoint slot=%d addr=%v after send failure: %v", de.publicKey.ShortString(), slot, addr, err)
+	}
+}
+
 func (de *endpoint) deleteEndpointLocked(why string, ep netip.AddrPort) {
 	de.debugUpdates.Add(EndpointChange{
 		When: time.Now(),
@@ -1345,11 +1374,17 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 		dualSendMode = "observed-endpoint-fanout"
 		res := de.c.sendUDPBatchDualEndpoint(dualEndpointAddrs, buffs, offset)
 		err = res.err
-		if res.primaryErr != nil && isBadEndpointErr(res.primaryErr) {
-			de.noteBadEndpoint(dualEndpointAddrs[0])
+		if res.primaryErr != nil {
+			de.noteSourcePathObservedEndpointFailure(dualEndpointAddrs[0], res.primaryErr)
+			if isBadEndpointErr(res.primaryErr) {
+				de.noteBadEndpoint(dualEndpointAddrs[0])
+			}
 		}
-		if len(dualEndpointAddrs) > 1 && res.secondaryErr != nil && isBadEndpointErr(res.secondaryErr) {
-			de.noteBadEndpoint(dualEndpointAddrs[1])
+		if len(dualEndpointAddrs) > 1 && res.secondaryErr != nil {
+			de.noteSourcePathObservedEndpointFailure(dualEndpointAddrs[1], res.secondaryErr)
+			if isBadEndpointErr(res.secondaryErr) {
+				de.noteBadEndpoint(dualEndpointAddrs[1])
+			}
 		}
 	} else if udpAddr.ap.IsValid() {
 		if source, activeBackupForced := de.c.sourcePathActiveBackupCandidate(udpAddr, now); activeBackupForced {

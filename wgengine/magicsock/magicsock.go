@@ -1587,7 +1587,7 @@ func (c *Conn) sendUDPBatchDualSource(aux sourceRxMeta, addr epAddr, buffs [][]b
 	}
 	if auxErr != nil {
 		metricSourcePathDualSendAuxFailed.Add(int64(len(buffs)))
-		c.noteSourcePathDualSendAuxFailure(addr, aux, mono.Now())
+		c.noteSourcePathDualSendAuxFailure(addr, aux, mono.Now(), auxErr)
 	} else {
 		c.noteSourcePathDualSendAuxSuccess(addr, aux)
 	}
@@ -4647,6 +4647,9 @@ var (
 	metricSourcePathDualEndpointPrimaryFailed          = clientmetric.NewCounter("magicsock_srcsel_dual_endpoint_primary_failed")
 	metricSourcePathDualEndpointSecondaryFailed        = clientmetric.NewCounter("magicsock_srcsel_dual_endpoint_secondary_failed")
 	metricSourcePathDualEndpointBothFailed             = clientmetric.NewCounter("magicsock_srcsel_dual_endpoint_both_failed")
+	metricSourcePathDualEndpointObservedRemoved        = clientmetric.NewCounter("magicsock_srcsel_dual_endpoint_observed_removed")
+	metricSourcePathDualSendAuxRebinds                 = clientmetric.NewCounter("magicsock_srcsel_dual_send_aux_rebinds")
+	metricSourcePathDualSendAuxRebindFailed            = clientmetric.NewCounter("magicsock_srcsel_dual_send_aux_rebind_failed")
 	metricSourcePathPrimaryUnhealthySendStreak         = clientmetric.NewCounter("magicsock_srcsel_primary_unhealthy_send_streak")
 	metricSourcePathFailoverToAux                      = clientmetric.NewCounter("magicsock_srcsel_failover_to_aux")
 	metricSourcePathFailoverRecoveredToPrimary         = clientmetric.NewCounter("magicsock_srcsel_failover_recovered_to_primary")

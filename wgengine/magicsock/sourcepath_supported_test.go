@@ -1943,7 +1943,7 @@ func TestSourcePathDualSendIgnoresPrimaryBeatGate(t *testing.T) {
 	}
 }
 
-func TestSourcePathDualSendAuxErrorDemotesWithoutInvalidatingSamples(t *testing.T) {
+func TestSourcePathDualSendAuxErrorRebindsAuxSocket(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
@@ -1955,8 +1955,13 @@ func TestSourcePathDualSendAuxErrorDemotesWithoutInvalidatingSamples(t *testing.
 
 	dstConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
 	primaryConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	failingAux := &failingSourcePathPacketConn{
+		local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345},
+		err:   syscall.EPERM,
+	}
 
 	var c Conn
+	c.testOnlyPacketListener = localhostListener{}
 	c.sourcePath.generation = 24
 	c.pconn4.mu.Lock()
 	c.pconn4.setConnLocked(primaryConn, "udp4", 1)
@@ -1964,10 +1969,7 @@ func TestSourcePathDualSendAuxErrorDemotesWithoutInvalidatingSamples(t *testing.
 	c.sourcePath.aux4.setID(sourceIPv4SocketID)
 	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
 	c.sourcePath.aux4.pconn.mu.Lock()
-	c.sourcePath.aux4.pconn.setConnLocked(&failingSourcePathPacketConn{
-		local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345},
-		err:   syscall.EPERM,
-	}, "udp4", 1)
+	c.sourcePath.aux4.pconn.setConnLocked(failingAux, "udp4", 1)
 	c.sourcePath.aux4.pconn.mu.Unlock()
 	c.sourcePath.aux4Bound = true
 
@@ -1978,34 +1980,97 @@ func TestSourcePathDualSendAuxErrorDemotesWithoutInvalidatingSamples(t *testing.
 	payload := []byte("source-path-dual-send-aux-error")
 	buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
 	copy(buf[packet.GeneveFixedHeaderLength:], payload)
-	for i := 0; i < sourcePathDualSendAuxDropStreak; i++ {
-		source, ok := c.sourcePathDualSendCandidate(dst)
-		if !ok {
-			t.Fatalf("dual-send candidate unexpectedly demoted before failure %d", i+1)
-		}
-		res := c.sendUDPBatchDualSource(source, dst, [][]byte{buf}, packet.GeneveFixedHeaderLength)
-		if res.err != nil {
-			t.Fatalf("sendUDPBatchDualSource error after primary success = %v", res.err)
-		}
-		if res.primaryErr != nil {
-			t.Fatalf("primary send error = %v", res.primaryErr)
-		}
-		if !errors.Is(res.auxErr, syscall.EPERM) {
-			t.Fatalf("aux send error = %v, want %v", res.auxErr, syscall.EPERM)
-		}
+	rebindsBefore := metricSourcePathDualSendAuxRebinds.Value()
+	source, ok := c.sourcePathDualSendCandidate(dst)
+	if !ok {
+		t.Fatal("dual-send candidate unexpectedly unavailable before aux failure")
+	}
+	res := c.sendUDPBatchDualSource(source, dst, [][]byte{buf}, packet.GeneveFixedHeaderLength)
+	if res.err != nil {
+		t.Fatalf("sendUDPBatchDualSource error after primary success = %v", res.err)
+	}
+	if res.primaryErr != nil {
+		t.Fatalf("primary send error = %v", res.primaryErr)
+	}
+	if !errors.Is(res.auxErr, syscall.EPERM) {
+		t.Fatalf("aux send error = %v, want %v", res.auxErr, syscall.EPERM)
 	}
 
 	c.mu.Lock()
 	sampleCount := len(c.sourceProbes.samples)
 	c.mu.Unlock()
-	if sampleCount != sourcePathMinSamplesForUse {
-		t.Fatalf("source-path samples = %d, want still %d after dual-send aux failures", sampleCount, sourcePathMinSamplesForUse)
+	if sampleCount != 0 {
+		t.Fatalf("source-path samples = %d, want old aux samples dropped after rebind", sampleCount)
 	}
-	if _, ok := c.sourcePathDualSendCandidate(dst); ok {
-		t.Fatal("dual-send candidate still available after aux drop streak")
+	if !failingAux.closed {
+		t.Fatal("old failing aux socket was not closed during rebind")
 	}
-	if got := c.sourcePathDataSendSource(dst); !got.isPrimary() {
-		t.Fatalf("single-source selection changed after dual-send aux failures: got %+v, want primary", got)
+	newSource := c.sourcePath.aux4.rxMeta()
+	if newSource == auxSource {
+		t.Fatalf("aux source did not rotate: got %+v", newSource)
+	}
+	if got := metricSourcePathDualSendAuxRebinds.Value() - rebindsBefore; got != 1 {
+		t.Fatalf("aux rebind metric delta = %d, want 1", got)
+	}
+	source, ok = c.sourcePathDualSendCandidate(dst)
+	if !ok {
+		t.Fatal("dual-send candidate unavailable after aux socket rebind")
+	}
+	if source != newSource {
+		t.Fatalf("dual-send source after rebind = %+v, want %+v", source, newSource)
+	}
+}
+
+func TestSourcePathProbeTimeoutRebindsPreviouslyWorkingAuxSocket(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_AUX_PROBE_DROP_STREAK", "1")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_AUX_PROBE_DROP_STREAK", "")
+	})
+
+	auxConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	var c Conn
+	c.testOnlyPacketListener = localhostListener{}
+	c.sourcePath.generation = 31
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4.pconn.mu.Lock()
+	c.sourcePath.aux4.pconn.setConnLocked(auxConn, "udp4", 1)
+	c.sourcePath.aux4.pconn.mu.Unlock()
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("127.0.0.1:41641")}
+	oldSource := c.sourcePath.aux4.rxMeta()
+	now := mono.Now()
+	c.mu.Lock()
+	c.sourceProbes.samples = append(c.sourceProbes.samples, sourcePathProbeSample{
+		dst:     dst,
+		source:  oldSource,
+		latency: time.Millisecond,
+		at:      now,
+	})
+	rotations := c.sourceProbes.noteProbeExpirationsLocked([]sourcePathProbeTx{
+		{dst: dst, source: oldSource, at: now.Add(-pingTimeoutDuration)},
+	}, now)
+	c.mu.Unlock()
+
+	if len(rotations) != 1 {
+		t.Fatalf("probe timeout rotations = %d, want 1", len(rotations))
+	}
+	rebindsBefore := metricSourcePathDualSendAuxRebinds.Value()
+	c.rotateSourcePathAuxSocket(rotations[0].dst, rotations[0].source, rotations[0].reason, nil)
+
+	newSource := c.sourcePath.aux4.rxMeta()
+	if newSource == oldSource {
+		t.Fatalf("aux source did not rotate after probe timeout: %+v", newSource)
+	}
+	if got := metricSourcePathDualSendAuxRebinds.Value() - rebindsBefore; got != 1 {
+		t.Fatalf("aux rebind metric delta = %d, want 1", got)
 	}
 }
 

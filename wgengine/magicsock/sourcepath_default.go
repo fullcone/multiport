@@ -62,6 +62,10 @@ func sourcePathDualSendEnabled() bool { return false }
 
 func sourcePathDualSendAuxDropStreakValue() int { return sourcePathDualSendAuxDropStreak }
 
+func sourcePathDualSendAuxProbeDropStreakValue() int {
+	return sourcePathDualSendAuxProbeDropStreak
+}
+
 func sourcePathDualSendRecoveryValue() time.Duration { return sourcePathDualSendRecovery }
 
 func sourcePathDualSendMaxSkewValue() time.Duration { return sourcePathDualSendMaxSkew }
@@ -101,5 +105,9 @@ func (c *Conn) sourcePathWriteTo(source sourceRxMeta, dst netip.AddrPort, pkt []
 }
 
 func (c *Conn) rebindSourcePathSockets() error { return nil }
+
+func (c *Conn) rebindSourcePathSocket(source sourceRxMeta) (sourceRxMeta, bool, error) {
+	return sourceRxMeta{}, false, errSourcePathUnavailable
+}
 
 func (c *Conn) closeSourcePathSockets() {}

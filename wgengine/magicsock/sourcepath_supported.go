@@ -20,39 +20,40 @@ import (
 )
 
 var (
-	envknobSrcSelEnable              = envknob.RegisterOptBool("TS_EXPERIMENTAL_SRCSEL_ENABLE")
-	envknobSrcSelAuxSockets          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS")
-	envknobSrcSelDataStrategy        = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY")
-	envknobSrcSelForceDataSource     = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE")
-	envknobSrcSelAutoDataSource      = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE")
-	envknobSrcSelMaxPeers            = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PEERS")
-	envknobSrcSelMaxProbeBurst       = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST")
-	envknobSrcSelMaxPending          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PENDING")
-	envknobSrcSelMaxSamples          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_SAMPLES")
-	envknobSrcSelMaxOutcomes         = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_OUTCOMES")
-	envknobSrcSelAuxBeatThresholdPct = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT")
-	envknobSrcSelDualSend            = envknob.RegisterOptBool("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND")
-	envknobSrcSelDualSendAuxDrop     = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_AUX_DROP_STREAK")
-	envknobSrcSelDualSendRecoveryS   = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_RECOVERY_S")
-	envknobSrcSelDualSendMaxSkewMS   = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_MAX_SKEW_MS")
-	envknobSrcSelActiveBackup        = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_ACTIVE_BACKUP")
-	envknobSrcSelPrimaryFailStreak   = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_PRIMARY_FAIL_STREAK")
-	envknobSrcSelFailoverHoldS       = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_FAILOVER_HOLD_S")
-	envknobSrcSelFailoverRecovery    = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_FAILOVER_RECOVERY_PONGS")
-	envknobSrcSelMultiMetric         = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_MULTI_METRIC")
-	envknobSrcSelProbeIntervalMS     = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_PROBE_INTERVAL_MS")
-	envknobSrcSelLossWindowS         = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_LOSS_WINDOW_S")
-	envknobSrcSelScoreWeights        = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_SCORE_WEIGHTS")
-	envknobSrcSelLatencyMaxMS        = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_LATENCY_MAX_MS")
-	envknobSrcSelJitterMaxMS         = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_JITTER_MAX_MS")
-	envknobSrcSelLossMaxPct          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_LOSS_MAX_PCT")
-	envknobSrcSelScoreImprovePct     = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_SCORE_IMPROVEMENT_PCT")
-	envknobSrcSelProfile             = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_PROFILE")
-	envknobSrcSelSampleTTLS          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_SAMPLE_TTL_S")
-	envknobSrcSelFlowAware           = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE")
-	envknobSrcSelBalancePolicy       = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY")
-	envknobSrcSelFlowIdleS           = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_FLOW_IDLE_S")
-	envknobSrcSelFlowMax             = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_FLOW_MAX")
+	envknobSrcSelEnable               = envknob.RegisterOptBool("TS_EXPERIMENTAL_SRCSEL_ENABLE")
+	envknobSrcSelAuxSockets           = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS")
+	envknobSrcSelDataStrategy         = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY")
+	envknobSrcSelForceDataSource      = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE")
+	envknobSrcSelAutoDataSource       = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE")
+	envknobSrcSelMaxPeers             = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PEERS")
+	envknobSrcSelMaxProbeBurst        = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST")
+	envknobSrcSelMaxPending           = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PENDING")
+	envknobSrcSelMaxSamples           = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_SAMPLES")
+	envknobSrcSelMaxOutcomes          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_OUTCOMES")
+	envknobSrcSelAuxBeatThresholdPct  = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT")
+	envknobSrcSelDualSend             = envknob.RegisterOptBool("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND")
+	envknobSrcSelDualSendAuxDrop      = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_AUX_DROP_STREAK")
+	envknobSrcSelDualSendAuxProbeDrop = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_AUX_PROBE_DROP_STREAK")
+	envknobSrcSelDualSendRecoveryS    = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_RECOVERY_S")
+	envknobSrcSelDualSendMaxSkewMS    = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_MAX_SKEW_MS")
+	envknobSrcSelActiveBackup         = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_ACTIVE_BACKUP")
+	envknobSrcSelPrimaryFailStreak    = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_PRIMARY_FAIL_STREAK")
+	envknobSrcSelFailoverHoldS        = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_FAILOVER_HOLD_S")
+	envknobSrcSelFailoverRecovery     = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_FAILOVER_RECOVERY_PONGS")
+	envknobSrcSelMultiMetric          = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_MULTI_METRIC")
+	envknobSrcSelProbeIntervalMS      = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_PROBE_INTERVAL_MS")
+	envknobSrcSelLossWindowS          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_LOSS_WINDOW_S")
+	envknobSrcSelScoreWeights         = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_SCORE_WEIGHTS")
+	envknobSrcSelLatencyMaxMS         = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_LATENCY_MAX_MS")
+	envknobSrcSelJitterMaxMS          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_JITTER_MAX_MS")
+	envknobSrcSelLossMaxPct           = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_LOSS_MAX_PCT")
+	envknobSrcSelScoreImprovePct      = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_SCORE_IMPROVEMENT_PCT")
+	envknobSrcSelProfile              = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_PROFILE")
+	envknobSrcSelSampleTTLS           = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_SAMPLE_TTL_S")
+	envknobSrcSelFlowAware            = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE")
+	envknobSrcSelBalancePolicy        = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY")
+	envknobSrcSelFlowIdleS            = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_FLOW_IDLE_S")
+	envknobSrcSelFlowMax              = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_FLOW_MAX")
 )
 
 func sourcePathOptBoolDefaultTrue(v opt.Bool) bool {
@@ -296,6 +297,14 @@ func sourcePathDualSendAuxDropStreakValue() int {
 	n := envknobSrcSelDualSendAuxDrop()
 	if n <= 0 {
 		return sourcePathDualSendAuxDropStreak
+	}
+	return n
+}
+
+func sourcePathDualSendAuxProbeDropStreakValue() int {
+	n := envknobSrcSelDualSendAuxProbeDrop()
+	if n <= 0 {
+		return sourcePathDualSendAuxProbeDropStreak
 	}
 	return n
 }
@@ -636,6 +645,51 @@ func (c *Conn) rebindSourcePathSockets() error {
 	}
 
 	return sourcePathBindError(err4, err6)
+}
+
+func (c *Conn) rebindSourcePathSocket(source sourceRxMeta) (sourceRxMeta, bool, error) {
+	if sourcePathAuxSocketCount() == 0 || source.isPrimary() {
+		return sourceRxMeta{}, false, errSourcePathUnavailable
+	}
+
+	c.sourcePath.mu.Lock()
+	defer c.sourcePath.mu.Unlock()
+
+	var (
+		target  *sourcePathSocket
+		bound   *bool
+		network string
+	)
+	switch source.socketID {
+	case sourceIPv4SocketID:
+		current := c.sourcePath.aux4.rxMeta()
+		if source != current {
+			return current, false, nil
+		}
+		target = &c.sourcePath.aux4
+		bound = &c.sourcePath.aux4Bound
+		network = "udp4"
+	case sourceIPv6SocketID:
+		current := c.sourcePath.aux6.rxMeta()
+		if source != current {
+			return current, false, nil
+		}
+		target = &c.sourcePath.aux6
+		bound = &c.sourcePath.aux6Bound
+		network = "udp6"
+	default:
+		return sourceRxMeta{}, false, errSourcePathUnavailable
+	}
+
+	c.sourcePath.generation++
+	target.generation.Store(uint64(c.sourcePath.generation))
+	err := c.bindSourcePathSocketLocked(&target.pconn, network)
+	*bound = err == nil
+	if err != nil {
+		c.setSourcePathBlockForeverLocked(&target.pconn)
+		return target.rxMeta(), true, err
+	}
+	return target.rxMeta(), true, nil
 }
 
 func (c *Conn) bindSourcePathSocketLocked(ruc *RebindingUDPConn, network string) error {
