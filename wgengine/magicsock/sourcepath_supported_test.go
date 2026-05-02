@@ -253,6 +253,52 @@ func TestSourcePathActiveBackupFailoverAndRecovery(t *testing.T) {
 	}
 }
 
+func TestSourcePathActiveBackupDropsStaleFailoverSource(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ACTIVE_BACKUP", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PRIMARY_FAIL_STREAK", "1")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ACTIVE_BACKUP", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PRIMARY_FAIL_STREAK", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 31
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	oldAux := c.sourcePath.aux4.rxMeta()
+	now := mono.Now()
+	c.mu.Lock()
+	c.sourceProbes.samples = []sourcePathProbeSample{
+		{dst: dst, source: oldAux, latency: 10 * time.Millisecond, at: now.Add(-3 * time.Second)},
+		{dst: dst, source: oldAux, latency: 11 * time.Millisecond, at: now.Add(-2 * time.Second)},
+		{dst: dst, source: oldAux, latency: 9 * time.Millisecond, at: now.Add(-1 * time.Second)},
+	}
+	c.mu.Unlock()
+	if _, ok := c.noteSourcePathPrimarySendFailure(dst, now); !ok {
+		t.Fatal("primary failure did not select initial failover source")
+	}
+
+	c.sourcePath.generation++
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+
+	if got := c.sourcePathDataSendSource(dst); !got.isPrimary() {
+		t.Fatalf("active-backup source after aux generation change = %+v, want primary", got)
+	}
+	c.mu.Lock()
+	_, stillForced := c.sourceProbes.activeBackup[dst]
+	c.mu.Unlock()
+	if stillForced {
+		t.Fatal("active-backup state still forced after cached aux source became stale")
+	}
+}
+
 func TestSourcePathRealtimeProfileValues(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROFILE", "realtime")
 	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROFILE", "") })

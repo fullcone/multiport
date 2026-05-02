@@ -424,7 +424,37 @@ func (c *Conn) sourcePathActiveBackupCandidate(dst epAddr, now mono.Time) (sourc
 		c.mu.Unlock()
 		return sourceRxMeta{}, false
 	}
-	return st.source, true
+	if c.sourcePathSourceAvailable(dst, st.source) {
+		return st.source, true
+	}
+	source, ok := c.sourcePathBestFailoverCandidate(dst, now)
+	if ok {
+		c.mu.Lock()
+		if current, ok := c.sourceProbes.activeBackup[dst]; ok && current.failoverAt == st.failoverAt {
+			current.source = source
+			c.sourceProbes.activeBackup[dst] = current
+		}
+		c.mu.Unlock()
+		return source, true
+	}
+	c.mu.Lock()
+	if current, ok := c.sourceProbes.activeBackup[dst]; ok && current.failoverAt == st.failoverAt {
+		delete(c.sourceProbes.activeBackup, dst)
+	}
+	c.mu.Unlock()
+	return sourceRxMeta{}, false
+}
+
+func (c *Conn) sourcePathSourceAvailable(dst epAddr, source sourceRxMeta) bool {
+	if source.isPrimary() || !dst.isDirect() {
+		return source.isPrimary()
+	}
+	for _, current := range c.sourcePathProbeSources(dst.ap.Addr().Is4()) {
+		if current == source {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Conn) primaryPongsSinceDst(dst epAddr, since mono.Time) int {
