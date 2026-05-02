@@ -1553,6 +1553,43 @@ func (c *Conn) sendUDPBatchFromSource(source sourceRxMeta, addr epAddr, buffs []
 	return err == nil, err
 }
 
+type sourcePathDualSendResult struct {
+	err        error
+	primaryErr error
+	auxErr     error
+}
+
+func (c *Conn) sendUDPBatchDualSource(aux sourceRxMeta, addr epAddr, buffs [][]byte, offset int) sourcePathDualSendResult {
+	metricSourcePathDualSendPackets.Add(int64(len(buffs)))
+
+	_, primaryErr := c.sendUDPBatch(addr, buffs, offset)
+	_, auxErr := c.sendUDPBatchFromSource(aux, addr, buffs, offset)
+	if primaryErr != nil {
+		metricSourcePathDualSendPrimaryFailed.Add(int64(len(buffs)))
+	}
+	if auxErr != nil {
+		metricSourcePathDualSendAuxFailed.Add(int64(len(buffs)))
+		c.noteSourcePathDualSendAuxFailure(addr, aux, mono.Now())
+	} else {
+		c.noteSourcePathDualSendAuxSuccess(addr, aux)
+	}
+
+	res := sourcePathDualSendResult{
+		primaryErr: primaryErr,
+		auxErr:     auxErr,
+	}
+	switch {
+	case primaryErr != nil && auxErr != nil:
+		metricSourcePathDualSendBothFailed.Add(int64(len(buffs)))
+		res.err = primaryErr
+	case primaryErr != nil:
+		res.err = nil
+	case auxErr != nil:
+		res.err = nil
+	}
+	return res
+}
+
 // sendUDP sends UDP packet b to ipp.
 // See sendAddr's docs on the return value meanings.
 func (c *Conn) sendUDP(ipp netip.AddrPort, b []byte, isDisco bool, isGeneveEncap bool) (sent bool, err error) {
@@ -4310,22 +4347,28 @@ var (
 	metricSendDERP      = clientmetric.NewAggregateCounter("magicsock_send_derp")
 
 	// Data packets (non-disco)
-	metricSendData                          = clientmetric.NewCounter("magicsock_send_data")
-	metricSendDataNetworkDown               = clientmetric.NewCounter("magicsock_send_data_network_down")
-	metricSourcePathDataSendAuxSelected     = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_selected")
-	metricSourcePathDataSendAuxSucceeded    = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_succeeded")
-	metricSourcePathDataSendAuxFallback     = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_fallback")
-	metricSourcePathProbePongAccepted       = clientmetric.NewCounter("magicsock_srcsel_probe_pong_accepted")
-	metricSourcePathProbePendingExpired     = clientmetric.NewCounter("magicsock_srcsel_probe_pending_expired")
-	metricSourcePathProbePongExpired        = clientmetric.NewCounter("magicsock_srcsel_probe_pong_expired")
-	metricSourcePathProbePeerBudgetDropped  = clientmetric.NewCounter("magicsock_srcsel_probe_peer_budget_dropped")
-	metricSourcePathProbeBurstBudgetDropped = clientmetric.NewCounter("magicsock_srcsel_probe_burst_budget_dropped")
-	metricSourcePathProbeHardCapDropped     = clientmetric.NewCounter("magicsock_srcsel_probe_hard_cap_dropped")
-	metricSourcePathProbeSamplesExpired     = clientmetric.NewCounter("magicsock_srcsel_probe_samples_expired")
-	metricSourcePathProbeSamplesEvicted     = clientmetric.NewCounter("magicsock_srcsel_probe_samples_evicted")
-	metricSourcePathAuxWireGuardRx          = clientmetric.NewCounter("magicsock_srcsel_aux_wireguard_rx")
-	metricSourcePathSendFailureInvalidated  = clientmetric.NewCounter("magicsock_srcsel_send_failure_invalidated_samples")
-	metricSourcePathPrimaryBeatRejected     = clientmetric.NewCounter("magicsock_srcsel_primary_beat_rejected")
+	metricSendData                           = clientmetric.NewCounter("magicsock_send_data")
+	metricSendDataNetworkDown                = clientmetric.NewCounter("magicsock_send_data_network_down")
+	metricSourcePathDataSendAuxSelected      = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_selected")
+	metricSourcePathDataSendAuxSucceeded     = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_succeeded")
+	metricSourcePathDataSendAuxFallback      = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_fallback")
+	metricSourcePathProbePongAccepted        = clientmetric.NewCounter("magicsock_srcsel_probe_pong_accepted")
+	metricSourcePathProbePendingExpired      = clientmetric.NewCounter("magicsock_srcsel_probe_pending_expired")
+	metricSourcePathProbePongExpired         = clientmetric.NewCounter("magicsock_srcsel_probe_pong_expired")
+	metricSourcePathProbePeerBudgetDropped   = clientmetric.NewCounter("magicsock_srcsel_probe_peer_budget_dropped")
+	metricSourcePathProbeBurstBudgetDropped  = clientmetric.NewCounter("magicsock_srcsel_probe_burst_budget_dropped")
+	metricSourcePathProbeHardCapDropped      = clientmetric.NewCounter("magicsock_srcsel_probe_hard_cap_dropped")
+	metricSourcePathProbeSamplesExpired      = clientmetric.NewCounter("magicsock_srcsel_probe_samples_expired")
+	metricSourcePathProbeSamplesEvicted      = clientmetric.NewCounter("magicsock_srcsel_probe_samples_evicted")
+	metricSourcePathAuxWireGuardRx           = clientmetric.NewCounter("magicsock_srcsel_aux_wireguard_rx")
+	metricSourcePathSendFailureInvalidated   = clientmetric.NewCounter("magicsock_srcsel_send_failure_invalidated_samples")
+	metricSourcePathPrimaryBeatRejected      = clientmetric.NewCounter("magicsock_srcsel_primary_beat_rejected")
+	metricSourcePathDualSendPackets          = clientmetric.NewCounter("magicsock_srcsel_dual_send_packets")
+	metricSourcePathDualSendPrimaryFailed    = clientmetric.NewCounter("magicsock_srcsel_dual_send_primary_failed")
+	metricSourcePathDualSendAuxFailed        = clientmetric.NewCounter("magicsock_srcsel_dual_send_aux_failed")
+	metricSourcePathDualSendBothFailed       = clientmetric.NewCounter("magicsock_srcsel_dual_send_both_failed")
+	metricSourcePathDualSendDemotedAuxStreak = clientmetric.NewCounter("magicsock_srcsel_dual_send_demoted_aux_streak")
+	metricSourcePathDualSendSkippedSkew      = clientmetric.NewCounter("magicsock_srcsel_dual_send_skipped_skew")
 	// Phase 22 v2: direct-vs-relay latency-aware switching counters.
 	// Only incremented when TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE=true.
 	metricDirectVsRelayCompared            = clientmetric.NewCounter("magicsock_direct_vs_relay_compared")
@@ -4333,18 +4376,18 @@ var (
 	metricDirectVsRelayGateDirectPreferred = clientmetric.NewCounter("magicsock_direct_vs_relay_gate_direct_preferred")
 	metricDirectVsRelayHoldRejected        = clientmetric.NewCounter("magicsock_direct_vs_relay_hold_rejected")
 	// Phase 21: dynamic-multi-endpoint-advertise file watcher counters.
-	metricExtraEndpointsReads   = clientmetric.NewCounter("magicsock_extra_endpoints_reads")
-	metricExtraEndpointsReloads = clientmetric.NewCounter("magicsock_extra_endpoints_reloads")
-	metricRecvDataPacketsDERP               = clientmetric.NewAggregateCounter("magicsock_recv_data_derp")
-	metricRecvDataPacketsIPv4               = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv4")
-	metricRecvDataPacketsIPv6               = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv6")
-	metricRecvDataPacketsPeerRelayIPv4      = clientmetric.NewAggregateCounter("magicsock_recv_data_peer_relay_ipv4")
-	metricRecvDataPacketsPeerRelayIPv6      = clientmetric.NewAggregateCounter("magicsock_recv_data_peer_relay_ipv6")
-	metricSendDataPacketsDERP               = clientmetric.NewAggregateCounter("magicsock_send_data_derp")
-	metricSendDataPacketsIPv4               = clientmetric.NewAggregateCounter("magicsock_send_data_ipv4")
-	metricSendDataPacketsIPv6               = clientmetric.NewAggregateCounter("magicsock_send_data_ipv6")
-	metricSendDataPacketsPeerRelayIPv4      = clientmetric.NewAggregateCounter("magicsock_send_data_peer_relay_ipv4")
-	metricSendDataPacketsPeerRelayIPv6      = clientmetric.NewAggregateCounter("magicsock_send_data_peer_relay_ipv6")
+	metricExtraEndpointsReads          = clientmetric.NewCounter("magicsock_extra_endpoints_reads")
+	metricExtraEndpointsReloads        = clientmetric.NewCounter("magicsock_extra_endpoints_reloads")
+	metricRecvDataPacketsDERP          = clientmetric.NewAggregateCounter("magicsock_recv_data_derp")
+	metricRecvDataPacketsIPv4          = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv4")
+	metricRecvDataPacketsIPv6          = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv6")
+	metricRecvDataPacketsPeerRelayIPv4 = clientmetric.NewAggregateCounter("magicsock_recv_data_peer_relay_ipv4")
+	metricRecvDataPacketsPeerRelayIPv6 = clientmetric.NewAggregateCounter("magicsock_recv_data_peer_relay_ipv6")
+	metricSendDataPacketsDERP          = clientmetric.NewAggregateCounter("magicsock_send_data_derp")
+	metricSendDataPacketsIPv4          = clientmetric.NewAggregateCounter("magicsock_send_data_ipv4")
+	metricSendDataPacketsIPv6          = clientmetric.NewAggregateCounter("magicsock_send_data_ipv6")
+	metricSendDataPacketsPeerRelayIPv4 = clientmetric.NewAggregateCounter("magicsock_send_data_peer_relay_ipv4")
+	metricSendDataPacketsPeerRelayIPv6 = clientmetric.NewAggregateCounter("magicsock_send_data_peer_relay_ipv6")
 
 	// Data bytes (non-disco)
 	metricRecvDataBytesDERP          = clientmetric.NewAggregateCounter("magicsock_recv_data_bytes_derp")

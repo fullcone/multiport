@@ -70,6 +70,11 @@ const (
 	// supplies a non-zero primary RTT — when primary latency is unknown
 	// the scorer falls back to absolute aux selection (Phase 19 behavior).
 	sourcePathAuxBeatThresholdPercent = 10
+
+	// Phase 23 dual-send defaults.
+	sourcePathDualSendAuxDropStreak = 5
+	sourcePathDualSendRecovery      = 30 * time.Second
+	sourcePathDualSendMaxSkew       = 100 * time.Millisecond
 )
 
 var (
@@ -110,8 +115,15 @@ func (m sourceRxMeta) isPrimary() bool {
 }
 
 type sourcePathProbeManager struct {
-	pending map[stun.TxID]sourcePathProbeTx
-	samples []sourcePathProbeSample
+	pending                map[stun.TxID]sourcePathProbeTx
+	samples                []sourcePathProbeSample
+	dualSendAuxFailStreak  map[sourcePathDualSendKey]int
+	dualSendDemotedAuxTill map[sourcePathDualSendKey]mono.Time
+}
+
+type sourcePathDualSendKey struct {
+	dst    epAddr
+	source sourceRxMeta
 }
 
 type sourcePathProbeTx struct {
@@ -226,6 +238,8 @@ func (pm *sourcePathProbeManager) samplesLenLocked() int {
 func (pm *sourcePathProbeManager) clearLocked() {
 	clear(pm.pending)
 	pm.samples = nil
+	pm.dualSendAuxFailStreak = nil
+	pm.dualSendDemotedAuxTill = nil
 }
 
 // noteSourcePathSendFailure invalidates probe samples for (dst, source) after
@@ -259,6 +273,41 @@ func (c *Conn) sourcePathBestCandidate(dst epAddr) (sourcePathCandidateScore, bo
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.sourceProbes.bestCandidateLocked(dst, sources, mono.Now(), primaryRTT)
+}
+
+func (c *Conn) sourcePathDualSendCandidate(dst epAddr) (sourceRxMeta, bool) {
+	if !sourcePathDualSendEnabled() || !dst.isDirect() {
+		return sourceRxMeta{}, false
+	}
+
+	score, ok := c.sourcePathBestCandidate(dst)
+	if !ok {
+		return sourceRxMeta{}, false
+	}
+
+	if maxSkew := sourcePathDualSendMaxSkewValue(); maxSkew > 0 {
+		if primaryRTT := c.primaryRTTForDst(dst); primaryRTT > 0 && absDuration(score.latency-primaryRTT) >= maxSkew {
+			metricSourcePathDualSendSkippedSkew.Add(1)
+			return sourceRxMeta{}, false
+		}
+	}
+
+	key := sourcePathDualSendKey{dst: dst, source: score.source}
+	now := mono.Now()
+	c.mu.Lock()
+	demoted := c.sourceProbes.dualSendDemotedLocked(key, now)
+	c.mu.Unlock()
+	if demoted {
+		return sourceRxMeta{}, false
+	}
+	return score.source, true
+}
+
+func absDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
 }
 
 // primaryRTTForDst looks up the endpoint that owns dst and returns its most
@@ -359,6 +408,51 @@ func (pm *sourcePathProbeManager) invalidateLocked(dst epAddr, source sourceRxMe
 	}
 	pm.samples = pm.samples[:n]
 	return dropped
+}
+
+func (c *Conn) noteSourcePathDualSendAuxSuccess(dst epAddr, source sourceRxMeta) {
+	key := sourcePathDualSendKey{dst: dst, source: source}
+	c.mu.Lock()
+	delete(c.sourceProbes.dualSendAuxFailStreak, key)
+	c.mu.Unlock()
+}
+
+func (c *Conn) noteSourcePathDualSendAuxFailure(dst epAddr, source sourceRxMeta, now mono.Time) {
+	key := sourcePathDualSendKey{dst: dst, source: source}
+	dropStreak := sourcePathDualSendAuxDropStreakValue()
+	recovery := sourcePathDualSendRecoveryValue()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sourceProbes.dualSendAuxFailStreak == nil {
+		c.sourceProbes.dualSendAuxFailStreak = make(map[sourcePathDualSendKey]int)
+	}
+	streak := c.sourceProbes.dualSendAuxFailStreak[key] + 1
+	c.sourceProbes.dualSendAuxFailStreak[key] = streak
+	if streak < dropStreak {
+		return
+	}
+	delete(c.sourceProbes.dualSendAuxFailStreak, key)
+	if c.sourceProbes.dualSendDemotedAuxTill == nil {
+		c.sourceProbes.dualSendDemotedAuxTill = make(map[sourcePathDualSendKey]mono.Time)
+	}
+	c.sourceProbes.dualSendDemotedAuxTill[key] = now.Add(recovery)
+	metricSourcePathDualSendDemotedAuxStreak.Add(1)
+}
+
+func (pm *sourcePathProbeManager) dualSendDemotedLocked(key sourcePathDualSendKey, now mono.Time) bool {
+	if pm.dualSendDemotedAuxTill == nil {
+		return false
+	}
+	until, ok := pm.dualSendDemotedAuxTill[key]
+	if !ok {
+		return false
+	}
+	if !now.Before(until) {
+		delete(pm.dualSendDemotedAuxTill, key)
+		return false
+	}
+	return true
 }
 
 func (pm *sourcePathProbeManager) pruneExpiredLocked(now mono.Time) {

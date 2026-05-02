@@ -915,6 +915,149 @@ func TestSendUDPBatchFromSourceAuxErrorDoesNotRebind(t *testing.T) {
 	}
 }
 
+func TestSourcePathDualSendSendsPrimaryAndAux(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	})
+
+	dstConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	primaryConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	auxConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+
+	var c Conn
+	c.sourcePath.generation = 23
+	c.pconn4.mu.Lock()
+	c.pconn4.setConnLocked(primaryConn, "udp4", 1)
+	c.pconn4.mu.Unlock()
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4.pconn.mu.Lock()
+	c.sourcePath.aux4.pconn.setConnLocked(auxConn, "udp4", 1)
+	c.sourcePath.aux4.pconn.mu.Unlock()
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: udpConnAddrPort(t, dstConn.LocalAddr())}
+	auxSource := c.sourcePath.aux4.rxMeta()
+	seedSourcePathSamples(t, &c, dst, auxSource)
+
+	source, ok := c.sourcePathDualSendCandidate(dst)
+	if !ok {
+		t.Fatal("sourcePathDualSendCandidate did not select aux")
+	}
+	if source != auxSource {
+		t.Fatalf("dual-send source = %+v, want %+v", source, auxSource)
+	}
+
+	payload := []byte("source-path-dual-send")
+	buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
+	copy(buf[packet.GeneveFixedHeaderLength:], payload)
+	res := c.sendUDPBatchDualSource(source, dst, [][]byte{buf}, packet.GeneveFixedHeaderLength)
+	if res.err != nil {
+		t.Fatalf("sendUDPBatchDualSource error = %v", res.err)
+	}
+	if res.primaryErr != nil {
+		t.Fatalf("primary send error = %v", res.primaryErr)
+	}
+	if res.auxErr != nil {
+		t.Fatalf("aux send error = %v", res.auxErr)
+	}
+
+	wantPrimary := udpConnAddrPort(t, primaryConn.LocalAddr())
+	wantAux := udpConnAddrPort(t, auxConn.LocalAddr())
+	seen := map[uint16]bool{}
+	for i := 0; i < 2; i++ {
+		if err := dstConn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, 128)
+		n, src, err := dstConn.ReadFromUDPAddrPort(got)
+		if err != nil {
+			t.Fatalf("ReadFromUDPAddrPort #%d: %v", i+1, err)
+		}
+		if string(got[:n]) != string(payload) {
+			t.Fatalf("received payload %q, want %q", got[:n], payload)
+		}
+		seen[src.Port()] = true
+	}
+	if !seen[wantPrimary.Port()] {
+		t.Fatalf("primary source port %d was not seen; seen=%v", wantPrimary.Port(), seen)
+	}
+	if !seen[wantAux.Port()] {
+		t.Fatalf("aux source port %d was not seen; seen=%v", wantAux.Port(), seen)
+	}
+}
+
+func TestSourcePathDualSendAuxErrorDemotesWithoutInvalidatingSamples(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	})
+
+	dstConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	primaryConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+
+	var c Conn
+	c.sourcePath.generation = 24
+	c.pconn4.mu.Lock()
+	c.pconn4.setConnLocked(primaryConn, "udp4", 1)
+	c.pconn4.mu.Unlock()
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4.pconn.mu.Lock()
+	c.sourcePath.aux4.pconn.setConnLocked(&failingSourcePathPacketConn{
+		local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345},
+		err:   syscall.EPERM,
+	}, "udp4", 1)
+	c.sourcePath.aux4.pconn.mu.Unlock()
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: udpConnAddrPort(t, dstConn.LocalAddr())}
+	auxSource := c.sourcePath.aux4.rxMeta()
+	seedSourcePathSamples(t, &c, dst, auxSource)
+
+	payload := []byte("source-path-dual-send-aux-error")
+	buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
+	copy(buf[packet.GeneveFixedHeaderLength:], payload)
+	for i := 0; i < sourcePathDualSendAuxDropStreak; i++ {
+		source, ok := c.sourcePathDualSendCandidate(dst)
+		if !ok {
+			t.Fatalf("dual-send candidate unexpectedly demoted before failure %d", i+1)
+		}
+		res := c.sendUDPBatchDualSource(source, dst, [][]byte{buf}, packet.GeneveFixedHeaderLength)
+		if res.err != nil {
+			t.Fatalf("sendUDPBatchDualSource error after primary success = %v", res.err)
+		}
+		if res.primaryErr != nil {
+			t.Fatalf("primary send error = %v", res.primaryErr)
+		}
+		if !errors.Is(res.auxErr, syscall.EPERM) {
+			t.Fatalf("aux send error = %v, want %v", res.auxErr, syscall.EPERM)
+		}
+	}
+
+	c.mu.Lock()
+	sampleCount := len(c.sourceProbes.samples)
+	c.mu.Unlock()
+	if sampleCount != sourcePathMinSamplesForUse {
+		t.Fatalf("source-path samples = %d, want still %d after dual-send aux failures", sampleCount, sourcePathMinSamplesForUse)
+	}
+	if _, ok := c.sourcePathDualSendCandidate(dst); ok {
+		t.Fatal("dual-send candidate still available after aux drop streak")
+	}
+	if got := c.sourcePathDataSendSource(dst); !got.isPrimary() {
+		t.Fatalf("single-source selection changed after dual-send aux failures: got %+v, want primary", got)
+	}
+}
+
 func TestSourcePathForcedAuxDualNodeRuntime(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -1266,6 +1409,21 @@ func udpConnAddrPort(t *testing.T, addr net.Addr) netip.AddrPort {
 		t.Fatalf("ParseAddrPort(%q): %v", addr.String(), err)
 	}
 	return ap
+}
+
+func seedSourcePathSamples(t *testing.T, c *Conn, dst epAddr, source sourceRxMeta) {
+	t.Helper()
+	now := mono.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := 0; i < sourcePathMinSamplesForUse; i++ {
+		c.sourceProbes.samples = append(c.sourceProbes.samples, sourcePathProbeSample{
+			dst:     dst,
+			source:  source,
+			latency: 10 * time.Millisecond,
+			at:      now.Add(-time.Duration(i) * time.Millisecond),
+		})
+	}
 }
 
 type recordedUDPWrite struct {

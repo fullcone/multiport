@@ -10,21 +10,26 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"time"
 
 	"github.com/tailscale/wireguard-go/conn"
 	"tailscale.com/envknob"
 )
 
 var (
-	envknobSrcSelEnable          = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_ENABLE")
-	envknobSrcSelAuxSockets      = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS")
-	envknobSrcSelForceDataSource = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE")
-	envknobSrcSelAutoDataSource  = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE")
-	envknobSrcSelMaxPeers        = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PEERS")
-	envknobSrcSelMaxProbeBurst   = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST")
-	envknobSrcSelMaxPending           = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PENDING")
-	envknobSrcSelMaxSamples           = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_SAMPLES")
-	envknobSrcSelAuxBeatThresholdPct  = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT")
+	envknobSrcSelEnable              = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_ENABLE")
+	envknobSrcSelAuxSockets          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS")
+	envknobSrcSelForceDataSource     = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE")
+	envknobSrcSelAutoDataSource      = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE")
+	envknobSrcSelMaxPeers            = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PEERS")
+	envknobSrcSelMaxProbeBurst       = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST")
+	envknobSrcSelMaxPending          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PENDING")
+	envknobSrcSelMaxSamples          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_SAMPLES")
+	envknobSrcSelAuxBeatThresholdPct = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT")
+	envknobSrcSelDualSend            = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND")
+	envknobSrcSelDualSendAuxDrop     = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_AUX_DROP_STREAK")
+	envknobSrcSelDualSendRecoveryS   = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_RECOVERY_S")
+	envknobSrcSelDualSendMaxSkewMS   = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_MAX_SKEW_MS")
 )
 
 func sourcePathAuxSocketCount() int {
@@ -104,6 +109,34 @@ func sourcePathAuxBeatThresholdPercentValue() int {
 		return 100
 	}
 	return n
+}
+
+func sourcePathDualSendEnabled() bool {
+	return envknobSrcSelDualSend() && sourcePathAuxSocketCount() > 0
+}
+
+func sourcePathDualSendAuxDropStreakValue() int {
+	n := envknobSrcSelDualSendAuxDrop()
+	if n <= 0 {
+		return sourcePathDualSendAuxDropStreak
+	}
+	return n
+}
+
+func sourcePathDualSendRecoveryValue() time.Duration {
+	n := envknobSrcSelDualSendRecoveryS()
+	if n <= 0 {
+		return sourcePathDualSendRecovery
+	}
+	return time.Duration(n) * time.Second
+}
+
+func sourcePathDualSendMaxSkewValue() time.Duration {
+	n := envknobSrcSelDualSendMaxSkewMS()
+	if n <= 0 {
+		return sourcePathDualSendMaxSkew
+	}
+	return time.Duration(n) * time.Millisecond
 }
 
 func (c *Conn) sourcePathReceiveFuncs() []conn.ReceiveFunc {

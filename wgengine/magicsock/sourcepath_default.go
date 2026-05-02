@@ -7,6 +7,7 @@ package magicsock
 
 import (
 	"net/netip"
+	"time"
 
 	"github.com/tailscale/wireguard-go/conn"
 )
@@ -28,6 +29,14 @@ func sourcePathProbeHardPendingCount() int { return sourcePathProbeHardPendingCa
 func sourcePathProbeSampleLimitCount() int { return sourcePathProbeHistoryLimit }
 
 func sourcePathAuxBeatThresholdPercentValue() int { return sourcePathAuxBeatThresholdPercent }
+
+func sourcePathDualSendEnabled() bool { return false }
+
+func sourcePathDualSendAuxDropStreakValue() int { return sourcePathDualSendAuxDropStreak }
+
+func sourcePathDualSendRecoveryValue() time.Duration { return sourcePathDualSendRecovery }
+
+func sourcePathDualSendMaxSkewValue() time.Duration { return sourcePathDualSendMaxSkew }
 
 func (c *Conn) sourcePathWriteWireGuardBatchTo(source sourceRxMeta, dst epAddr, buffs [][]byte, offset int) error {
 	return errSourcePathUnavailable
