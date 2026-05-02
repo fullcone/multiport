@@ -1191,6 +1191,45 @@ func TestSourcePathActivePolicyInitialSelectionUsesTwoFastestPaths(t *testing.T)
 	}
 }
 
+func TestSourcePathActivePolicyRefillPreservesEndpointDiversity(t *testing.T) {
+	now := mono.Now()
+	dstA := epAddr{ap: netip.MustParseAddrPort("192.0.2.10:41641")}
+	dstB := epAddr{ap: netip.MustParseAddrPort("192.0.2.11:41641")}
+	path := func(dst epAddr, source sourceRxMeta, latency time.Duration) sourcePathSendPath {
+		return sourcePathSendPath{
+			dst:        dst,
+			source:     source,
+			latency:    latency,
+			hasLatency: true,
+			lastAt:     now,
+		}
+	}
+
+	activeA := path(dstA, sourceRxMeta{socketID: sourceIPv4SocketID, generation: 1}, 5*time.Millisecond)
+	missingB := path(dstB, sourceRxMeta{socketID: sourceIPv4ExtraSocketIDBase, generation: 1}, 7*time.Millisecond)
+	fasterSameDstA := path(dstA, sourceRxMeta{socketID: sourceIPv4ExtraSocketIDBase + 1, generation: 1}, 6*time.Millisecond)
+	refillB := path(dstB, sourceRxMeta{socketID: sourceIPv4ExtraSocketIDBase + 2, generation: 1}, 25*time.Millisecond)
+
+	de := &endpoint{
+		sourcePathActivePaths: [2]sourcePathSendPath{activeA, missingB},
+		sourcePathActiveCount: 2,
+	}
+	de.mu.Lock()
+	selected, ev := de.sourcePathApplyActivePathPolicyLocked(now, []sourcePathSendPath{
+		activeA,
+		fasterSameDstA,
+		refillB,
+	})
+	de.mu.Unlock()
+
+	if ev.replaced {
+		t.Fatalf("active refill replaced path unexpectedly")
+	}
+	if len(selected) != 2 || !sameSourcePathSendPath(selected[0], activeA) || !sameSourcePathSendPath(selected[1], refillB) {
+		t.Fatalf("refilled active paths = %+v, want activeA plus distinct dstB refill", selected)
+	}
+}
+
 func TestSourcePathDualSendObservedRemoteEndpointsSkipStaleAlternate(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
