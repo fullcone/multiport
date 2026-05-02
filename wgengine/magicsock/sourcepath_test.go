@@ -895,6 +895,48 @@ func TestReceiveIPRemoteUnknownWireGuardMetric(t *testing.T) {
 	}
 }
 
+func TestClassifySourcePathRemoteSlotReplacesStaleSlot(t *testing.T) {
+	now := mono.Now()
+	primary := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
+	stale := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:51641")}
+	fresh := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:61641")}
+	ep := &endpoint{
+		sourcePathRemoteSlots: [2]epAddr{primary, stale},
+		sourcePathRemoteSeen:  [2]mono.Time{now, now.Add(-2 * sessionActiveTimeout)},
+	}
+
+	if got := classifySourcePathRemoteSlot(ep, fresh); got != sourcePathRemotePath1 {
+		t.Fatalf("classifySourcePathRemoteSlot = %v, want path1", got)
+	}
+	if ep.sourcePathRemoteSlots[1] != fresh {
+		t.Fatalf("slot1 = %v, want fresh source %v", ep.sourcePathRemoteSlots[1], fresh)
+	}
+	if ep.sourcePathRemoteSeen[1].IsZero() {
+		t.Fatal("slot1 seen time was not refreshed")
+	}
+}
+
+func TestClassifySourcePathRemoteSlotReplacesDeletedEndpointSlot(t *testing.T) {
+	now := mono.Now()
+	primary := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
+	deleted := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:51641")}
+	fresh := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:61641")}
+	ep := &endpoint{
+		endpointState: map[netip.AddrPort]*endpointState{
+			deleted.ap: {index: indexSentinelDeleted},
+		},
+		sourcePathRemoteSlots: [2]epAddr{primary, deleted},
+		sourcePathRemoteSeen:  [2]mono.Time{now, now},
+	}
+
+	if got := classifySourcePathRemoteSlot(ep, fresh); got != sourcePathRemotePath1 {
+		t.Fatalf("classifySourcePathRemoteSlot = %v, want path1", got)
+	}
+	if ep.sourcePathRemoteSlots[1] != fresh {
+		t.Fatalf("slot1 = %v, want fresh source %v", ep.sourcePathRemoteSlots[1], fresh)
+	}
+}
+
 func TestSourcePathPeerAwareEndpointReusedPerRemoteSource(t *testing.T) {
 	ep := &endpoint{}
 	src0 := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}

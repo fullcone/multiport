@@ -2187,6 +2187,25 @@ func classifySourcePathRemoteSlot(ep *endpoint, src epAddr) sourcePathRemoteSlot
 			return sourcePathRemotePath1
 		}
 	}
+	for i, slot := range ep.sourcePathRemoteSlots {
+		seen := ep.sourcePathRemoteSeen[i]
+		if seen.IsZero() || now.Sub(seen) > sessionActiveTimeout {
+			ep.sourcePathRemoteSlots[i] = src
+			ep.sourcePathRemoteSeen[i] = now
+			if i == 0 {
+				return sourcePathRemotePath0
+			}
+			return sourcePathRemotePath1
+		}
+		if st, ok := ep.endpointState[slot.ap]; ok && st.shouldDeleteLocked() {
+			ep.sourcePathRemoteSlots[i] = src
+			ep.sourcePathRemoteSeen[i] = now
+			if i == 0 {
+				return sourcePathRemotePath0
+			}
+			return sourcePathRemotePath1
+		}
+	}
 	return sourcePathRemotePathOther
 }
 
