@@ -408,8 +408,9 @@ if (peer->bondingPolicy() == ZT_BOND_POLICY_BROADCAST &&
 ```
 
 ZeroTier relies on its VL1 packet-id replay window for receiver-side
-dedup. WireGuard already provides the equivalent: a 8192-entry
-sliding nonce replay window per peer (`wireguard-go/device/replay.go`).
+dedup. WireGuard already provides the equivalent: an 8128-counter
+sliding window per peer implementing RFC 6479 (`replay/replay.go`,
+consumed via `replay.Filter` in `device/keypair.go`).
 A duplicate WireGuard packet arriving on aux after the same packet on
 primary is silently rejected by the WG state machine without
 delivering twice to the inner network stack. The protocol-layer
@@ -452,18 +453,30 @@ prerequisite for dual-send already holds.
 4. **Receive side: nothing new.** Phase 19's `receiveIPWithSource`
    already delivers aux-arrived data into the WireGuard inbound queue
    (`magicsock.go` aux receive func wires through `mkReceiveFuncWithSource`).
-   The replay window in `wireguard-go/device/replay.go` handles dedup
-   transparently. No new RX code needed.
+   The replay window in `wireguard-go/replay/replay.go` (consumed via
+   `replay.Filter` in `device/keypair.go`) handles dedup transparently.
+   No new RX code needed.
 5. **Mid-flight reordering bound.** Aux and primary may have different
-   one-way latency. The replay window tolerates 8192 packets of
-   reordering, but if the aux path is slow enough that an aux copy
-   arrives 8192+ packets after its primary twin, the duplicate slips
-   past the window and reaches the inner network — visible as
-   spurious "duplicate" stack-level packets to the application.
-   Mitigation: gate dual-send on `|aux.latency - primary.latency| <
-   TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_MAX_SKEW_MS` (default 100 ms).
-   With Phase 20 scorer running, the latency comparison data is
-   already available without new probing.
+   one-way latency. WireGuard's replay filter
+   (`replay/replay.go`, RFC 6479 sliding window) has a fixed depth of
+   8128 counters (`(ringBlocks-1) * blockBits` with `ringBlocks=128`,
+   `blockBits=64`). When primary's copy of packet N is delivered first,
+   it advances `f.last` to N. Aux's copy of N arriving later — whether
+   within the window (rejected as duplicate, ring bit already set) or
+   beyond the window (rejected as too-old via
+   `f.last-counter > windowSize`) — is silently dropped without ever
+   reaching the inner stack. Reordering between primary and aux is
+   therefore safe at any skew. The real concern is *redundancy value*:
+   aux only contributes when primary's copy is lost AND aux's copy
+   lands within window of primary's current `f.last`. If
+   `|aux.latency - primary.latency| × packet_rate > 8128`, aux's copies
+   are systematically beyond the window and provide zero loss-recovery
+   benefit while still consuming upstream bandwidth. Mitigation: gate
+   dual-send on `|aux.latency - primary.latency| <
+   TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_MAX_SKEW_MS` (default 100 ms). At
+   1000 packets/sec and 100 ms skew, aux is ~100 packets behind —
+   safely within the 8128 window. With Phase 20 scorer running, the
+   latency comparison data is already available without new probing.
 6. **New metrics.**
      - `magicsock_srcsel_dual_send_packets`
      - `magicsock_srcsel_dual_send_primary_failed`
@@ -483,7 +496,7 @@ prerequisite for dual-send already holds.
 
 ### Open questions
 
-- **Replay window depth vs. burst loss.** The 8192-packet window is
+- **Replay window depth vs. burst loss.** The 8128-counter window is
   large but not unlimited. If a flow is in a burst-loss regime where
   primary loses 1000 consecutive packets before recovery, aux's
   twin packets would arrive long after the receiver expected them
