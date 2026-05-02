@@ -155,7 +155,7 @@ type sourcePathProbeManager struct {
 	dualSendAuxFailStreak  map[sourcePathDualSendKey]int
 	dualSendDemotedAuxTill map[sourcePathDualSendKey]mono.Time
 	flowMap                map[sourcePathFlowKey]sourcePathFlowState
-	flowRR                 uint64
+	flowRR                 map[epAddr]uint64
 }
 
 type sourcePathActiveBackupState struct {
@@ -313,7 +313,7 @@ func (pm *sourcePathProbeManager) clearLocked() {
 	pm.dualSendAuxFailStreak = nil
 	pm.dualSendDemotedAuxTill = nil
 	pm.flowMap = nil
-	pm.flowRR = 0
+	pm.flowRR = nil
 }
 
 // noteSourcePathSendFailure invalidates probe samples for (dst, source) after
@@ -866,9 +866,12 @@ func (pm *sourcePathProbeManager) dropFlowsLocked(dst epAddr, source sourceRxMet
 	return dropped
 }
 
-func (pm *sourcePathProbeManager) nextFlowRRLocked() uint64 {
-	v := pm.flowRR
-	pm.flowRR++
+func (pm *sourcePathProbeManager) nextFlowRRLocked(dst epAddr) uint64 {
+	if pm.flowRR == nil {
+		pm.flowRR = make(map[epAddr]uint64)
+	}
+	v := pm.flowRR[dst]
+	pm.flowRR[dst] = v + 1
 	return v
 }
 

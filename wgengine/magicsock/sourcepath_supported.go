@@ -472,7 +472,7 @@ func (c *Conn) sourcePathNewFlowSource(dst epAddr, flowID uint64, aux sourcePath
 	switch sourcePathBalancePolicyValue() {
 	case "rr":
 		c.mu.Lock()
-		rr := c.sourceProbes.nextFlowRRLocked()
+		rr := c.sourceProbes.nextFlowRRLocked(dst)
 		c.mu.Unlock()
 		if rr%2 == 0 {
 			return primarySourceRxMeta

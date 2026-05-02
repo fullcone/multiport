@@ -340,6 +340,45 @@ func TestSourcePathFlowAwareRRStickyAndIdle(t *testing.T) {
 	}
 }
 
+func TestSourcePathFlowAwareRRIndependentPerDestination(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "rr")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 36
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst1 := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	dst2 := epAddr{ap: netip.MustParseAddrPort("192.0.2.3:41641")}
+	aux := c.sourcePath.aux4.rxMeta()
+	now := mono.Now()
+	seedSourcePathSamples(t, &c, dst1, aux)
+	seedSourcePathSamples(t, &c, dst2, aux)
+
+	if got := c.sourcePathDataSendSourceForFlow(dst1, 1, now); !got.isPrimary() {
+		t.Fatalf("first dst1 RR flow source = %+v, want primary", got)
+	}
+	if got := c.sourcePathDataSendSourceForFlow(dst2, 1, now.Add(time.Millisecond)); !got.isPrimary() {
+		t.Fatalf("first dst2 RR flow source = %+v, want independent primary", got)
+	}
+	if got := c.sourcePathDataSendSourceForFlow(dst1, 2, now.Add(2*time.Millisecond)); got != aux {
+		t.Fatalf("second dst1 RR flow source = %+v, want aux %+v", got, aux)
+	}
+	if got := c.sourcePathDataSendSourceForFlow(dst2, 2, now.Add(3*time.Millisecond)); got != aux {
+		t.Fatalf("second dst2 RR flow source = %+v, want aux %+v", got, aux)
+	}
+}
+
 func TestSourcePathFlowAwareDropsStaleAssignedSource(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
