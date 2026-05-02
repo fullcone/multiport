@@ -834,6 +834,76 @@ func TestSourcePathDualEndpointStrategySendsTwoLowestLatencyEndpoints(t *testing
 	assertNoUDPConnPayload(t, dstSlow)
 }
 
+func TestSourcePathDualEndpointStrategyInvalidatesBadEndpoints(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "dual-endpoint")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
+	})
+
+	pl := &recordingPacketListener{
+		base:     localhostListener{},
+		failures: map[netip.AddrPort]error{},
+	}
+	pc, err := pl.ListenPacket(context.Background(), "udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket: %v", err)
+	}
+	t.Cleanup(func() { pc.Close() })
+	local, ok := addrPortFromNetAddr(pc.LocalAddr())
+	if !ok {
+		t.Fatalf("could not parse local address %v", pc.LocalAddr())
+	}
+	pl.setFailure(local, &net.OpError{Op: "write", Err: syscall.EHOSTUNREACH})
+	t.Cleanup(pl.clearFailures)
+
+	var c Conn
+	c.pconn4.mu.Lock()
+	c.pconn4.setConnLocked(pc.(nettype.PacketConn), "udp4", 1)
+	c.pconn4.mu.Unlock()
+
+	now := mono.Now()
+	fast := netip.MustParseAddrPort("127.0.0.1:11001")
+	mid := netip.MustParseAddrPort("127.0.0.1:11002")
+	slow := netip.MustParseAddrPort("127.0.0.1:11003")
+	fastState := &endpointState{}
+	fastState.addPongReplyLocked(pongReply{latency: 10 * time.Millisecond, pongAt: now})
+	midState := &endpointState{}
+	midState.addPongReplyLocked(pongReply{latency: 20 * time.Millisecond, pongAt: now})
+	slowState := &endpointState{}
+	slowState.addPongReplyLocked(pongReply{latency: 50 * time.Millisecond, pongAt: now})
+
+	de := &endpoint{
+		c:                 &c,
+		heartbeatDisabled: true,
+		endpointState: map[netip.AddrPort]*endpointState{
+			slow: slowState,
+			mid:  midState,
+			fast: fastState,
+		},
+	}
+
+	payload := []byte("source-path-dual-endpoint-bad")
+	buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
+	copy(buf[packet.GeneveFixedHeaderLength:], payload)
+	if err := de.send([][]byte{buf}, packet.GeneveFixedHeaderLength); !isBadEndpointErr(err) {
+		t.Fatalf("endpoint send error = %v, want bad endpoint error", err)
+	}
+
+	de.mu.Lock()
+	defer de.mu.Unlock()
+	if _, ok := fastState.latencyLocked(); ok {
+		t.Fatal("primary dual endpoint still has latency after bad endpoint error")
+	}
+	if _, ok := midState.latencyLocked(); ok {
+		t.Fatal("secondary dual endpoint still has latency after bad endpoint error")
+	}
+	if _, ok := slowState.latencyLocked(); !ok {
+		t.Fatal("unselected endpoint lost latency after selected endpoints failed")
+	}
+}
+
 func TestSourcePathDataSendSourceForcedAuxDualStack(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")

@@ -1262,6 +1262,12 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 	if len(dualEndpointAddrs) > 0 {
 		res := de.c.sendUDPBatchDualEndpoint(dualEndpointAddrs, buffs, offset)
 		err = res.err
+		if res.primaryErr != nil && isBadEndpointErr(res.primaryErr) {
+			de.noteBadEndpoint(dualEndpointAddrs[0])
+		}
+		if len(dualEndpointAddrs) > 1 && res.secondaryErr != nil && isBadEndpointErr(res.secondaryErr) {
+			de.noteBadEndpoint(dualEndpointAddrs[1])
+		}
 	} else if udpAddr.ap.IsValid() {
 		if source, activeBackupForced := de.c.sourcePathActiveBackupCandidate(udpAddr, now); activeBackupForced {
 			metricSourcePathDataSendAuxSelected.Add(1)
