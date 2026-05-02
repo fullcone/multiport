@@ -895,6 +895,20 @@ func TestReceiveIPRemoteUnknownWireGuardMetric(t *testing.T) {
 	}
 }
 
+func TestSourcePathPeerAwareEndpointReusedPerRemoteSource(t *testing.T) {
+	ep := &endpoint{}
+	src0 := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
+	src1 := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:51641")}
+
+	wrapper0 := ep.sourcePathPeerAwareEndpoint(src0)
+	if wrapper0 != ep.sourcePathPeerAwareEndpoint(src0) {
+		t.Fatal("sourcePathPeerAwareEndpoint did not reuse wrapper for the same source")
+	}
+	if wrapper0 == ep.sourcePathPeerAwareEndpoint(src1) {
+		t.Fatal("sourcePathPeerAwareEndpoint reused wrapper across different sources")
+	}
+}
+
 func TestSourcePathBestCandidateRequiresCurrentProbeSources(t *testing.T) {
 	var c Conn
 	now := mono.Now()

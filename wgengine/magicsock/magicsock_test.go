@@ -4276,18 +4276,21 @@ func Test_lazyEndpoint_FromPeer(t *testing.T) {
 		callWithPeerMapKey  bool
 		maybeEPMatchingKey  bool
 		wantEpAddrInPeerMap bool
+		wantAcceptedMetric  bool
 	}{
 		{
 			name:                "epAddr-in-peerMap",
 			callWithPeerMapKey:  true,
 			maybeEPMatchingKey:  false,
 			wantEpAddrInPeerMap: true,
+			wantAcceptedMetric:  true,
 		},
 		{
 			name:                "maybeEP-early-return",
 			callWithPeerMapKey:  true,
 			maybeEPMatchingKey:  true,
 			wantEpAddrInPeerMap: false,
+			wantAcceptedMetric:  true,
 		},
 		{
 			name:                "not-in-peerMap-early-return",
@@ -4327,7 +4330,15 @@ func Test_lazyEndpoint_FromPeer(t *testing.T) {
 			if tt.maybeEPMatchingKey {
 				le.maybeEP = ep
 			}
+			acceptedBefore := metricSourcePathRemotePath0WireGuardAccepted.Value()
 			le.FromPeer(pubKey)
+			wantAcceptedDelta := int64(0)
+			if tt.wantAcceptedMetric {
+				wantAcceptedDelta = 1
+			}
+			if got := metricSourcePathRemotePath0WireGuardAccepted.Value() - acceptedBefore; got != wantAcceptedDelta {
+				t.Errorf("remote path0 accepted metric delta = %d, want %d", got, wantAcceptedDelta)
+			}
 			if tt.wantEpAddrInPeerMap {
 				gotEP, ok := conn.peerMap.endpointForEpAddr(le.src)
 				if !ok {

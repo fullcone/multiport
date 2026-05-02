@@ -2063,7 +2063,7 @@ func (c *Conn) receiveIPWithSource(b []byte, ipp netip.AddrPort, cache *epAddrEn
 	}
 	retEP := conn.Endpoint(ep)
 	if pt == packetLooksLikeWireGuard && src.isDirect() {
-		retEP = &sourcePathPeerAwareEndpoint{endpoint: ep, src: src}
+		retEP = ep.sourcePathPeerAwareEndpoint(src)
 	}
 	now := mono.Now()
 	ep.lastRecvUDPAny.StoreAtomic(now)
@@ -2191,6 +2191,23 @@ type sourcePathPeerAwareEndpoint struct {
 }
 
 var _ conn.PeerAwareEndpoint = (*sourcePathPeerAwareEndpoint)(nil)
+
+func (ep *endpoint) sourcePathPeerAwareEndpoint(src epAddr) conn.Endpoint {
+	ep.mu.Lock()
+	defer ep.mu.Unlock()
+	if wrapped, ok := ep.sourcePathPeerAware[src]; ok {
+		return wrapped
+	}
+	if len(ep.sourcePathPeerAware) >= 8 {
+		return ep
+	}
+	if ep.sourcePathPeerAware == nil {
+		ep.sourcePathPeerAware = make(map[epAddr]*sourcePathPeerAwareEndpoint, 2)
+	}
+	wrapped := &sourcePathPeerAwareEndpoint{endpoint: ep, src: src}
+	ep.sourcePathPeerAware[src] = wrapped
+	return wrapped
+}
 
 func (ep *sourcePathPeerAwareEndpoint) FromPeer(peerPublicKey [32]byte) {
 	pubKey := key.NodePublicFromRaw32(mem.B(peerPublicKey[:]))
@@ -4825,6 +4842,7 @@ func (le *lazyEndpoint) DstToBytes() []byte {
 func (le *lazyEndpoint) FromPeer(peerPublicKey [32]byte) {
 	pubKey := key.NodePublicFromRaw32(mem.B(peerPublicKey[:]))
 	if le.maybeEP != nil && pubKey.Compare(le.maybeEP.publicKey) == 0 {
+		noteSourcePathRemoteWireGuardAccepted(le.maybeEP, le.src)
 		return
 	}
 	le.c.mu.Lock()

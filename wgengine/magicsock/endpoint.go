@@ -93,6 +93,7 @@ type endpoint struct {
 	bestAddrAt            mono.Time   // time best address re-confirmed
 	trustBestAddrUntil    mono.Time   // time when bestAddr expires
 	sourcePathRemoteSlots [2]epAddr   // first two direct remote source endpoints observed for srcsel metrics
+	sourcePathPeerAware   map[epAddr]*sourcePathPeerAwareEndpoint
 	sentPing              map[stun.TxID]sentPing
 	endpointState         map[netip.AddrPort]*endpointState // netip.AddrPort type for key (instead of [epAddr]) as [endpointState] is irrelevant for Geneve-encapsulated paths
 	isCallMeMaybeEP       map[netip.AddrPort]bool
