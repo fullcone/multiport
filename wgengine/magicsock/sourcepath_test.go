@@ -708,6 +708,8 @@ func TestReceiveIPAuxiliaryAcceptsWireGuard(t *testing.T) {
 
 	primaryBefore := metricSourcePathPrimaryWireGuardRx.Value()
 	before := metricSourcePathAuxWireGuardRx.Value()
+	local0Before := metricSourcePathLocalPath0WireGuardRx.Value()
+	local1Before := metricSourcePathLocalPath1WireGuardRx.Value()
 	ep, size, _, ok := c.receiveIPWithSource(pkt, src, &cache, aux)
 
 	if got := metricSourcePathPrimaryWireGuardRx.Value() - primaryBefore; got != 0 {
@@ -715,6 +717,12 @@ func TestReceiveIPAuxiliaryAcceptsWireGuard(t *testing.T) {
 	}
 	if got := metricSourcePathAuxWireGuardRx.Value() - before; got != 1 {
 		t.Fatalf("aux WG rx metric delta = %d, want 1 (auxiliary WireGuard receive drop is still in place)", got)
+	}
+	if got := metricSourcePathLocalPath0WireGuardRx.Value() - local0Before; got != 0 {
+		t.Fatalf("local path0 WG rx metric delta = %d, want 0 for auxiliary receive", got)
+	}
+	if got := metricSourcePathLocalPath1WireGuardRx.Value() - local1Before; got != 1 {
+		t.Fatalf("local path1 WG rx metric delta = %d, want 1 for auxiliary receive", got)
 	}
 	if !ok {
 		t.Fatal("aux receive returned ok=false for a WireGuard-shaped packet; the previous unconditional drop is still in effect")
@@ -738,6 +746,8 @@ func TestReceiveIPPrimaryWireGuardMetric(t *testing.T) {
 
 	primaryBefore := metricSourcePathPrimaryWireGuardRx.Value()
 	auxBefore := metricSourcePathAuxWireGuardRx.Value()
+	local0Before := metricSourcePathLocalPath0WireGuardRx.Value()
+	local1Before := metricSourcePathLocalPath1WireGuardRx.Value()
 	ep, size, _, ok := c.receiveIP(pkt, src, &cache)
 
 	if got := metricSourcePathPrimaryWireGuardRx.Value() - primaryBefore; got != 1 {
@@ -745,6 +755,12 @@ func TestReceiveIPPrimaryWireGuardMetric(t *testing.T) {
 	}
 	if got := metricSourcePathAuxWireGuardRx.Value() - auxBefore; got != 0 {
 		t.Fatalf("aux WG rx metric delta = %d, want 0 for primary receive", got)
+	}
+	if got := metricSourcePathLocalPath0WireGuardRx.Value() - local0Before; got != 1 {
+		t.Fatalf("local path0 WG rx metric delta = %d, want 1 for primary receive", got)
+	}
+	if got := metricSourcePathLocalPath1WireGuardRx.Value() - local1Before; got != 0 {
+		t.Fatalf("local path1 WG rx metric delta = %d, want 0 for primary receive", got)
 	}
 	if !ok {
 		t.Fatal("primary receive returned ok=false for a WireGuard-shaped packet")
@@ -787,6 +803,8 @@ func TestReceiveIPRemoteWireGuardMetrics(t *testing.T) {
 	pathUnknownBefore := metricSourcePathRemotePathUnknownWireGuardRx.Value()
 	path0AcceptedBefore := metricSourcePathRemotePath0WireGuardAccepted.Value()
 	path1AcceptedBefore := metricSourcePathRemotePath1WireGuardAccepted.Value()
+	local0AcceptedBefore := metricSourcePathLocalPath0WireGuardAccepted.Value()
+	local1AcceptedBefore := metricSourcePathLocalPath1WireGuardAccepted.Value()
 
 	var cache epAddrEndpointCache
 	primaryEP, _, _, ok := c.receiveIP(pkt, primary.ap, &cache)
@@ -813,9 +831,15 @@ func TestReceiveIPRemoteWireGuardMetrics(t *testing.T) {
 	if got := metricSourcePathRemotePath0WireGuardAccepted.Value() - path0AcceptedBefore; got != 1 {
 		t.Fatalf("remote path0 WG accepted metric delta after primary = %d, want 1", got)
 	}
+	if got := metricSourcePathLocalPath0WireGuardAccepted.Value() - local0AcceptedBefore; got != 1 {
+		t.Fatalf("local path0 WG accepted metric delta after primary = %d, want 1", got)
+	}
+	if got := metricSourcePathLocalPath1WireGuardAccepted.Value() - local1AcceptedBefore; got != 0 {
+		t.Fatalf("local path1 WG accepted metric delta after primary = %d, want 0", got)
+	}
 
 	cache = epAddrEndpointCache{}
-	auxEP, _, _, ok := c.receiveIP(pkt, aux.ap, &cache)
+	auxEP, _, _, ok := c.receiveIPWithSource(pkt, aux.ap, &cache, sourceRxMeta{socketID: sourceIPv4SocketID, generation: 1})
 	if !ok {
 		t.Fatal("aux endpoint receive returned ok=false")
 	}
@@ -838,6 +862,12 @@ func TestReceiveIPRemoteWireGuardMetrics(t *testing.T) {
 	}
 	if got := metricSourcePathRemotePath1WireGuardAccepted.Value() - path1AcceptedBefore; got != 1 {
 		t.Fatalf("remote path1 WG accepted metric delta after aux = %d, want 1", got)
+	}
+	if got := metricSourcePathLocalPath0WireGuardAccepted.Value() - local0AcceptedBefore; got != 1 {
+		t.Fatalf("local path0 WG accepted metric delta after aux = %d, want 1", got)
+	}
+	if got := metricSourcePathLocalPath1WireGuardAccepted.Value() - local1AcceptedBefore; got != 1 {
+		t.Fatalf("local path1 WG accepted metric delta after aux = %d, want 1", got)
 	}
 	if got := metricSourcePathRemotePathOtherWireGuardRx.Value() - pathOtherBefore; got != 0 {
 		t.Fatalf("remote path-other WG rx metric delta = %d, want 0", got)
@@ -868,6 +898,7 @@ func TestReceiveIPRemoteUnknownWireGuardMetric(t *testing.T) {
 	unknownAcceptedBefore := metricSourcePathRemoteUnknownWireGuardAccepted.Value()
 	path0AcceptedBefore := metricSourcePathRemotePath0WireGuardAccepted.Value()
 	pathUnknownBefore := metricSourcePathRemotePathUnknownWireGuardRx.Value()
+	local0AcceptedBefore := metricSourcePathLocalPath0WireGuardAccepted.Value()
 	ep, _, _, ok := c.receiveIP(pkt, src, &cache)
 	if !ok {
 		t.Fatal("unknown endpoint receive returned ok=false")
@@ -894,6 +925,9 @@ func TestReceiveIPRemoteUnknownWireGuardMetric(t *testing.T) {
 	}
 	if got := metricSourcePathRemotePath0WireGuardAccepted.Value() - path0AcceptedBefore; got != 1 {
 		t.Fatalf("remote path0 WG accepted metric delta = %d, want 1 after peer identification", got)
+	}
+	if got := metricSourcePathLocalPath0WireGuardAccepted.Value() - local0AcceptedBefore; got != 1 {
+		t.Fatalf("local path0 WG accepted metric delta = %d, want 1 after peer identification", got)
 	}
 }
 
@@ -988,13 +1022,17 @@ func TestSourcePathPeerAwareEndpointReusedPerRemoteSource(t *testing.T) {
 	ep := &endpoint{}
 	src0 := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
 	src1 := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:51641")}
+	auxMeta := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 1}
 
-	wrapper0 := ep.sourcePathPeerAwareEndpoint(src0)
-	if wrapper0 != ep.sourcePathPeerAwareEndpoint(src0) {
-		t.Fatal("sourcePathPeerAwareEndpoint did not reuse wrapper for the same source")
+	wrapper0 := ep.sourcePathPeerAwareEndpoint(src0, primarySourceRxMeta)
+	if wrapper0 != ep.sourcePathPeerAwareEndpoint(src0, primarySourceRxMeta) {
+		t.Fatal("sourcePathPeerAwareEndpoint did not reuse wrapper for the same source and local receive path")
 	}
-	if wrapper0 == ep.sourcePathPeerAwareEndpoint(src1) {
+	if wrapper0 == ep.sourcePathPeerAwareEndpoint(src1, primarySourceRxMeta) {
 		t.Fatal("sourcePathPeerAwareEndpoint reused wrapper across different sources")
+	}
+	if wrapper0 == ep.sourcePathPeerAwareEndpoint(src0, auxMeta) {
+		t.Fatal("sourcePathPeerAwareEndpoint reused wrapper across different local receive paths")
 	}
 }
 
@@ -1002,7 +1040,7 @@ func TestSourcePathPeerAwareEndpointCacheEvictsButKeepsPeerAware(t *testing.T) {
 	ep := &endpoint{}
 	for i := 0; i < sourcePathPeerAwareCacheLimit+3; i++ {
 		src := epAddr{ap: netip.AddrPortFrom(netip.MustParseAddr("192.0.2.1"), uint16(40000+i))}
-		wrapper := ep.sourcePathPeerAwareEndpoint(src)
+		wrapper := ep.sourcePathPeerAwareEndpoint(src, primarySourceRxMeta)
 		if _, ok := wrapper.(interface{ FromPeer([32]byte) }); !ok {
 			t.Fatalf("wrapper for source %d is %T, want peer-aware endpoint", i, wrapper)
 		}

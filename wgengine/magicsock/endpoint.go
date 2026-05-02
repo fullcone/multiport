@@ -94,7 +94,7 @@ type endpoint struct {
 	trustBestAddrUntil    mono.Time   // time when bestAddr expires
 	sourcePathRemoteSlots [2]epAddr   // first two direct remote source endpoints observed for srcsel metrics
 	sourcePathRemoteSeen  [2]mono.Time
-	sourcePathPeerAware   map[epAddr]*sourcePathPeerAwareEndpoint
+	sourcePathPeerAware   map[sourcePathPeerAwareKey]*sourcePathPeerAwareEndpoint
 	sourcePathSingleSince mono.Time // non-zero while fixed dual-send has degraded to a single direct send
 	sourcePathSinglePkts  int64
 	sentPing              map[stun.TxID]sentPing

@@ -1982,11 +1982,7 @@ func (c *Conn) receiveIPWithSource(b []byte, ipp netip.AddrPort, cache *epAddrEn
 	pt, isGeneveEncap := packetLooksLike(b)
 	src := epAddr{ap: ipp}
 	if pt == packetLooksLikeWireGuard {
-		if rxMeta.isPrimary() {
-			metricSourcePathPrimaryWireGuardRx.Add(1)
-		} else {
-			metricSourcePathAuxWireGuardRx.Add(1)
-		}
+		noteSourcePathLocalWireGuardRx(rxMeta)
 	}
 	if isGeneveEncap {
 		err := geneve.Decode(b)
@@ -2051,7 +2047,7 @@ func (c *Conn) receiveIPWithSource(b []byte, ipp netip.AddrPort, cache *epAddrEn
 			if pt == packetLooksLikeWireGuard {
 				noteSourcePathRemoteWireGuardRx(nil, src)
 			}
-			return &lazyEndpoint{c: c, src: src}, size, isGeneveEncap, true
+			return &lazyEndpoint{c: c, src: src, rxMeta: rxMeta}, size, isGeneveEncap, true
 		}
 		cache.epAddr = src
 		cache.de = de
@@ -2063,7 +2059,7 @@ func (c *Conn) receiveIPWithSource(b []byte, ipp netip.AddrPort, cache *epAddrEn
 	}
 	retEP := conn.Endpoint(ep)
 	if pt == packetLooksLikeWireGuard && src.isDirect() {
-		retEP = ep.sourcePathPeerAwareEndpoint(src)
+		retEP = ep.sourcePathPeerAwareEndpoint(src, rxMeta)
 	}
 	now := mono.Now()
 	ep.lastRecvUDPAny.StoreAtomic(now)
@@ -2079,9 +2075,27 @@ func (c *Conn) receiveIPWithSource(b []byte, ipp netip.AddrPort, cache *epAddrEn
 		// unlucky and fail to JIT configure the "correct" peer.
 		// TODO(jwhited): relax this to include direct connections
 		//  See http://go/corp/29422 & http://go/corp/30042
-		return &lazyEndpoint{c: c, maybeEP: ep, src: src}, size, isGeneveEncap, true
+		return &lazyEndpoint{c: c, maybeEP: ep, src: src, rxMeta: rxMeta}, size, isGeneveEncap, true
 	}
 	return retEP, size, isGeneveEncap, true
+}
+
+func noteSourcePathLocalWireGuardRx(rxMeta sourceRxMeta) {
+	if rxMeta.isPrimary() {
+		metricSourcePathPrimaryWireGuardRx.Add(1)
+		metricSourcePathLocalPath0WireGuardRx.Add(1)
+	} else {
+		metricSourcePathAuxWireGuardRx.Add(1)
+		metricSourcePathLocalPath1WireGuardRx.Add(1)
+	}
+}
+
+func noteSourcePathLocalWireGuardAccepted(rxMeta sourceRxMeta) {
+	if rxMeta.isPrimary() {
+		metricSourcePathLocalPath0WireGuardAccepted.Add(1)
+	} else {
+		metricSourcePathLocalPath1WireGuardAccepted.Add(1)
+	}
 }
 
 func noteSourcePathRemoteWireGuardRx(ep *endpoint, src epAddr) {
@@ -2211,19 +2225,26 @@ func classifySourcePathRemoteSlot(ep *endpoint, src epAddr) sourcePathRemoteSlot
 
 type sourcePathPeerAwareEndpoint struct {
 	*endpoint
-	src epAddr
+	src    epAddr
+	rxMeta sourceRxMeta
 }
 
 var _ conn.PeerAwareEndpoint = (*sourcePathPeerAwareEndpoint)(nil)
 
-func (ep *endpoint) sourcePathPeerAwareEndpoint(src epAddr) conn.Endpoint {
+type sourcePathPeerAwareKey struct {
+	src    epAddr
+	rxMeta sourceRxMeta
+}
+
+func (ep *endpoint) sourcePathPeerAwareEndpoint(src epAddr, rxMeta sourceRxMeta) conn.Endpoint {
 	ep.mu.Lock()
 	defer ep.mu.Unlock()
-	if wrapped, ok := ep.sourcePathPeerAware[src]; ok {
+	key := sourcePathPeerAwareKey{src: src, rxMeta: rxMeta}
+	if wrapped, ok := ep.sourcePathPeerAware[key]; ok {
 		return wrapped
 	}
 	if ep.sourcePathPeerAware == nil {
-		ep.sourcePathPeerAware = make(map[epAddr]*sourcePathPeerAwareEndpoint, 2)
+		ep.sourcePathPeerAware = make(map[sourcePathPeerAwareKey]*sourcePathPeerAwareEndpoint, 2)
 	}
 	if len(ep.sourcePathPeerAware) >= sourcePathPeerAwareCacheLimit {
 		for stale := range ep.sourcePathPeerAware {
@@ -2231,8 +2252,8 @@ func (ep *endpoint) sourcePathPeerAwareEndpoint(src epAddr) conn.Endpoint {
 			break
 		}
 	}
-	wrapped := &sourcePathPeerAwareEndpoint{endpoint: ep, src: src}
-	ep.sourcePathPeerAware[src] = wrapped
+	wrapped := &sourcePathPeerAwareEndpoint{endpoint: ep, src: src, rxMeta: rxMeta}
+	ep.sourcePathPeerAware[key] = wrapped
 	return wrapped
 }
 
@@ -2241,6 +2262,7 @@ func (ep *sourcePathPeerAwareEndpoint) FromPeer(peerPublicKey [32]byte) {
 	if pubKey.Compare(ep.publicKey) != 0 {
 		return
 	}
+	noteSourcePathLocalWireGuardAccepted(ep.rxMeta)
 	noteSourcePathRemoteWireGuardAccepted(ep.endpoint, ep.src)
 }
 
@@ -4585,6 +4607,10 @@ var (
 	metricSourcePathProbeOutcomesEvicted               = clientmetric.NewCounter("magicsock_srcsel_probe_outcomes_evicted")
 	metricSourcePathPrimaryWireGuardRx                 = clientmetric.NewCounter("magicsock_srcsel_primary_wireguard_rx")
 	metricSourcePathAuxWireGuardRx                     = clientmetric.NewCounter("magicsock_srcsel_aux_wireguard_rx")
+	metricSourcePathLocalPath0WireGuardRx              = clientmetric.NewCounter("magicsock_srcsel_local_path0_wireguard_rx")
+	metricSourcePathLocalPath1WireGuardRx              = clientmetric.NewCounter("magicsock_srcsel_local_path1_wireguard_rx")
+	metricSourcePathLocalPath0WireGuardAccepted        = clientmetric.NewCounter("magicsock_srcsel_local_path0_wireguard_accepted")
+	metricSourcePathLocalPath1WireGuardAccepted        = clientmetric.NewCounter("magicsock_srcsel_local_path1_wireguard_accepted")
 	metricSourcePathRemoteBestWireGuardRx              = clientmetric.NewCounter("magicsock_srcsel_remote_best_wireguard_rx")
 	metricSourcePathRemoteNonBestWireGuardRx           = clientmetric.NewCounter("magicsock_srcsel_remote_non_best_wireguard_rx")
 	metricSourcePathRemoteUnknownWireGuardRx           = clientmetric.NewCounter("magicsock_srcsel_remote_unknown_wireguard_rx")
@@ -4802,6 +4828,7 @@ type lazyEndpoint struct {
 	c       *Conn
 	maybeEP *endpoint // or nil if unknown
 	src     epAddr
+	rxMeta  sourceRxMeta
 }
 
 var _ conn.InitiationAwareEndpoint = (*lazyEndpoint)(nil)
@@ -4874,6 +4901,7 @@ func (le *lazyEndpoint) DstToBytes() []byte {
 func (le *lazyEndpoint) FromPeer(peerPublicKey [32]byte) {
 	pubKey := key.NodePublicFromRaw32(mem.B(peerPublicKey[:]))
 	if le.maybeEP != nil && pubKey.Compare(le.maybeEP.publicKey) == 0 {
+		noteSourcePathLocalWireGuardAccepted(le.rxMeta)
 		noteSourcePathRemoteWireGuardAccepted(le.maybeEP, le.src)
 		return
 	}
@@ -4883,6 +4911,7 @@ func (le *lazyEndpoint) FromPeer(peerPublicKey [32]byte) {
 	if !ok {
 		return
 	}
+	noteSourcePathLocalWireGuardAccepted(le.rxMeta)
 	noteSourcePathRemoteWireGuardAccepted(ep, le.src)
 	// TODO(jwhited): Consider [lazyEndpoint] effectiveness as a means to make
 	//  this the sole call site for setNodeKeyForEpAddr. If this is the sole
