@@ -418,10 +418,13 @@ prerequisite for dual-send already holds.
 
 ### Sketch
 
-1. **Single env knob** `TS_EXPERIMENTAL_SRCSEL_DUAL_SEND=true` (off
-   by default). With the knob unset, `endpoint.send` is bit-identical
-   to today (Phase 19/20 single-source). With it on AND aux is bound
-   AND the dst is direct-UDP AND the existing scorer permits aux
+1. **Default dual-send with explicit opt-out.** With the knobs unset,
+   srcsel binds one auxiliary socket and dual-send is enabled. Set
+   `TS_EXPERIMENTAL_SRCSEL_ENABLE=false`,
+   `TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=0`, or
+   `TS_EXPERIMENTAL_SRCSEL_DUAL_SEND=false` to restore single-source
+   behavior. With dual-send on AND aux is bound AND the dst is
+   direct-UDP AND the existing scorer permits aux
    (`sourcePathBestCandidate(dst)` returns ok), perform both sends:
      - Primary first via `sendUDPBatch(udpAddr, buffs, offset)` —
        error handling identical to today (`noteBadEndpoint` on
@@ -638,9 +641,10 @@ exceeding its max disables the path before scoring even runs.
      - Floor 200 ms (matches ZeroTier's `ZT_BOND_FAILOVER_MIN_INTERVAL=500`
        halved for two-way RTT). Below 200 ms, probe traffic begins
        to interfere with measurement itself.
-     - Off-by-default semantics: knob unset retains today's
-       disco-ping-coupled cadence so Phase 20 deployments see no
-       behaviour change.
+     - Default-on semantics: knob unset uses the 1000 ms source-path
+       probe cadence so default dual-send can accumulate aux candidates.
+       Set `TS_EXPERIMENTAL_SRCSEL_PROBE_INTERVAL_MS=0` to disable the
+       dedicated probe loop.
      - Per-peer rate-limit: existing
        `sourcePathProbeMaxBurstCount()=8` (Phase 8) caps in-flight
        probe count; the cadence change does not bypass it.
@@ -717,7 +721,7 @@ exceeding its max disables the path before scoring even runs.
 9. **Backwards compat.** `TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT`
    (Phase 20) remains the pure-mean-RTT gate. Multi-metric scoring
    is opt-in via `TS_EXPERIMENTAL_SRCSEL_MULTI_METRIC=true`. With
-   it off (default), Phase 20 behaviour is bit-identical.
+   it off (default), scoring remains Phase 20's mean-RTT gate.
 
 ### Open questions
 

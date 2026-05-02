@@ -527,6 +527,24 @@ func TestSourcePathRealtimeProfileValues(t *testing.T) {
 	}
 }
 
+func TestSourcePathProbeIntervalDefaultAndOptOut(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROFILE", "")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROBE_INTERVAL_MS", "")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROFILE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROBE_INTERVAL_MS", "")
+	})
+
+	if got := sourcePathProbeIntervalValue(); got != sourcePathRealtimeProbeEvery {
+		t.Fatalf("default probe interval = %v, want %v", got, sourcePathRealtimeProbeEvery)
+	}
+
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROBE_INTERVAL_MS", "0")
+	if got := sourcePathProbeIntervalValue(); got != 0 {
+		t.Fatalf("explicit zero probe interval = %v, want disabled", got)
+	}
+}
+
 func TestSourcePathProbeIntervalFloor(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROBE_INTERVAL_MS", "1")
 	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROBE_INTERVAL_MS", "") })
@@ -544,8 +562,20 @@ func TestSourcePathAuxSocketCountBoundaryDualStack(t *testing.T) {
 		wantAux int
 	}{
 		{
-			name:    "disabled",
+			name:    "default",
 			enable:  "",
+			aux:     "",
+			wantAux: 1,
+		},
+		{
+			name:    "default-explicit-one",
+			enable:  "",
+			aux:     "1",
+			wantAux: 1,
+		},
+		{
+			name:    "disabled",
+			enable:  "false",
 			aux:     "1",
 			wantAux: 0,
 		},
@@ -616,6 +646,47 @@ func TestSourcePathAuxSocketCountBoundaryDualStack(t *testing.T) {
 	}
 }
 
+func TestSourcePathDualSendDefaultAndOptOut(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	})
+
+	if !sourcePathEnabled() {
+		t.Fatal("source path disabled by default")
+	}
+	if got := sourcePathAuxSocketCount(); got != 1 {
+		t.Fatalf("default sourcePathAuxSocketCount() = %d, want 1", got)
+	}
+	if !sourcePathDualSendEnabled() {
+		t.Fatal("dual-send disabled by default")
+	}
+
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "false")
+	if sourcePathDualSendEnabled() {
+		t.Fatal("dual-send remained enabled with TS_EXPERIMENTAL_SRCSEL_DUAL_SEND=false")
+	}
+
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "0")
+	if sourcePathDualSendEnabled() {
+		t.Fatal("dual-send enabled with TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=0")
+	}
+
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "false")
+	if sourcePathAuxSocketCount() != 0 {
+		t.Fatal("source path aux sockets remained enabled with TS_EXPERIMENTAL_SRCSEL_ENABLE=false")
+	}
+	if sourcePathDualSendEnabled() {
+		t.Fatal("dual-send enabled with TS_EXPERIMENTAL_SRCSEL_ENABLE=false")
+	}
+}
+
 func TestSourcePathDataSendSourceForcedAuxDualStack(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
@@ -640,7 +711,7 @@ func TestSourcePathDataSendSourceForcedAuxDualStack(t *testing.T) {
 	v4 := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
 	v6 := epAddr{ap: netip.MustParseAddrPort("[2001:db8::1]:41641")}
 
-	if !envknobSrcSelEnable() {
+	if !sourcePathEnabled() {
 		t.Fatalf("TS_EXPERIMENTAL_SRCSEL_ENABLE was not enabled")
 	}
 	if got := envknobSrcSelAuxSockets(); got != 1 {
@@ -972,7 +1043,7 @@ func TestSourcePathDataSendSourceNonDirectGuardDualStack(t *testing.T) {
 }
 
 func TestSourcePathRebindDisabledClosesAuxAndClearsState(t *testing.T) {
-	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "false")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "true")
@@ -1639,6 +1710,7 @@ func TestSourcePathAutomaticAuxDualNodeRuntime(t *testing.T) {
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "true")
+			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "false")
 			// On loopback the real primary RTT is sub-millisecond, far below
 			// the seeded 1ms aux samples. Disable the primary-baseline gate
 			// so this test exercises automatic-mode selection logic, not
@@ -1649,6 +1721,7 @@ func TestSourcePathAutomaticAuxDualNodeRuntime(t *testing.T) {
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
+				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT", "")
 			})
 

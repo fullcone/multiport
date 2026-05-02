@@ -16,10 +16,11 @@ import (
 	"github.com/tailscale/wireguard-go/conn"
 	"tailscale.com/envknob"
 	"tailscale.com/tstime/mono"
+	"tailscale.com/types/opt"
 )
 
 var (
-	envknobSrcSelEnable              = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_ENABLE")
+	envknobSrcSelEnable              = envknob.RegisterOptBool("TS_EXPERIMENTAL_SRCSEL_ENABLE")
 	envknobSrcSelAuxSockets          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS")
 	envknobSrcSelForceDataSource     = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE")
 	envknobSrcSelAutoDataSource      = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE")
@@ -29,7 +30,7 @@ var (
 	envknobSrcSelMaxSamples          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_SAMPLES")
 	envknobSrcSelMaxOutcomes         = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_OUTCOMES")
 	envknobSrcSelAuxBeatThresholdPct = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT")
-	envknobSrcSelDualSend            = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND")
+	envknobSrcSelDualSend            = envknob.RegisterOptBool("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND")
 	envknobSrcSelDualSendAuxDrop     = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_AUX_DROP_STREAK")
 	envknobSrcSelDualSendRecoveryS   = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_RECOVERY_S")
 	envknobSrcSelDualSendMaxSkewMS   = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_MAX_SKEW_MS")
@@ -53,11 +54,25 @@ var (
 	envknobSrcSelFlowMax             = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_FLOW_MAX")
 )
 
+func sourcePathOptBoolDefaultTrue(v opt.Bool) bool {
+	if b, ok := v.Get(); ok {
+		return b
+	}
+	return true
+}
+
+func sourcePathEnabled() bool {
+	return sourcePathOptBoolDefaultTrue(envknobSrcSelEnable())
+}
+
 func sourcePathAuxSocketCount() int {
-	if !envknobSrcSelEnable() {
+	if !sourcePathEnabled() {
 		return 0
 	}
-	n := envknobSrcSelAuxSockets()
+	n, ok := envknob.LookupInt("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS")
+	if !ok {
+		return 1
+	}
 	if n < 0 {
 		return 0
 	}
@@ -152,7 +167,10 @@ func sourcePathMultiMetricEnabled() bool {
 }
 
 func sourcePathProbeIntervalValue() time.Duration {
-	n := envknobSrcSelProbeIntervalMS()
+	n, ok := envknob.LookupInt("TS_EXPERIMENTAL_SRCSEL_PROBE_INTERVAL_MS")
+	if !ok {
+		return sourcePathRealtimeProbeEvery
+	}
 	if n == 0 && sourcePathProfileMode() == "realtime" {
 		return sourcePathRealtimeProbeEvery
 	}
@@ -245,7 +263,7 @@ func sourcePathScoreWeightsValue() sourcePathScoreWeights {
 }
 
 func sourcePathDualSendEnabled() bool {
-	return envknobSrcSelDualSend() && sourcePathAuxSocketCount() > 0
+	return sourcePathOptBoolDefaultTrue(envknobSrcSelDualSend()) && sourcePathAuxSocketCount() > 0
 }
 
 func sourcePathDualSendAuxDropStreakValue() int {
