@@ -528,11 +528,10 @@ prerequisite for dual-send already holds.
 - **Probe gate strictness.** Today's `sourcePathMinSamplesForUse=3`
   + 10 % beat threshold gate aux selection (Phase 19/20). For
   dual-send these gates are strictly conservative — duplicate packets
-  on a "bad" aux waste bandwidth but do not corrupt anything. v1
-  keeps the existing gate (only fan-out when scorer says aux is
-  worth it). v2 could relax to "aux bound and recently-pong" without
-  the 10 % threshold, accepting more bandwidth in exchange for more
-  redundancy coverage.
+  on a "bad" aux waste bandwidth but do not corrupt anything. Fixed
+  dual-send therefore fans out when aux is bound even before the scorer
+  has enough probe samples; probe data still feeds skew gating and
+  aux-demotion once available.
 - **Interaction with Phase 24 multi-metric scorer.** When Phase 24
   ships, the dual-send "should I also send on aux" decision should
   use the multi-metric score (jitter/loss-aware), not the Phase 20

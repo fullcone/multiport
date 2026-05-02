@@ -1748,6 +1748,33 @@ func TestSourcePathDualSendSendsPrimaryAndAux(t *testing.T) {
 	}
 }
 
+func TestSourcePathDualSendUsesBoundAuxWithoutProbeSample(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 23
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	want := c.sourcePath.aux4.rxMeta()
+	got, ok := c.sourcePathDualSendCandidate(dst)
+	if !ok {
+		t.Fatal("sourcePathDualSendCandidate rejected bound aux without probe sample")
+	}
+	if got != want {
+		t.Fatalf("dual-send source = %+v, want %+v", got, want)
+	}
+}
+
 func TestSourcePathDualSendIgnoresPrimaryBeatGate(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")

@@ -510,28 +510,33 @@ func (c *Conn) sourcePathDualSendCandidate(dst epAddr) (sourceRxMeta, bool) {
 	}
 
 	now := mono.Now()
+	// Fixed dual-send is redundancy-first: a bound aux socket is usable even
+	// before the probe scorer has accumulated enough samples to rank it.
+	source := sources[0]
+	var haveScore bool
 	c.mu.Lock()
 	score, ok := c.sourceProbes.bestCandidateLocked(dst, sources, now, 0)
 	c.mu.Unlock()
-	if !ok {
-		return sourceRxMeta{}, false
+	if ok {
+		source = score.source
+		haveScore = true
 	}
 
-	if maxSkew := sourcePathDualSendMaxSkewValue(); maxSkew > 0 {
+	if maxSkew := sourcePathDualSendMaxSkewValue(); haveScore && maxSkew > 0 {
 		if primaryRTT := c.primaryRTTForDst(dst); primaryRTT > 0 && absDuration(score.latency-primaryRTT) >= maxSkew {
 			metricSourcePathDualSendSkippedSkew.Add(1)
 			return sourceRxMeta{}, false
 		}
 	}
 
-	key := sourcePathDualSendKey{dst: dst, source: score.source}
+	key := sourcePathDualSendKey{dst: dst, source: source}
 	c.mu.Lock()
 	demoted := c.sourceProbes.dualSendDemotedLocked(key, now)
 	c.mu.Unlock()
 	if demoted {
 		return sourceRxMeta{}, false
 	}
-	return score.source, true
+	return source, true
 }
 
 func (c *Conn) startSourcePathProbeLoop() {

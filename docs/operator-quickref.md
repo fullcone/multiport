@@ -8,15 +8,17 @@ For full deployment from scratch, see
 
 ---
 
-## srcsel core (Phase 1-20)
+## srcsel core
 
-Always-on data-plane multi-source UDP. Three modes:
+Always-on data-plane multi-source UDP. Current production default is fixed
+dual-send redundancy.
 
 | Mode | Env | When to use |
 |---|---|---|
 | `baseline` | `TS_EXPERIMENTAL_SRCSEL_*` unset | Disable srcsel entirely. Behavior identical to stock Tailscale. |
 | `force` | `TS_EXPERIMENTAL_SRCSEL_ENABLE=true`<br>`TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=1`<br>`TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE=aux` | **Diagnostic only** — every data send goes through aux socket. Use to measure aux-side reachability and reproduce W7 row-3 blackhole behavior. |
-| `auto` | `TS_EXPERIMENTAL_SRCSEL_ENABLE=true`<br>`TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=1`<br>`TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE=true` | **Production**. Phase 19 TTL/min-samples scorer + Phase 20 primary-baseline gate decide aux vs primary per-(dst, source); falls back to primary on insufficient signal or worse aux RTT. |
+| `dual-send` | `TS_EXPERIMENTAL_SRCSEL_ENABLE=true`<br>`TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=1`<br>`TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY=dual-send`<br>`TS_EXPERIMENTAL_SRCSEL_DUAL_SEND=true` | **Production**. Every eligible direct data send goes out primary + aux; receiver-side WireGuard replay filtering drops the later duplicate. |
+| `auto` | `TS_EXPERIMENTAL_SRCSEL_ENABLE=true`<br>`TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=1`<br>`TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE=true` | Legacy adaptive selection. Phase 19 TTL/min-samples scorer + Phase 20 primary-baseline gate decide aux vs primary per-(dst, source); falls back to primary on insufficient signal or worse aux RTT. |
 
 ---
 
@@ -108,10 +110,11 @@ magicsock_direct_vs_relay_hold_rejected      # cross-category swap blocked by ho
 ### Scenario 1 — multi-public-IP rotating server (Phase 21 only)
 
 ```bash
-# Server side (also enable srcsel auto for the data plane)
+# Server side (also enable fixed dual-send for the data plane)
 export TS_EXPERIMENTAL_SRCSEL_ENABLE=true
 export TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=1
-export TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE=true
+export TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY=dual-send
+export TS_EXPERIMENTAL_SRCSEL_DUAL_SEND=true
 
 export TS_EXPERIMENTAL_EXTRA_ENDPOINTS_FILE=/etc/tailscaled/extra-endpoints.json
 # Maintain extra-endpoints.json with the live front-door pool;
@@ -127,7 +130,8 @@ pool of public IP:port DNATs to a single tailscaled.
 # Client side
 export TS_EXPERIMENTAL_SRCSEL_ENABLE=true
 export TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=1
-export TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE=true
+export TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY=dual-send
+export TS_EXPERIMENTAL_SRCSEL_DUAL_SEND=true
 
 export TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE=true
 # Optional, more responsive:
@@ -155,26 +159,28 @@ Phase 22).
 This **subsumes** Phase 22 v2: there is no direct path to compare
 against, so the gate is moot.
 
-### Scenario 4 — combined (server side does Phase 21 + auto srcsel)
+### Scenario 4 — combined (server side does Phase 21 + fixed dual-send)
 
 ```bash
 # Server side
 export TS_EXPERIMENTAL_SRCSEL_ENABLE=true
 export TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=1
-export TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE=true
+export TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY=dual-send
+export TS_EXPERIMENTAL_SRCSEL_DUAL_SEND=true
 export TS_EXPERIMENTAL_EXTRA_ENDPOINTS_FILE=/etc/tailscaled/extra-endpoints.json
 
-# Client side: srcsel auto + Phase 22 active comparison
+# Client side: fixed dual-send + Phase 22 active comparison
 export TS_EXPERIMENTAL_SRCSEL_ENABLE=true
 export TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=1
-export TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE=true
+export TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY=dual-send
+export TS_EXPERIMENTAL_SRCSEL_DUAL_SEND=true
 export TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE=true
 ```
 
 Recommended for production deployments where:
 - The server has multiple public IPs (Phase 21 gives clients all entry options),
 - The client may be on a long-haul path where a peer-relay shortcut exists (Phase 22 picks it when measurably better),
-- srcsel auto handles the per-(dst, source) data-plane source-socket selection inside each candidate path.
+- fixed dual-send sends each eligible direct packet on primary and aux inside each candidate path.
 
 ---
 
