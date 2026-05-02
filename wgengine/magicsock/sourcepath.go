@@ -22,6 +22,10 @@ import (
 )
 
 const (
+	sourcePathDataStrategyDualSend     = "dual-send"
+	sourcePathDataStrategySingleSource = "single-source"
+	sourcePathDataStrategyActiveBackup = "active-backup"
+
 	// sourcePathProbeHistoryLimit bounds the global sample buffer. A FIFO
 	// ring at this size meant a per-Conn ceiling regardless of peer count,
 	// so with N peers each pair was only guaranteed limit/N samples on

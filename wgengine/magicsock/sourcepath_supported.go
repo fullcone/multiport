@@ -22,6 +22,7 @@ import (
 var (
 	envknobSrcSelEnable              = envknob.RegisterOptBool("TS_EXPERIMENTAL_SRCSEL_ENABLE")
 	envknobSrcSelAuxSockets          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS")
+	envknobSrcSelDataStrategy        = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY")
 	envknobSrcSelForceDataSource     = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE")
 	envknobSrcSelAutoDataSource      = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE")
 	envknobSrcSelMaxPeers            = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PEERS")
@@ -63,6 +64,23 @@ func sourcePathOptBoolDefaultTrue(v opt.Bool) bool {
 
 func sourcePathEnabled() bool {
 	return sourcePathOptBoolDefaultTrue(envknobSrcSelEnable())
+}
+
+func sourcePathDataStrategyMode() string {
+	switch strings.ToLower(strings.TrimSpace(envknobSrcSelDataStrategy())) {
+	case "", "dual", "dual-send", "dual_send", "redundant":
+		return sourcePathDataStrategyDualSend
+	case "single", "single-source", "single_source", "auto", "flow", "flow-aware", "flow_aware", "rr", "round-robin", "round_robin":
+		return sourcePathDataStrategySingleSource
+	case "active-backup", "active_backup", "backup", "failover":
+		return sourcePathDataStrategyActiveBackup
+	default:
+		return sourcePathDataStrategyDualSend
+	}
+}
+
+func sourcePathSingleSourceStrategyEnabled() bool {
+	return sourcePathDataStrategyMode() == sourcePathDataStrategySingleSource
 }
 
 func sourcePathAuxSocketCount() int {
@@ -263,7 +281,9 @@ func sourcePathScoreWeightsValue() sourcePathScoreWeights {
 }
 
 func sourcePathDualSendEnabled() bool {
-	return sourcePathOptBoolDefaultTrue(envknobSrcSelDualSend()) && sourcePathAuxSocketCount() > 0
+	return sourcePathDataStrategyMode() == sourcePathDataStrategyDualSend &&
+		sourcePathOptBoolDefaultTrue(envknobSrcSelDualSend()) &&
+		sourcePathAuxSocketCount() > 0
 }
 
 func sourcePathDualSendAuxDropStreakValue() int {
@@ -291,7 +311,9 @@ func sourcePathDualSendMaxSkewValue() time.Duration {
 }
 
 func sourcePathActiveBackupEnabled() bool {
-	return envknobSrcSelActiveBackup() && sourcePathAuxSocketCount() > 0
+	return sourcePathDataStrategyMode() == sourcePathDataStrategyActiveBackup &&
+		envknobSrcSelActiveBackup() &&
+		sourcePathAuxSocketCount() > 0
 }
 
 func sourcePathActiveBackupPrimaryFailStreakValue() int {
@@ -322,7 +344,9 @@ func sourcePathActiveBackupRecoveryPongsValue() int {
 }
 
 func sourcePathFlowAwareEnabled() bool {
-	return envknobSrcSelFlowAware() && sourcePathAuxSocketCount() > 0
+	return sourcePathSingleSourceStrategyEnabled() &&
+		envknobSrcSelFlowAware() &&
+		sourcePathAuxSocketCount() > 0
 }
 
 func sourcePathBalancePolicyValue() string {
@@ -417,9 +441,18 @@ func (c *Conn) sourcePathDataSendSource(dst epAddr) sourceRxMeta {
 	if sourcePathAuxSocketCount() == 0 || !dst.isDirect() {
 		return primarySourceRxMeta
 	}
-	if source, ok := c.sourcePathActiveBackupCandidate(dst, mono.Now()); ok {
-		return source
+
+	switch sourcePathDataStrategyMode() {
+	case sourcePathDataStrategyActiveBackup:
+		if source, ok := c.sourcePathActiveBackupCandidate(dst, mono.Now()); ok {
+			return source
+		}
+		return primarySourceRxMeta
+	case sourcePathDataStrategySingleSource:
+	default:
+		return primarySourceRxMeta
 	}
+
 	if forceMode := sourcePathForcedDataSourceMode(); forceMode != "" {
 		if !sourcePathForcedDataSourceModeAllowsAddr(forceMode, dst.ap.Addr()) {
 			return primarySourceRxMeta

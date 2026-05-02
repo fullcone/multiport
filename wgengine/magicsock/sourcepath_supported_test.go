@@ -193,12 +193,14 @@ func TestSourcePathProbeManagerOutcomeHardCap(t *testing.T) {
 func TestSourcePathActiveBackupFailoverAndRecovery(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "active-backup")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ACTIVE_BACKUP", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PRIMARY_FAIL_STREAK", "2")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FAILOVER_RECOVERY_PONGS", "2")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ACTIVE_BACKUP", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PRIMARY_FAIL_STREAK", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FAILOVER_RECOVERY_PONGS", "")
@@ -258,11 +260,13 @@ func TestSourcePathActiveBackupFailoverAndRecovery(t *testing.T) {
 func TestSourcePathActiveBackupDropsStaleFailoverSource(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "active-backup")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ACTIVE_BACKUP", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PRIMARY_FAIL_STREAK", "1")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ACTIVE_BACKUP", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PRIMARY_FAIL_STREAK", "")
 	})
@@ -304,12 +308,14 @@ func TestSourcePathActiveBackupDropsStaleFailoverSource(t *testing.T) {
 func TestSourcePathFlowAwareRRStickyAndIdle(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "rr")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_IDLE_S", "1")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_IDLE_S", "")
@@ -343,11 +349,13 @@ func TestSourcePathFlowAwareRRStickyAndIdle(t *testing.T) {
 func TestSourcePathFlowAwareRRIndependentPerDestination(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "rr")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "")
 	})
@@ -382,11 +390,13 @@ func TestSourcePathFlowAwareRRIndependentPerDestination(t *testing.T) {
 func TestSourcePathFlowAwareDropsStaleAssignedSource(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "rr")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "")
 	})
@@ -426,12 +436,14 @@ func TestSourcePathFlowAwareDropsStaleAssignedSource(t *testing.T) {
 func TestSourcePathFlowAwareHardCap(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "rr")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_MAX", "1")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_MAX", "")
@@ -460,11 +472,13 @@ func TestSourcePathFlowAwareHardCap(t *testing.T) {
 func TestSourcePathFlowAwareBatchFallbackStripesTransportPackets(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "rr")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "")
 	})
@@ -649,10 +663,12 @@ func TestSourcePathAuxSocketCountBoundaryDualStack(t *testing.T) {
 func TestSourcePathDualSendDefaultAndOptOut(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
 	})
 
@@ -666,6 +682,20 @@ func TestSourcePathDualSendDefaultAndOptOut(t *testing.T) {
 		t.Fatal("dual-send disabled by default")
 	}
 
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
+	if sourcePathDualSendEnabled() {
+		t.Fatal("dual-send enabled in single-source strategy mode")
+	}
+	if !sourcePathSingleSourceStrategyEnabled() {
+		t.Fatal("single-source strategy mode was not enabled")
+	}
+
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "active-backup")
+	if sourcePathDualSendEnabled() {
+		t.Fatal("dual-send enabled in active-backup strategy mode")
+	}
+
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "false")
 	if sourcePathDualSendEnabled() {
 		t.Fatal("dual-send remained enabled with TS_EXPERIMENTAL_SRCSEL_DUAL_SEND=false")
@@ -687,14 +717,60 @@ func TestSourcePathDualSendDefaultAndOptOut(t *testing.T) {
 	}
 }
 
+func TestSourcePathDataStrategyDefaultSuppressesSingleSourceControls(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "rr")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 8
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
+	seedSourcePathSamples(t, &c, dst, c.sourcePath.aux4.rxMeta())
+
+	if got := sourcePathDataStrategyMode(); got != sourcePathDataStrategyDualSend {
+		t.Fatalf("default data strategy = %q, want %q", got, sourcePathDataStrategyDualSend)
+	}
+	if sourcePathSingleSourceStrategyEnabled() {
+		t.Fatal("single-source strategy enabled by default")
+	}
+	if sourcePathFlowAwareEnabled() {
+		t.Fatal("flow-aware single-source mode enabled by default")
+	}
+	if got := c.sourcePathDataSendSource(dst); !got.isPrimary() {
+		t.Fatalf("default strategy honored force/auto source = %+v, want primary", got)
+	}
+	if got := c.sourcePathDataSendSourceForBatch(dst, [][]byte{sourcePathTestTransportPacket(123, 1)}, 0); !got.isPrimary() {
+		t.Fatalf("default strategy honored flow-aware source = %+v, want primary", got)
+	}
+}
+
 func TestSourcePathDataSendSourceForcedAuxDualStack(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	})
@@ -859,11 +935,13 @@ func TestSourcePathBestCandidateObserveOnlyDoesNotSelectDataSource(t *testing.T)
 func TestSourcePathDataSendSourceAutomaticCandidateDualStack(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "true")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	})
@@ -958,11 +1036,13 @@ func TestSourcePathDataSendSourceAutomaticCandidateDualStack(t *testing.T) {
 func TestSourcePathDataSendSourceNonDirectGuardDualStack(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "true")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	})
@@ -1132,11 +1212,13 @@ func TestSourcePathRebindDisabledClosesAuxAndClearsState(t *testing.T) {
 func TestSendUDPBatchFromSourceAuxDualStackLoopback(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	})
@@ -1225,11 +1307,13 @@ func TestSendUDPBatchFromSourceAuxDualStackLoopback(t *testing.T) {
 func TestLazyEndpointSendIgnoresForcedAuxDataSourceDualStack(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	})
@@ -1353,11 +1437,13 @@ func TestSourcePathWriteWireGuardBatchToRejectsStaleAuxSource(t *testing.T) {
 func TestSendUDPBatchFromSourceAuxErrorDoesNotRebind(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	})
@@ -1655,11 +1741,13 @@ func TestSourcePathForcedAuxDualNodeRuntime(t *testing.T) {
 			}
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 			t.Cleanup(func() {
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 			})
@@ -1768,6 +1856,7 @@ func TestSourcePathAutomaticAuxDualNodeRuntime(t *testing.T) {
 			}
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "true")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "false")
@@ -1779,6 +1868,7 @@ func TestSourcePathAutomaticAuxDualNodeRuntime(t *testing.T) {
 			t.Cleanup(func() {
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")

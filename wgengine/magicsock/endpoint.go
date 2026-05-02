@@ -1159,7 +1159,7 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 			if res.primaryErr != nil && res.auxErr != nil && isBadEndpointErr(res.primaryErr) {
 				de.noteBadEndpoint(udpAddr)
 			}
-		} else {
+		} else if sourcePathSingleSourceStrategyEnabled() {
 			source := de.c.sourcePathDataSendSourceForBatch(udpAddr, buffs, offset)
 			usingSourcePathAux := !source.isPrimary()
 			if usingSourcePathAux {
@@ -1196,6 +1196,18 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 			// usable, clear the endpoint statistics so that the next send will
 			// re-evaluate the best endpoint.
 			if err != nil && usedPrimarySend && isBadEndpointErr(err) {
+				de.noteBadEndpoint(udpAddr)
+			}
+		} else {
+			_, err = de.c.sendUDPBatch(udpAddr, buffs, offset)
+			if err == nil {
+				de.c.noteSourcePathPrimarySendSuccess(udpAddr)
+			}
+
+			// If the error is known to indicate that the endpoint is no longer
+			// usable, clear the endpoint statistics so that the next send will
+			// re-evaluate the best endpoint.
+			if err != nil && isBadEndpointErr(err) {
 				de.noteBadEndpoint(udpAddr)
 			}
 		}
