@@ -1511,6 +1511,66 @@ func TestSourcePathDualSendSendsPrimaryAndAux(t *testing.T) {
 	}
 }
 
+func TestSourcePathDualSendIgnoresPrimaryBeatGate(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MULTI_METRIC", "")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROFILE", "")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MULTI_METRIC", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROFILE", "")
+	})
+
+	var c Conn
+	c.peerMap = newPeerMap()
+	c.sourcePath.generation = 26
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	aux := c.sourcePath.aux4.rxMeta()
+	now := mono.Now()
+	c.mu.Lock()
+	for i := 0; i < sourcePathMinSamplesForUse; i++ {
+		c.sourceProbes.samples = append(c.sourceProbes.samples, sourcePathProbeSample{
+			dst:     dst,
+			source:  aux,
+			latency: 20 * time.Millisecond,
+			at:      now.Add(-time.Duration(i) * time.Millisecond),
+		})
+	}
+	c.mu.Unlock()
+
+	peerKey := key.NewNode().Public()
+	state := &endpointState{}
+	state.addPongReplyLocked(pongReply{latency: 5 * time.Millisecond, pongAt: now})
+	de := &endpoint{
+		c:             &c,
+		publicKey:     peerKey,
+		endpointState: map[netip.AddrPort]*endpointState{dst.ap: state},
+	}
+	c.mu.Lock()
+	c.peerMap.byNodeKey[peerKey] = newPeerInfo(de)
+	c.peerMap.setNodeKeyForEpAddr(dst, peerKey)
+	c.mu.Unlock()
+
+	if _, ok := c.sourcePathBestCandidate(dst); ok {
+		t.Fatal("auto source-path candidate selected aux that does not beat primary")
+	}
+	source, ok := c.sourcePathDualSendCandidate(dst)
+	if !ok {
+		t.Fatal("dual-send candidate rejected aux solely because primary was faster")
+	}
+	if source != aux {
+		t.Fatalf("dual-send source = %+v, want %+v", source, aux)
+	}
+}
+
 func TestSourcePathDualSendAuxErrorDemotesWithoutInvalidatingSamples(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")

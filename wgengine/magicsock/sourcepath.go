@@ -499,7 +499,15 @@ func (c *Conn) sourcePathDualSendCandidate(dst epAddr) (sourceRxMeta, bool) {
 		return sourceRxMeta{}, false
 	}
 
-	score, ok := c.sourcePathBestCandidate(dst)
+	sources := c.sourcePathProbeSources(dst.ap.Addr().Is4())
+	if len(sources) == 0 {
+		return sourceRxMeta{}, false
+	}
+
+	now := mono.Now()
+	c.mu.Lock()
+	score, ok := c.sourceProbes.bestCandidateLocked(dst, sources, now, 0)
+	c.mu.Unlock()
 	if !ok {
 		return sourceRxMeta{}, false
 	}
@@ -512,7 +520,6 @@ func (c *Conn) sourcePathDualSendCandidate(dst epAddr) (sourceRxMeta, bool) {
 	}
 
 	key := sourcePathDualSendKey{dst: dst, source: score.source}
-	now := mono.Now()
 	c.mu.Lock()
 	demoted := c.sourceProbes.dualSendDemotedLocked(key, now)
 	c.mu.Unlock()
