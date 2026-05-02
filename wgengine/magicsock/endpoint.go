@@ -93,6 +93,7 @@ type endpoint struct {
 	bestAddrAt            mono.Time   // time best address re-confirmed
 	trustBestAddrUntil    mono.Time   // time when bestAddr expires
 	sourcePathRemoteSlots [2]epAddr   // first two direct remote source endpoints observed for srcsel metrics
+	sourcePathRemoteSeen  [2]mono.Time
 	sourcePathPeerAware   map[epAddr]*sourcePathPeerAwareEndpoint
 	sentPing              map[stun.TxID]sentPing
 	endpointState         map[netip.AddrPort]*endpointState // netip.AddrPort type for key (instead of [epAddr]) as [endpointState] is irrelevant for Geneve-encapsulated paths
@@ -623,12 +624,19 @@ func (de *endpoint) dualEndpointAddrsForSendLocked(now mono.Time) (addrs []epAdd
 // already opened state from both source ports to our primary port.
 //
 // de.mu must be held.
-func (de *endpoint) dualSendObservedEndpointAddrsForSendLocked(primary epAddr) (addrs []epAddr) {
+func (de *endpoint) dualSendObservedEndpointAddrsForSendLocked(primary epAddr, now mono.Time) (addrs []epAddr) {
 	if !primary.isDirect() {
 		return nil
 	}
-	for _, slot := range de.sourcePathRemoteSlots {
-		if slot.isDirect() && slot != primary {
+	for i, slot := range de.sourcePathRemoteSlots {
+		if !slot.isDirect() || slot == primary {
+			continue
+		}
+		seen := de.sourcePathRemoteSeen[i]
+		if seen.IsZero() || now.Sub(seen) > sessionActiveTimeout {
+			continue
+		}
+		if st, ok := de.endpointState[slot.ap]; !ok || !st.shouldDeleteLocked() {
 			return []epAddr{primary, slot}
 		}
 	}
@@ -643,6 +651,12 @@ func (de *endpoint) deleteEndpointLocked(why string, ep netip.AddrPort) {
 	})
 	delete(de.endpointState, ep)
 	asEpAddr := epAddr{ap: ep}
+	for i, slot := range de.sourcePathRemoteSlots {
+		if slot == asEpAddr {
+			de.sourcePathRemoteSlots[i] = epAddr{}
+			de.sourcePathRemoteSeen[i] = 0
+		}
+	}
 	if de.bestAddr.epAddr == asEpAddr {
 		de.debugUpdates.Add(EndpointChange{
 			When: time.Now(),
@@ -1245,7 +1259,7 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 	} else {
 		udpAddr, derpAddr, startWGPing = de.addrForSendLocked(now)
 		if sourcePathDualSendEnabled() {
-			dualEndpointAddrs = de.dualSendObservedEndpointAddrsForSendLocked(udpAddr)
+			dualEndpointAddrs = de.dualSendObservedEndpointAddrsForSendLocked(udpAddr, now)
 		}
 	}
 
@@ -2457,6 +2471,9 @@ func (de *endpoint) resetLocked() {
 	de.lastSendExt = 0
 	de.lastFullPing = 0
 	de.clearBestAddrLocked()
+	de.sourcePathRemoteSlots = [2]epAddr{}
+	de.sourcePathRemoteSeen = [2]mono.Time{}
+	de.sourcePathPeerAware = nil
 	for _, es := range de.endpointState {
 		es.lastPing = 0
 	}

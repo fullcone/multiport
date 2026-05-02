@@ -909,6 +909,20 @@ func TestSourcePathPeerAwareEndpointReusedPerRemoteSource(t *testing.T) {
 	}
 }
 
+func TestSourcePathPeerAwareEndpointCacheEvictsButKeepsPeerAware(t *testing.T) {
+	ep := &endpoint{}
+	for i := 0; i < sourcePathPeerAwareCacheLimit+3; i++ {
+		src := epAddr{ap: netip.AddrPortFrom(netip.MustParseAddr("192.0.2.1"), uint16(40000+i))}
+		wrapper := ep.sourcePathPeerAwareEndpoint(src)
+		if _, ok := wrapper.(interface{ FromPeer([32]byte) }); !ok {
+			t.Fatalf("wrapper for source %d is %T, want peer-aware endpoint", i, wrapper)
+		}
+		if len(ep.sourcePathPeerAware) > sourcePathPeerAwareCacheLimit {
+			t.Fatalf("sourcePathPeerAware size = %d, want <= %d", len(ep.sourcePathPeerAware), sourcePathPeerAwareCacheLimit)
+		}
+	}
+}
+
 func TestSourcePathBestCandidateRequiresCurrentProbeSources(t *testing.T) {
 	var c Conn
 	now := mono.Now()

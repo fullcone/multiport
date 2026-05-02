@@ -863,12 +863,14 @@ func TestSourcePathDualSendUsesObservedRemoteEndpoints(t *testing.T) {
 
 	primary := epAddr{ap: udpConnAddrPort(t, primaryDst.LocalAddr())}
 	secondary := epAddr{ap: udpConnAddrPort(t, secondaryDst.LocalAddr())}
+	now := mono.Now()
 	de := &endpoint{
 		c:                     &c,
 		heartbeatDisabled:     true,
 		bestAddr:              addrQuality{epAddr: primary},
-		trustBestAddrUntil:    mono.Now().Add(time.Hour),
+		trustBestAddrUntil:    now.Add(time.Hour),
 		sourcePathRemoteSlots: [2]epAddr{primary, secondary},
+		sourcePathRemoteSeen:  [2]mono.Time{now, now},
 	}
 
 	payload := []byte("source-path-dual-send-observed-endpoints")
@@ -901,6 +903,42 @@ func TestSourcePathDualSendUsesObservedRemoteEndpoints(t *testing.T) {
 		if src.Port() != wantPrimarySrc.Port() {
 			t.Fatalf("%s source port = %d, want primary port %d", name, src.Port(), wantPrimarySrc.Port())
 		}
+	}
+}
+
+func TestSourcePathDualSendObservedRemoteEndpointsSkipStaleAlternate(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	})
+
+	now := mono.Now()
+	primary := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
+	fresh := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:51641")}
+	stale := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:61641")}
+	de := &endpoint{
+		endpointState: map[netip.AddrPort]*endpointState{
+			fresh.ap: &endpointState{},
+			stale.ap: &endpointState{},
+		},
+		sourcePathRemoteSlots: [2]epAddr{primary, stale},
+		sourcePathRemoteSeen:  [2]mono.Time{now, now.Add(-2 * sessionActiveTimeout)},
+	}
+	de.mu.Lock()
+	if got := de.dualSendObservedEndpointAddrsForSendLocked(primary, now); got != nil {
+		de.mu.Unlock()
+		t.Fatalf("observed dual endpoints with stale alternate = %+v, want nil", got)
+	}
+	de.sourcePathRemoteSlots[1] = fresh
+	de.sourcePathRemoteSeen[1] = now
+	got := de.dualSendObservedEndpointAddrsForSendLocked(primary, now)
+	de.mu.Unlock()
+	if len(got) != 2 || got[0] != primary || got[1] != fresh {
+		t.Fatalf("observed dual endpoints = %+v, want primary/fresh", got)
 	}
 }
 

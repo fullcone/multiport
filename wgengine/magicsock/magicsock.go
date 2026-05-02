@@ -2143,6 +2143,8 @@ const (
 	sourcePathRemotePathOther
 )
 
+const sourcePathPeerAwareCacheLimit = 32
+
 func classifySourcePathRemoteEndpoint(ep *endpoint, src epAddr) sourcePathRemoteEndpointKind {
 	if ep == nil || !src.isDirect() {
 		return sourcePathRemoteUnknown
@@ -2163,10 +2165,12 @@ func classifySourcePathRemoteSlot(ep *endpoint, src epAddr) sourcePathRemoteSlot
 	if ep == nil || !src.isDirect() {
 		return sourcePathRemotePathUnknown
 	}
+	now := mono.Now()
 	ep.mu.Lock()
 	defer ep.mu.Unlock()
 	for i, slot := range ep.sourcePathRemoteSlots {
 		if slot == src {
+			ep.sourcePathRemoteSeen[i] = now
 			if i == 0 {
 				return sourcePathRemotePath0
 			}
@@ -2176,6 +2180,7 @@ func classifySourcePathRemoteSlot(ep *endpoint, src epAddr) sourcePathRemoteSlot
 	for i, slot := range ep.sourcePathRemoteSlots {
 		if !slot.ap.IsValid() {
 			ep.sourcePathRemoteSlots[i] = src
+			ep.sourcePathRemoteSeen[i] = now
 			if i == 0 {
 				return sourcePathRemotePath0
 			}
@@ -2200,6 +2205,12 @@ func (ep *endpoint) sourcePathPeerAwareEndpoint(src epAddr) conn.Endpoint {
 	}
 	if ep.sourcePathPeerAware == nil {
 		ep.sourcePathPeerAware = make(map[epAddr]*sourcePathPeerAwareEndpoint, 2)
+	}
+	if len(ep.sourcePathPeerAware) >= sourcePathPeerAwareCacheLimit {
+		for stale := range ep.sourcePathPeerAware {
+			delete(ep.sourcePathPeerAware, stale)
+			break
+		}
 	}
 	wrapped := &sourcePathPeerAwareEndpoint{endpoint: ep, src: src}
 	ep.sourcePathPeerAware[src] = wrapped
