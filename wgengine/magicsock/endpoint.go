@@ -617,6 +617,24 @@ func (de *endpoint) dualEndpointAddrsForSendLocked(now mono.Time) (addrs []epAdd
 	return addrs, needPing
 }
 
+// dualSendObservedEndpointAddrsForSendLocked returns a primary destination and
+// one alternate peer source endpoint observed on receive. This makes fixed
+// dual-send NAT-friendly in the server-to-client direction: the peer has
+// already opened state from both source ports to our primary port.
+//
+// de.mu must be held.
+func (de *endpoint) dualSendObservedEndpointAddrsForSendLocked(primary epAddr) (addrs []epAddr) {
+	if !primary.isDirect() {
+		return nil
+	}
+	for _, slot := range de.sourcePathRemoteSlots {
+		if slot.isDirect() && slot != primary {
+			return []epAddr{primary, slot}
+		}
+	}
+	return nil
+}
+
 func (de *endpoint) deleteEndpointLocked(why string, ep netip.AddrPort) {
 	de.debugUpdates.Add(EndpointChange{
 		When: time.Now(),
@@ -1226,6 +1244,9 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 		}
 	} else {
 		udpAddr, derpAddr, startWGPing = de.addrForSendLocked(now)
+		if sourcePathDualSendEnabled() {
+			dualEndpointAddrs = de.dualSendObservedEndpointAddrsForSendLocked(udpAddr)
+		}
 	}
 
 	if de.isWireguardOnly {

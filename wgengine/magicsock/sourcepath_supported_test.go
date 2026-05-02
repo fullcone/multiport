@@ -834,6 +834,76 @@ func TestSourcePathDualEndpointStrategySendsTwoLowestLatencyEndpoints(t *testing
 	assertNoUDPConnPayload(t, dstSlow)
 }
 
+func TestSourcePathDualSendUsesObservedRemoteEndpoints(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	})
+
+	primaryDst := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	secondaryDst := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	primaryConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	auxConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+
+	var c Conn
+	c.sourcePath.generation = 29
+	c.pconn4.mu.Lock()
+	c.pconn4.setConnLocked(primaryConn, "udp4", 1)
+	c.pconn4.mu.Unlock()
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4.pconn.mu.Lock()
+	c.sourcePath.aux4.pconn.setConnLocked(auxConn, "udp4", 1)
+	c.sourcePath.aux4.pconn.mu.Unlock()
+	c.sourcePath.aux4Bound = true
+
+	primary := epAddr{ap: udpConnAddrPort(t, primaryDst.LocalAddr())}
+	secondary := epAddr{ap: udpConnAddrPort(t, secondaryDst.LocalAddr())}
+	de := &endpoint{
+		c:                     &c,
+		heartbeatDisabled:     true,
+		bestAddr:              addrQuality{epAddr: primary},
+		trustBestAddrUntil:    mono.Now().Add(time.Hour),
+		sourcePathRemoteSlots: [2]epAddr{primary, secondary},
+	}
+
+	payload := []byte("source-path-dual-send-observed-endpoints")
+	buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
+	copy(buf[packet.GeneveFixedHeaderLength:], payload)
+	before := metricSourcePathDualEndpointPackets.Value()
+	if err := c.Send([][]byte{buf}, de, packet.GeneveFixedHeaderLength); err != nil {
+		t.Fatalf("Conn.Send returned error: %v", err)
+	}
+	if got := metricSourcePathDualEndpointPackets.Value() - before; got != 1 {
+		t.Fatalf("dual-endpoint packets metric delta = %d, want 1", got)
+	}
+
+	wantPrimarySrc := udpConnAddrPort(t, primaryConn.LocalAddr())
+	for name, conn := range map[string]*net.UDPConn{
+		"primary":   primaryDst,
+		"secondary": secondaryDst,
+	} {
+		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, 128)
+		n, src, err := conn.ReadFromUDPAddrPort(got)
+		if err != nil {
+			t.Fatalf("%s ReadFromUDPAddrPort: %v", name, err)
+		}
+		if string(got[:n]) != string(payload) {
+			t.Fatalf("%s received payload %q, want %q", name, got[:n], payload)
+		}
+		if src.Port() != wantPrimarySrc.Port() {
+			t.Fatalf("%s source port = %d, want primary port %d", name, src.Port(), wantPrimarySrc.Port())
+		}
+	}
+}
+
 func TestSourcePathDualEndpointStrategyInvalidatesBadEndpoints(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "dual-endpoint")
