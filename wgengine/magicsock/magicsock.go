@@ -733,6 +733,7 @@ func NewConn(opts Options) (*Conn, error) {
 	// Phase 21: start the dynamic-multi-endpoint-advertise watcher. No-op
 	// when TS_EXPERIMENTAL_EXTRA_ENDPOINTS_FILE is unset.
 	c.startExtraEndpointsWatcher()
+	c.startSourcePathProbeLoop()
 
 	return c, nil
 }
@@ -4363,6 +4364,9 @@ var (
 	metricSourcePathAuxWireGuardRx           = clientmetric.NewCounter("magicsock_srcsel_aux_wireguard_rx")
 	metricSourcePathSendFailureInvalidated   = clientmetric.NewCounter("magicsock_srcsel_send_failure_invalidated_samples")
 	metricSourcePathPrimaryBeatRejected      = clientmetric.NewCounter("magicsock_srcsel_primary_beat_rejected")
+	metricSourcePathHardAvoidLatency         = clientmetric.NewCounter("magicsock_srcsel_hard_avoid_latency")
+	metricSourcePathHardAvoidJitter          = clientmetric.NewCounter("magicsock_srcsel_hard_avoid_jitter")
+	metricSourcePathHardAvoidLoss            = clientmetric.NewCounter("magicsock_srcsel_hard_avoid_loss")
 	metricSourcePathDualSendPackets          = clientmetric.NewCounter("magicsock_srcsel_dual_send_packets")
 	metricSourcePathDualSendPrimaryFailed    = clientmetric.NewCounter("magicsock_srcsel_dual_send_primary_failed")
 	metricSourcePathDualSendAuxFailed        = clientmetric.NewCounter("magicsock_srcsel_dual_send_aux_failed")

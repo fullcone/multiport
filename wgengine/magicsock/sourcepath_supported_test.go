@@ -88,6 +88,106 @@ func TestSourcePathProbeManagerPrimaryBaselineThresholdEnvClampedTo100(t *testin
 	}
 }
 
+func TestSourcePathProbeManagerMultiMetricPrefersLowJitter(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MULTI_METRIC", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_SCORE_WEIGHTS", "lat=0.1,jit=0.8,loss=0.1")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MULTI_METRIC", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_SCORE_WEIGHTS", "")
+	})
+
+	var pm sourcePathProbeManager
+	now := mono.Now()
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	jittery := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 5}
+	stable := sourceRxMeta{socketID: sourceIPv6SocketID, generation: 5}
+
+	for i, lat := range []time.Duration{1 * time.Millisecond, 20 * time.Millisecond, 39 * time.Millisecond} {
+		pm.samples = append(pm.samples, sourcePathProbeSample{
+			dst:     dst,
+			source:  jittery,
+			latency: lat,
+			at:      now.Add(-time.Duration(i+1) * time.Second),
+		})
+	}
+	for i := 0; i < sourcePathMinSamplesForUse; i++ {
+		pm.samples = append(pm.samples, sourcePathProbeSample{
+			dst:     dst,
+			source:  stable,
+			latency: 25 * time.Millisecond,
+			at:      now.Add(-time.Duration(i+1) * time.Second),
+		})
+	}
+
+	score, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{jittery, stable}, now, 0)
+	if !ok {
+		t.Fatal("expected multi-metric candidate")
+	}
+	if score.source != stable {
+		t.Fatalf("multi-metric selected source %+v, want stable source %+v", score.source, stable)
+	}
+	if score.jitter != 0 {
+		t.Fatalf("stable source jitter = %v, want 0", score.jitter)
+	}
+}
+
+func TestSourcePathProbeManagerMultiMetricHardAvoidLoss(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MULTI_METRIC", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_LOSS_MAX_PCT", "5")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MULTI_METRIC", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_LOSS_MAX_PCT", "")
+	})
+
+	var pm sourcePathProbeManager
+	now := mono.Now()
+	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 5}
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	for i := 0; i < sourcePathMinSamplesForUse; i++ {
+		pm.samples = append(pm.samples, sourcePathProbeSample{
+			dst:     dst,
+			source:  source,
+			latency: 10 * time.Millisecond,
+			at:      now.Add(-time.Duration(i+1) * time.Second),
+		})
+	}
+	for i := 0; i < 10; i++ {
+		pm.noteOutcomeLocked(dst, source, now.Add(-time.Duration(i)*time.Second), i < 1)
+	}
+
+	before := metricSourcePathHardAvoidLoss.Value()
+	if _, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now, 0); ok {
+		t.Fatal("candidate selected despite loss above hard-avoid threshold")
+	}
+	if delta := metricSourcePathHardAvoidLoss.Value() - before; delta != 1 {
+		t.Fatalf("hard-avoid-loss metric delta = %d, want 1", delta)
+	}
+}
+
+func TestSourcePathRealtimeProfileValues(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROFILE", "realtime")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROFILE", "") })
+
+	if !sourcePathMultiMetricEnabled() {
+		t.Fatal("realtime profile did not enable multi-metric scoring")
+	}
+	if got := sourcePathProbeIntervalValue(); got != sourcePathRealtimeProbeEvery {
+		t.Fatalf("realtime probe interval = %v, want %v", got, sourcePathRealtimeProbeEvery)
+	}
+	if got := sourcePathSampleTTLValue(); got != sourcePathRealtimeSampleTTL {
+		t.Fatalf("realtime sample TTL = %v, want %v", got, sourcePathRealtimeSampleTTL)
+	}
+}
+
+func TestSourcePathProbeIntervalFloor(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROBE_INTERVAL_MS", "1")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROBE_INTERVAL_MS", "") })
+
+	if got := sourcePathProbeIntervalValue(); got != sourcePathProbeIntervalFloor {
+		t.Fatalf("probe interval = %v, want floor %v", got, sourcePathProbeIntervalFloor)
+	}
+}
+
 func TestSourcePathAuxSocketCountBoundaryDualStack(t *testing.T) {
 	tests := []struct {
 		name    string

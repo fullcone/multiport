@@ -6,6 +6,7 @@ package magicsock
 import (
 	"errors"
 	"io"
+	"math"
 	"net/netip"
 	"sync/atomic"
 	"time"
@@ -54,6 +55,10 @@ const (
 	// since changed.
 	sourcePathSampleTTL = 60 * time.Second
 
+	// sourcePathRealtimeSampleTTL is the Phase 24 realtime profile freshness
+	// window used with the dedicated 1 Hz probe cadence.
+	sourcePathRealtimeSampleTTL = 10 * time.Second
+
 	// sourcePathMinSamplesForUse is the minimum number of TTL-fresh samples a
 	// (dst, source) pair must have before automatic source selection is
 	// allowed to use it. The gate keeps a single lucky probe from steering
@@ -75,6 +80,15 @@ const (
 	sourcePathDualSendAuxDropStreak = 5
 	sourcePathDualSendRecovery      = 30 * time.Second
 	sourcePathDualSendMaxSkew       = 100 * time.Millisecond
+
+	// Phase 24 multi-metric scorer defaults.
+	sourcePathProbeIntervalFloor = 200 * time.Millisecond
+	sourcePathRealtimeProbeEvery = time.Second
+	sourcePathLossWindow         = 30 * time.Second
+	sourcePathLatencyMax         = 300 * time.Millisecond
+	sourcePathJitterMax          = 50 * time.Millisecond
+	sourcePathLossMax            = 0.05
+	sourcePathScoreImprovePct    = 5
 )
 
 var (
@@ -117,6 +131,7 @@ func (m sourceRxMeta) isPrimary() bool {
 type sourcePathProbeManager struct {
 	pending                map[stun.TxID]sourcePathProbeTx
 	samples                []sourcePathProbeSample
+	outcomes               []sourcePathProbeOutcome
 	dualSendAuxFailStreak  map[sourcePathDualSendKey]int
 	dualSendDemotedAuxTill map[sourcePathDualSendKey]mono.Time
 }
@@ -145,11 +160,27 @@ type sourcePathProbeSample struct {
 	at       mono.Time
 }
 
+type sourcePathProbeOutcome struct {
+	dst    epAddr
+	source sourceRxMeta
+	at     mono.Time
+	lost   bool
+}
+
 type sourcePathCandidateScore struct {
 	source  sourceRxMeta
 	latency time.Duration
+	jitter  time.Duration
+	loss    float64
+	score   float64
 	samples int
 	lastAt  mono.Time
+}
+
+type sourcePathScoreWeights struct {
+	latency float64
+	jitter  float64
+	loss    float64
 }
 
 type sourcePathProbeAddResult uint8
@@ -238,6 +269,7 @@ func (pm *sourcePathProbeManager) samplesLenLocked() int {
 func (pm *sourcePathProbeManager) clearLocked() {
 	clear(pm.pending)
 	pm.samples = nil
+	pm.outcomes = nil
 	pm.dualSendAuxFailStreak = nil
 	pm.dualSendDemotedAuxTill = nil
 }
@@ -303,6 +335,67 @@ func (c *Conn) sourcePathDualSendCandidate(dst epAddr) (sourceRxMeta, bool) {
 	return score.source, true
 }
 
+func (c *Conn) startSourcePathProbeLoop() {
+	interval := sourcePathProbeIntervalValue()
+	if interval <= 0 || sourcePathAuxSocketCount() == 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				c.sendSourcePathProbeTick()
+			case <-c.donec:
+				return
+			}
+		}
+	}()
+}
+
+func (c *Conn) sendSourcePathProbeTick() {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	var endpoints []*endpoint
+	c.peerMap.forEachEndpoint(func(ep *endpoint) {
+		endpoints = append(endpoints, ep)
+	})
+	c.mu.Unlock()
+
+	for _, de := range endpoints {
+		de.mu.Lock()
+		epDisco := de.disco.Load()
+		if epDisco == nil {
+			de.mu.Unlock()
+			continue
+		}
+		var dsts []epAddr
+		if de.bestAddr.epAddr.isDirect() {
+			dsts = append(dsts, de.bestAddr.epAddr)
+		} else {
+			for ap := range de.endpointState {
+				dst := epAddr{ap: ap}
+				if dst.isDirect() {
+					dsts = append(dsts, dst)
+				}
+			}
+		}
+		dstKey := de.publicKey
+		dstDisco := epDisco.key
+		de.mu.Unlock()
+
+		for _, dst := range dsts {
+			for _, source := range c.sourcePathProbeSources(dst.ap.Addr().Is4()) {
+				go c.sendSourcePathDiscoPing(source, dst, dstKey, dstDisco, stun.NewTxID(), 0, discoVerboseLog)
+			}
+		}
+	}
+}
+
 func absDuration(d time.Duration) time.Duration {
 	if d < 0 {
 		return -d
@@ -333,6 +426,7 @@ func (pm *sourcePathProbeManager) bestCandidateLocked(dst epAddr, sources []sour
 	}
 
 	thresholdPct := sourcePathAuxBeatThresholdPercentValue()
+	multiMetric := sourcePathMultiMetricEnabled()
 	var best sourcePathCandidateScore
 	var bestOK bool
 	for _, source := range sources {
@@ -343,16 +437,19 @@ func (pm *sourcePathProbeManager) bestCandidateLocked(dst epAddr, sources []sour
 		var (
 			candidate    sourcePathCandidateScore
 			candidateOK  bool
-			sumLatencyNs int64
+			sumLatencyNs float64
+			sumSqNs      float64
 		)
 		for _, sample := range pm.samples {
 			if sample.dst != dst || sample.source != source {
 				continue
 			}
-			if now.Sub(sample.at) > sourcePathSampleTTL {
+			if now.Sub(sample.at) > sourcePathSampleTTLValue() {
 				continue
 			}
-			sumLatencyNs += sample.latency.Nanoseconds()
+			latencyNs := float64(sample.latency.Nanoseconds())
+			sumLatencyNs += latencyNs
+			sumSqNs += latencyNs * latencyNs
 			if !candidateOK {
 				candidate = sourcePathCandidateScore{
 					source:  source,
@@ -373,8 +470,20 @@ func (pm *sourcePathProbeManager) bestCandidateLocked(dst epAddr, sources []sour
 		// Mean latency over TTL-fresh samples. Mean is more representative of
 		// what users will see for real data than the historical minimum, and
 		// it dampens the influence of any single lucky packet.
-		candidate.latency = time.Duration(sumLatencyNs / int64(candidate.samples))
-		if primaryRTT > 0 && thresholdPct > 0 {
+		meanNs := sumLatencyNs / float64(candidate.samples)
+		candidate.latency = time.Duration(meanNs)
+		varianceNs := sumSqNs/float64(candidate.samples) - meanNs*meanNs
+		if varianceNs < 0 {
+			varianceNs = 0
+		}
+		candidate.jitter = time.Duration(math.Sqrt(varianceNs))
+		candidate.loss = pm.lossRatioLocked(dst, source, now)
+
+		if multiMetric {
+			if !candidate.applyMultiMetricScore(primaryRTT) {
+				continue
+			}
+		} else if primaryRTT > 0 && thresholdPct > 0 {
 			// aux mean must be strictly less than primaryRTT × (1 - threshold).
 			// Convert the percent threshold into an integer Duration cutoff to
 			// avoid float64 rounding noise on small RTTs.
@@ -384,12 +493,65 @@ func (pm *sourcePathProbeManager) bestCandidateLocked(dst epAddr, sources []sour
 				continue
 			}
 		}
-		if !bestOK || candidate.latency < best.latency || (candidate.latency == best.latency && candidate.lastAt.Sub(best.lastAt) > 0) {
+		if !bestOK || candidate.betterThan(best, multiMetric) {
 			best = candidate
 			bestOK = true
 		}
 	}
 	return best, bestOK
+}
+
+func (c sourcePathCandidateScore) betterThan(best sourcePathCandidateScore, multiMetric bool) bool {
+	if multiMetric {
+		return c.score > best.score || (c.score == best.score && c.lastAt.Sub(best.lastAt) > 0)
+	}
+	return c.latency < best.latency || (c.latency == best.latency && c.lastAt.Sub(best.lastAt) > 0)
+}
+
+func (c *sourcePathCandidateScore) applyMultiMetricScore(primaryRTT time.Duration) bool {
+	if c.latency > sourcePathLatencyMaxValue() {
+		metricSourcePathHardAvoidLatency.Add(1)
+		return false
+	}
+	if c.jitter > sourcePathJitterMaxValue() {
+		metricSourcePathHardAvoidJitter.Add(1)
+		return false
+	}
+	if c.loss > sourcePathLossMaxValue() {
+		metricSourcePathHardAvoidLoss.Add(1)
+		return false
+	}
+
+	weights := sourcePathScoreWeightsValue()
+	c.score = sourcePathQualityScore(c.latency, c.jitter, c.loss, weights)
+	if primaryRTT <= 0 {
+		return true
+	}
+
+	primaryScore := sourcePathQualityScore(primaryRTT, 0, 0, weights)
+	needed := primaryScore * (1 + float64(sourcePathScoreImprovePctValue())/100)
+	return c.score > needed
+}
+
+func sourcePathQualityScore(latency, jitter time.Duration, loss float64, weights sourcePathScoreWeights) float64 {
+	latNorm := sourcePathExpNorm(float64(latency), float64(sourcePathLatencyMaxValue()))
+	jitterNorm := sourcePathExpNorm(float64(jitter), float64(sourcePathJitterMaxValue()))
+	lossNorm := sourcePathExpNorm(loss, sourcePathLossMaxValue())
+	return latNorm*weights.latency + jitterNorm*weights.jitter + lossNorm*weights.loss
+}
+
+func sourcePathExpNorm(v, maxV float64) float64 {
+	if maxV <= 0 {
+		return 1
+	}
+	x := v / maxV
+	if x < 0 {
+		x = 0
+	}
+	if x > 1 {
+		x = 1
+	}
+	return 1 / math.Exp(4*x)
 }
 
 // invalidateLocked drops all samples for the given (dst, source) pair. Used
@@ -460,6 +622,7 @@ func (pm *sourcePathProbeManager) pruneExpiredLocked(now mono.Time) {
 	for txid, tx := range pm.pending {
 		if now.Sub(tx.at) >= pingTimeoutDuration {
 			delete(pm.pending, txid)
+			pm.noteOutcomeLocked(tx.dst, tx.source, now, true)
 			expired++
 		}
 	}
@@ -478,7 +641,7 @@ func (pm *sourcePathProbeManager) pruneExpiredSamplesLocked(now mono.Time) {
 	n := 0
 	expired := int64(0)
 	for _, sample := range pm.samples {
-		if now.Sub(sample.at) > sourcePathSampleTTL {
+		if now.Sub(sample.at) > sourcePathSampleTTLValue() {
 			expired++
 			continue
 		}
@@ -503,6 +666,7 @@ func (pm *sourcePathProbeManager) handlePongLocked(pong *disco.Pong, sender key.
 	now := mono.Now()
 	if now.Sub(tx.at) >= pingTimeoutDuration {
 		delete(pm.pending, txid)
+		pm.noteOutcomeLocked(tx.dst, tx.source, now, true)
 		metricSourcePathProbePongExpired.Add(1)
 		return true
 	}
@@ -510,6 +674,7 @@ func (pm *sourcePathProbeManager) handlePongLocked(pong *disco.Pong, sender key.
 		return false
 	}
 	delete(pm.pending, txid)
+	pm.noteOutcomeLocked(tx.dst, tx.source, now, false)
 	pm.pruneExpiredSamplesLocked(now)
 
 	pm.samples = append(pm.samples, sourcePathProbeSample{
@@ -529,6 +694,50 @@ func (pm *sourcePathProbeManager) handlePongLocked(pong *disco.Pong, sender key.
 	}
 	metricSourcePathProbePongAccepted.Add(1)
 	return true
+}
+
+func (pm *sourcePathProbeManager) noteOutcomeLocked(dst epAddr, source sourceRxMeta, at mono.Time, lost bool) {
+	pm.outcomes = append(pm.outcomes, sourcePathProbeOutcome{
+		dst:    dst,
+		source: source,
+		at:     at,
+		lost:   lost,
+	})
+	pm.pruneExpiredOutcomesLocked(at)
+}
+
+func (pm *sourcePathProbeManager) pruneExpiredOutcomesLocked(now mono.Time) {
+	if len(pm.outcomes) == 0 {
+		return
+	}
+	window := sourcePathLossWindowValue()
+	n := 0
+	for _, outcome := range pm.outcomes {
+		if now.Sub(outcome.at) > window {
+			continue
+		}
+		pm.outcomes[n] = outcome
+		n++
+	}
+	pm.outcomes = pm.outcomes[:n]
+}
+
+func (pm *sourcePathProbeManager) lossRatioLocked(dst epAddr, source sourceRxMeta, now mono.Time) float64 {
+	pm.pruneExpiredOutcomesLocked(now)
+	var total, lost int
+	for _, outcome := range pm.outcomes {
+		if outcome.dst != dst || outcome.source != source {
+			continue
+		}
+		total++
+		if outcome.lost {
+			lost++
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	return float64(lost) / float64(total)
 }
 
 func (c *Conn) sendSourcePathDiscoPing(source sourceRxMeta, dst epAddr, dstKey key.NodePublic, dstDisco key.DiscoPublic, txid stun.TxID, size int, logLevel discoLogLevel) (sent bool, err error) {

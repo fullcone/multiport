@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +31,16 @@ var (
 	envknobSrcSelDualSendAuxDrop     = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_AUX_DROP_STREAK")
 	envknobSrcSelDualSendRecoveryS   = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_RECOVERY_S")
 	envknobSrcSelDualSendMaxSkewMS   = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_MAX_SKEW_MS")
+	envknobSrcSelMultiMetric         = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_MULTI_METRIC")
+	envknobSrcSelProbeIntervalMS     = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_PROBE_INTERVAL_MS")
+	envknobSrcSelLossWindowS         = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_LOSS_WINDOW_S")
+	envknobSrcSelScoreWeights        = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_SCORE_WEIGHTS")
+	envknobSrcSelLatencyMaxMS        = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_LATENCY_MAX_MS")
+	envknobSrcSelJitterMaxMS         = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_JITTER_MAX_MS")
+	envknobSrcSelLossMaxPct          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_LOSS_MAX_PCT")
+	envknobSrcSelScoreImprovePct     = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_SCORE_IMPROVEMENT_PCT")
+	envknobSrcSelProfile             = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_PROFILE")
+	envknobSrcSelSampleTTLS          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_SAMPLE_TTL_S")
 )
 
 func sourcePathAuxSocketCount() int {
@@ -109,6 +120,107 @@ func sourcePathAuxBeatThresholdPercentValue() int {
 		return 100
 	}
 	return n
+}
+
+func sourcePathProfileMode() string {
+	return strings.ToLower(envknobSrcSelProfile())
+}
+
+func sourcePathMultiMetricEnabled() bool {
+	return envknobSrcSelMultiMetric() || sourcePathProfileMode() == "realtime"
+}
+
+func sourcePathProbeIntervalValue() time.Duration {
+	n := envknobSrcSelProbeIntervalMS()
+	if n == 0 && sourcePathProfileMode() == "realtime" {
+		return sourcePathRealtimeProbeEvery
+	}
+	if n <= 0 {
+		return 0
+	}
+	d := time.Duration(n) * time.Millisecond
+	if d < sourcePathProbeIntervalFloor {
+		return sourcePathProbeIntervalFloor
+	}
+	return d
+}
+
+func sourcePathSampleTTLValue() time.Duration {
+	n := envknobSrcSelSampleTTLS()
+	if n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	if sourcePathProfileMode() == "realtime" {
+		return sourcePathRealtimeSampleTTL
+	}
+	return sourcePathSampleTTL
+}
+
+func sourcePathLossWindowValue() time.Duration {
+	n := envknobSrcSelLossWindowS()
+	if n <= 0 {
+		return sourcePathLossWindow
+	}
+	return time.Duration(n) * time.Second
+}
+
+func sourcePathLatencyMaxValue() time.Duration {
+	n := envknobSrcSelLatencyMaxMS()
+	if n <= 0 {
+		return sourcePathLatencyMax
+	}
+	return time.Duration(n) * time.Millisecond
+}
+
+func sourcePathJitterMaxValue() time.Duration {
+	n := envknobSrcSelJitterMaxMS()
+	if n <= 0 {
+		return sourcePathJitterMax
+	}
+	return time.Duration(n) * time.Millisecond
+}
+
+func sourcePathLossMaxValue() float64 {
+	n := envknobSrcSelLossMaxPct()
+	if n <= 0 {
+		return sourcePathLossMax
+	}
+	return float64(n) / 100
+}
+
+func sourcePathScoreImprovePctValue() int {
+	n := envknobSrcSelScoreImprovePct()
+	if n <= 0 {
+		return sourcePathScoreImprovePct
+	}
+	return n
+}
+
+func sourcePathScoreWeightsValue() sourcePathScoreWeights {
+	weights := sourcePathScoreWeights{
+		latency: 0.30,
+		jitter:  0.40,
+		loss:    0.30,
+	}
+	for _, field := range strings.Split(envknobSrcSelScoreWeights(), ",") {
+		key, value, ok := strings.Cut(strings.TrimSpace(field), "=")
+		if !ok {
+			continue
+		}
+		f, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil || f < 0 {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "lat", "latency":
+			weights.latency = f
+		case "jit", "jitter":
+			weights.jitter = f
+		case "loss":
+			weights.loss = f
+		}
+	}
+	return weights
 }
 
 func sourcePathDualSendEnabled() bool {

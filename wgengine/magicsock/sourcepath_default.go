@@ -30,6 +30,26 @@ func sourcePathProbeSampleLimitCount() int { return sourcePathProbeHistoryLimit 
 
 func sourcePathAuxBeatThresholdPercentValue() int { return sourcePathAuxBeatThresholdPercent }
 
+func sourcePathMultiMetricEnabled() bool { return false }
+
+func sourcePathProbeIntervalValue() time.Duration { return 0 }
+
+func sourcePathSampleTTLValue() time.Duration { return sourcePathSampleTTL }
+
+func sourcePathLossWindowValue() time.Duration { return sourcePathLossWindow }
+
+func sourcePathLatencyMaxValue() time.Duration { return sourcePathLatencyMax }
+
+func sourcePathJitterMaxValue() time.Duration { return sourcePathJitterMax }
+
+func sourcePathLossMaxValue() float64 { return sourcePathLossMax }
+
+func sourcePathScoreImprovePctValue() int { return sourcePathScoreImprovePct }
+
+func sourcePathScoreWeightsValue() sourcePathScoreWeights {
+	return sourcePathScoreWeights{latency: 0.30, jitter: 0.40, loss: 0.30}
+}
+
 func sourcePathDualSendEnabled() bool { return false }
 
 func sourcePathDualSendAuxDropStreakValue() int { return sourcePathDualSendAuxDropStreak }
