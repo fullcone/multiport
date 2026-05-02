@@ -1310,6 +1310,9 @@ func (c *Conn) sendSourcePathDiscoPing(source sourceRxMeta, dst epAddr, dstKey k
 		c.rotateSourcePathAuxSocket(rotation.dst, rotation.source, rotation.reason, nil)
 	}
 	if rotatedCurrentSource {
+		c.mu.Lock()
+		c.sourceProbes.forgetLocked(txid)
+		c.mu.Unlock()
 		return false, errSourcePathUnavailable
 	}
 
