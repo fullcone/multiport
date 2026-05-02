@@ -89,12 +89,13 @@ type endpoint struct {
 	lastDiscoKeyAdvertisement mono.Time      // last time we sent a TSMPDiscoAdvertisement or not to this endpoint
 	derpAddr                  netip.AddrPort // fallback/bootstrap path, if non-zero (non-zero for well-behaved clients)
 
-	bestAddr           addrQuality // best non-DERP path; zero if none; mutate via setBestAddrLocked()
-	bestAddrAt         mono.Time   // time best address re-confirmed
-	trustBestAddrUntil mono.Time   // time when bestAddr expires
-	sentPing           map[stun.TxID]sentPing
-	endpointState      map[netip.AddrPort]*endpointState // netip.AddrPort type for key (instead of [epAddr]) as [endpointState] is irrelevant for Geneve-encapsulated paths
-	isCallMeMaybeEP    map[netip.AddrPort]bool
+	bestAddr              addrQuality // best non-DERP path; zero if none; mutate via setBestAddrLocked()
+	bestAddrAt            mono.Time   // time best address re-confirmed
+	trustBestAddrUntil    mono.Time   // time when bestAddr expires
+	sourcePathRemoteSlots [2]epAddr   // first two direct remote source endpoints observed for srcsel metrics
+	sentPing              map[stun.TxID]sentPing
+	endpointState         map[netip.AddrPort]*endpointState // netip.AddrPort type for key (instead of [epAddr]) as [endpointState] is irrelevant for Geneve-encapsulated paths
+	isCallMeMaybeEP       map[netip.AddrPort]bool
 
 	// The following fields are related to the new "silent disco"
 	// implementation that's a WIP as of 2022-10-20.

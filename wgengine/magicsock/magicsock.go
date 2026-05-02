@@ -2093,6 +2093,16 @@ func noteSourcePathRemoteWireGuardRx(ep *endpoint, src epAddr) {
 	default:
 		metricSourcePathRemoteUnknownWireGuardRx.Add(1)
 	}
+	switch classifySourcePathRemoteSlot(ep, src) {
+	case sourcePathRemotePath0:
+		metricSourcePathRemotePath0WireGuardRx.Add(1)
+	case sourcePathRemotePath1:
+		metricSourcePathRemotePath1WireGuardRx.Add(1)
+	case sourcePathRemotePathOther:
+		metricSourcePathRemotePathOtherWireGuardRx.Add(1)
+	default:
+		metricSourcePathRemotePathUnknownWireGuardRx.Add(1)
+	}
 }
 
 func noteSourcePathRemoteWireGuardAccepted(ep *endpoint, src epAddr) {
@@ -2104,6 +2114,16 @@ func noteSourcePathRemoteWireGuardAccepted(ep *endpoint, src epAddr) {
 	default:
 		metricSourcePathRemoteUnknownWireGuardAccepted.Add(1)
 	}
+	switch classifySourcePathRemoteSlot(ep, src) {
+	case sourcePathRemotePath0:
+		metricSourcePathRemotePath0WireGuardAccepted.Add(1)
+	case sourcePathRemotePath1:
+		metricSourcePathRemotePath1WireGuardAccepted.Add(1)
+	case sourcePathRemotePathOther:
+		metricSourcePathRemotePathOtherWireGuardAccepted.Add(1)
+	default:
+		metricSourcePathRemotePathUnknownWireGuardAccepted.Add(1)
+	}
 }
 
 type sourcePathRemoteEndpointKind uint8
@@ -2112,6 +2132,15 @@ const (
 	sourcePathRemoteUnknown sourcePathRemoteEndpointKind = iota
 	sourcePathRemoteBest
 	sourcePathRemoteNonBest
+)
+
+type sourcePathRemoteSlotKind uint8
+
+const (
+	sourcePathRemotePathUnknown sourcePathRemoteSlotKind = iota
+	sourcePathRemotePath0
+	sourcePathRemotePath1
+	sourcePathRemotePathOther
 )
 
 func classifySourcePathRemoteEndpoint(ep *endpoint, src epAddr) sourcePathRemoteEndpointKind {
@@ -2128,6 +2157,32 @@ func classifySourcePathRemoteEndpoint(ep *endpoint, src epAddr) sourcePathRemote
 		return sourcePathRemoteBest
 	}
 	return sourcePathRemoteNonBest
+}
+
+func classifySourcePathRemoteSlot(ep *endpoint, src epAddr) sourcePathRemoteSlotKind {
+	if ep == nil || !src.isDirect() {
+		return sourcePathRemotePathUnknown
+	}
+	ep.mu.Lock()
+	defer ep.mu.Unlock()
+	for i, slot := range ep.sourcePathRemoteSlots {
+		if slot == src {
+			if i == 0 {
+				return sourcePathRemotePath0
+			}
+			return sourcePathRemotePath1
+		}
+	}
+	for i, slot := range ep.sourcePathRemoteSlots {
+		if !slot.ap.IsValid() {
+			ep.sourcePathRemoteSlots[i] = src
+			if i == 0 {
+				return sourcePathRemotePath0
+			}
+			return sourcePathRemotePath1
+		}
+	}
+	return sourcePathRemotePathOther
 }
 
 type sourcePathPeerAwareEndpoint struct {
@@ -4470,55 +4525,63 @@ var (
 	metricSendDERP      = clientmetric.NewAggregateCounter("magicsock_send_derp")
 
 	// Data packets (non-disco)
-	metricSendData                                 = clientmetric.NewCounter("magicsock_send_data")
-	metricSendDataNetworkDown                      = clientmetric.NewCounter("magicsock_send_data_network_down")
-	metricSourcePathDataSendAuxSelected            = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_selected")
-	metricSourcePathDataSendAuxSucceeded           = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_succeeded")
-	metricSourcePathDataSendAuxFallback            = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_fallback")
-	metricSourcePathProbePongAccepted              = clientmetric.NewCounter("magicsock_srcsel_probe_pong_accepted")
-	metricSourcePathProbePendingExpired            = clientmetric.NewCounter("magicsock_srcsel_probe_pending_expired")
-	metricSourcePathProbePongExpired               = clientmetric.NewCounter("magicsock_srcsel_probe_pong_expired")
-	metricSourcePathProbePeerBudgetDropped         = clientmetric.NewCounter("magicsock_srcsel_probe_peer_budget_dropped")
-	metricSourcePathProbeBurstBudgetDropped        = clientmetric.NewCounter("magicsock_srcsel_probe_burst_budget_dropped")
-	metricSourcePathProbeHardCapDropped            = clientmetric.NewCounter("magicsock_srcsel_probe_hard_cap_dropped")
-	metricSourcePathProbeSamplesExpired            = clientmetric.NewCounter("magicsock_srcsel_probe_samples_expired")
-	metricSourcePathProbeSamplesEvicted            = clientmetric.NewCounter("magicsock_srcsel_probe_samples_evicted")
-	metricSourcePathProbeOutcomesEvicted           = clientmetric.NewCounter("magicsock_srcsel_probe_outcomes_evicted")
-	metricSourcePathPrimaryWireGuardRx             = clientmetric.NewCounter("magicsock_srcsel_primary_wireguard_rx")
-	metricSourcePathAuxWireGuardRx                 = clientmetric.NewCounter("magicsock_srcsel_aux_wireguard_rx")
-	metricSourcePathRemoteBestWireGuardRx          = clientmetric.NewCounter("magicsock_srcsel_remote_best_wireguard_rx")
-	metricSourcePathRemoteNonBestWireGuardRx       = clientmetric.NewCounter("magicsock_srcsel_remote_non_best_wireguard_rx")
-	metricSourcePathRemoteUnknownWireGuardRx       = clientmetric.NewCounter("magicsock_srcsel_remote_unknown_wireguard_rx")
-	metricSourcePathRemoteBestWireGuardAccepted    = clientmetric.NewCounter("magicsock_srcsel_remote_best_wireguard_accepted")
-	metricSourcePathRemoteNonBestWireGuardAccepted = clientmetric.NewCounter("magicsock_srcsel_remote_non_best_wireguard_accepted")
-	metricSourcePathRemoteUnknownWireGuardAccepted = clientmetric.NewCounter("magicsock_srcsel_remote_unknown_wireguard_accepted")
-	metricSourcePathSendFailureInvalidated         = clientmetric.NewCounter("magicsock_srcsel_send_failure_invalidated_samples")
-	metricSourcePathPrimaryBeatRejected            = clientmetric.NewCounter("magicsock_srcsel_primary_beat_rejected")
-	metricSourcePathHardAvoidLatency               = clientmetric.NewCounter("magicsock_srcsel_hard_avoid_latency")
-	metricSourcePathHardAvoidJitter                = clientmetric.NewCounter("magicsock_srcsel_hard_avoid_jitter")
-	metricSourcePathHardAvoidLoss                  = clientmetric.NewCounter("magicsock_srcsel_hard_avoid_loss")
-	metricSourcePathDualSendPackets                = clientmetric.NewCounter("magicsock_srcsel_dual_send_packets")
-	metricSourcePathDualSendPrimaryPackets         = clientmetric.NewCounter("magicsock_srcsel_dual_send_primary_packets")
-	metricSourcePathDualSendAuxPackets             = clientmetric.NewCounter("magicsock_srcsel_dual_send_aux_packets")
-	metricSourcePathDualSendPrimaryFailed          = clientmetric.NewCounter("magicsock_srcsel_dual_send_primary_failed")
-	metricSourcePathDualSendAuxFailed              = clientmetric.NewCounter("magicsock_srcsel_dual_send_aux_failed")
-	metricSourcePathDualSendBothFailed             = clientmetric.NewCounter("magicsock_srcsel_dual_send_both_failed")
-	metricSourcePathDualSendDemotedAuxStreak       = clientmetric.NewCounter("magicsock_srcsel_dual_send_demoted_aux_streak")
-	metricSourcePathDualSendSkippedSkew            = clientmetric.NewCounter("magicsock_srcsel_dual_send_skipped_skew")
-	metricSourcePathDualEndpointPackets            = clientmetric.NewCounter("magicsock_srcsel_dual_endpoint_packets")
-	metricSourcePathDualEndpointPrimaryFailed      = clientmetric.NewCounter("magicsock_srcsel_dual_endpoint_primary_failed")
-	metricSourcePathDualEndpointSecondaryFailed    = clientmetric.NewCounter("magicsock_srcsel_dual_endpoint_secondary_failed")
-	metricSourcePathDualEndpointBothFailed         = clientmetric.NewCounter("magicsock_srcsel_dual_endpoint_both_failed")
-	metricSourcePathPrimaryUnhealthySendStreak     = clientmetric.NewCounter("magicsock_srcsel_primary_unhealthy_send_streak")
-	metricSourcePathFailoverToAux                  = clientmetric.NewCounter("magicsock_srcsel_failover_to_aux")
-	metricSourcePathFailoverRecoveredToPrimary     = clientmetric.NewCounter("magicsock_srcsel_failover_recovered_to_primary")
-	metricSourcePathFailoverAuxAlsoDead            = clientmetric.NewCounter("magicsock_srcsel_failover_aux_also_dead")
-	metricSourcePathFlowAssignedPrimary            = clientmetric.NewCounter("magicsock_srcsel_flow_assigned_primary")
-	metricSourcePathFlowAssignedAux                = clientmetric.NewCounter("magicsock_srcsel_flow_assigned_aux")
-	metricSourcePathFlowEvictedIdle                = clientmetric.NewCounter("magicsock_srcsel_flow_evicted_idle")
-	metricSourcePathFlowEvictedCap                 = clientmetric.NewCounter("magicsock_srcsel_flow_evicted_cap")
-	metricSourcePathFlowEvictedSourceFailure       = clientmetric.NewCounter("magicsock_srcsel_flow_evicted_source_failure")
-	metricSourcePathFlowHintUnavailable            = clientmetric.NewCounter("magicsock_srcsel_flow_hint_unavailable")
+	metricSendData                                     = clientmetric.NewCounter("magicsock_send_data")
+	metricSendDataNetworkDown                          = clientmetric.NewCounter("magicsock_send_data_network_down")
+	metricSourcePathDataSendAuxSelected                = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_selected")
+	metricSourcePathDataSendAuxSucceeded               = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_succeeded")
+	metricSourcePathDataSendAuxFallback                = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_fallback")
+	metricSourcePathProbePongAccepted                  = clientmetric.NewCounter("magicsock_srcsel_probe_pong_accepted")
+	metricSourcePathProbePendingExpired                = clientmetric.NewCounter("magicsock_srcsel_probe_pending_expired")
+	metricSourcePathProbePongExpired                   = clientmetric.NewCounter("magicsock_srcsel_probe_pong_expired")
+	metricSourcePathProbePeerBudgetDropped             = clientmetric.NewCounter("magicsock_srcsel_probe_peer_budget_dropped")
+	metricSourcePathProbeBurstBudgetDropped            = clientmetric.NewCounter("magicsock_srcsel_probe_burst_budget_dropped")
+	metricSourcePathProbeHardCapDropped                = clientmetric.NewCounter("magicsock_srcsel_probe_hard_cap_dropped")
+	metricSourcePathProbeSamplesExpired                = clientmetric.NewCounter("magicsock_srcsel_probe_samples_expired")
+	metricSourcePathProbeSamplesEvicted                = clientmetric.NewCounter("magicsock_srcsel_probe_samples_evicted")
+	metricSourcePathProbeOutcomesEvicted               = clientmetric.NewCounter("magicsock_srcsel_probe_outcomes_evicted")
+	metricSourcePathPrimaryWireGuardRx                 = clientmetric.NewCounter("magicsock_srcsel_primary_wireguard_rx")
+	metricSourcePathAuxWireGuardRx                     = clientmetric.NewCounter("magicsock_srcsel_aux_wireguard_rx")
+	metricSourcePathRemoteBestWireGuardRx              = clientmetric.NewCounter("magicsock_srcsel_remote_best_wireguard_rx")
+	metricSourcePathRemoteNonBestWireGuardRx           = clientmetric.NewCounter("magicsock_srcsel_remote_non_best_wireguard_rx")
+	metricSourcePathRemoteUnknownWireGuardRx           = clientmetric.NewCounter("magicsock_srcsel_remote_unknown_wireguard_rx")
+	metricSourcePathRemoteBestWireGuardAccepted        = clientmetric.NewCounter("magicsock_srcsel_remote_best_wireguard_accepted")
+	metricSourcePathRemoteNonBestWireGuardAccepted     = clientmetric.NewCounter("magicsock_srcsel_remote_non_best_wireguard_accepted")
+	metricSourcePathRemoteUnknownWireGuardAccepted     = clientmetric.NewCounter("magicsock_srcsel_remote_unknown_wireguard_accepted")
+	metricSourcePathRemotePath0WireGuardRx             = clientmetric.NewCounter("magicsock_srcsel_remote_path0_wireguard_rx")
+	metricSourcePathRemotePath1WireGuardRx             = clientmetric.NewCounter("magicsock_srcsel_remote_path1_wireguard_rx")
+	metricSourcePathRemotePathOtherWireGuardRx         = clientmetric.NewCounter("magicsock_srcsel_remote_path_other_wireguard_rx")
+	metricSourcePathRemotePathUnknownWireGuardRx       = clientmetric.NewCounter("magicsock_srcsel_remote_path_unknown_wireguard_rx")
+	metricSourcePathRemotePath0WireGuardAccepted       = clientmetric.NewCounter("magicsock_srcsel_remote_path0_wireguard_accepted")
+	metricSourcePathRemotePath1WireGuardAccepted       = clientmetric.NewCounter("magicsock_srcsel_remote_path1_wireguard_accepted")
+	metricSourcePathRemotePathOtherWireGuardAccepted   = clientmetric.NewCounter("magicsock_srcsel_remote_path_other_wireguard_accepted")
+	metricSourcePathRemotePathUnknownWireGuardAccepted = clientmetric.NewCounter("magicsock_srcsel_remote_path_unknown_wireguard_accepted")
+	metricSourcePathSendFailureInvalidated             = clientmetric.NewCounter("magicsock_srcsel_send_failure_invalidated_samples")
+	metricSourcePathPrimaryBeatRejected                = clientmetric.NewCounter("magicsock_srcsel_primary_beat_rejected")
+	metricSourcePathHardAvoidLatency                   = clientmetric.NewCounter("magicsock_srcsel_hard_avoid_latency")
+	metricSourcePathHardAvoidJitter                    = clientmetric.NewCounter("magicsock_srcsel_hard_avoid_jitter")
+	metricSourcePathHardAvoidLoss                      = clientmetric.NewCounter("magicsock_srcsel_hard_avoid_loss")
+	metricSourcePathDualSendPackets                    = clientmetric.NewCounter("magicsock_srcsel_dual_send_packets")
+	metricSourcePathDualSendPrimaryPackets             = clientmetric.NewCounter("magicsock_srcsel_dual_send_primary_packets")
+	metricSourcePathDualSendAuxPackets                 = clientmetric.NewCounter("magicsock_srcsel_dual_send_aux_packets")
+	metricSourcePathDualSendPrimaryFailed              = clientmetric.NewCounter("magicsock_srcsel_dual_send_primary_failed")
+	metricSourcePathDualSendAuxFailed                  = clientmetric.NewCounter("magicsock_srcsel_dual_send_aux_failed")
+	metricSourcePathDualSendBothFailed                 = clientmetric.NewCounter("magicsock_srcsel_dual_send_both_failed")
+	metricSourcePathDualSendDemotedAuxStreak           = clientmetric.NewCounter("magicsock_srcsel_dual_send_demoted_aux_streak")
+	metricSourcePathDualSendSkippedSkew                = clientmetric.NewCounter("magicsock_srcsel_dual_send_skipped_skew")
+	metricSourcePathDualEndpointPackets                = clientmetric.NewCounter("magicsock_srcsel_dual_endpoint_packets")
+	metricSourcePathDualEndpointPrimaryFailed          = clientmetric.NewCounter("magicsock_srcsel_dual_endpoint_primary_failed")
+	metricSourcePathDualEndpointSecondaryFailed        = clientmetric.NewCounter("magicsock_srcsel_dual_endpoint_secondary_failed")
+	metricSourcePathDualEndpointBothFailed             = clientmetric.NewCounter("magicsock_srcsel_dual_endpoint_both_failed")
+	metricSourcePathPrimaryUnhealthySendStreak         = clientmetric.NewCounter("magicsock_srcsel_primary_unhealthy_send_streak")
+	metricSourcePathFailoverToAux                      = clientmetric.NewCounter("magicsock_srcsel_failover_to_aux")
+	metricSourcePathFailoverRecoveredToPrimary         = clientmetric.NewCounter("magicsock_srcsel_failover_recovered_to_primary")
+	metricSourcePathFailoverAuxAlsoDead                = clientmetric.NewCounter("magicsock_srcsel_failover_aux_also_dead")
+	metricSourcePathFlowAssignedPrimary                = clientmetric.NewCounter("magicsock_srcsel_flow_assigned_primary")
+	metricSourcePathFlowAssignedAux                    = clientmetric.NewCounter("magicsock_srcsel_flow_assigned_aux")
+	metricSourcePathFlowEvictedIdle                    = clientmetric.NewCounter("magicsock_srcsel_flow_evicted_idle")
+	metricSourcePathFlowEvictedCap                     = clientmetric.NewCounter("magicsock_srcsel_flow_evicted_cap")
+	metricSourcePathFlowEvictedSourceFailure           = clientmetric.NewCounter("magicsock_srcsel_flow_evicted_source_failure")
+	metricSourcePathFlowHintUnavailable                = clientmetric.NewCounter("magicsock_srcsel_flow_hint_unavailable")
 	// Phase 22 v2: direct-vs-relay latency-aware switching counters.
 	// Only incremented when TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE=true.
 	metricDirectVsRelayCompared            = clientmetric.NewCounter("magicsock_direct_vs_relay_compared")

@@ -779,6 +779,12 @@ func TestReceiveIPRemoteWireGuardMetrics(t *testing.T) {
 	unknownBefore := metricSourcePathRemoteUnknownWireGuardRx.Value()
 	bestAcceptedBefore := metricSourcePathRemoteBestWireGuardAccepted.Value()
 	nonBestAcceptedBefore := metricSourcePathRemoteNonBestWireGuardAccepted.Value()
+	path0Before := metricSourcePathRemotePath0WireGuardRx.Value()
+	path1Before := metricSourcePathRemotePath1WireGuardRx.Value()
+	pathOtherBefore := metricSourcePathRemotePathOtherWireGuardRx.Value()
+	pathUnknownBefore := metricSourcePathRemotePathUnknownWireGuardRx.Value()
+	path0AcceptedBefore := metricSourcePathRemotePath0WireGuardAccepted.Value()
+	path1AcceptedBefore := metricSourcePathRemotePath1WireGuardAccepted.Value()
 
 	var cache epAddrEndpointCache
 	primaryEP, _, _, ok := c.receiveIP(pkt, primary.ap, &cache)
@@ -799,6 +805,12 @@ func TestReceiveIPRemoteWireGuardMetrics(t *testing.T) {
 	if got := metricSourcePathRemoteNonBestWireGuardRx.Value() - nonBestBefore; got != 0 {
 		t.Fatalf("remote non-best WG rx metric delta after primary = %d, want 0", got)
 	}
+	if got := metricSourcePathRemotePath0WireGuardRx.Value() - path0Before; got != 1 {
+		t.Fatalf("remote path0 WG rx metric delta after primary = %d, want 1", got)
+	}
+	if got := metricSourcePathRemotePath0WireGuardAccepted.Value() - path0AcceptedBefore; got != 1 {
+		t.Fatalf("remote path0 WG accepted metric delta after primary = %d, want 1", got)
+	}
 
 	cache = epAddrEndpointCache{}
 	auxEP, _, _, ok := c.receiveIP(pkt, aux.ap, &cache)
@@ -818,6 +830,18 @@ func TestReceiveIPRemoteWireGuardMetrics(t *testing.T) {
 	}
 	if got := metricSourcePathRemoteUnknownWireGuardRx.Value() - unknownBefore; got != 0 {
 		t.Fatalf("remote unknown WG rx metric delta = %d, want 0", got)
+	}
+	if got := metricSourcePathRemotePath1WireGuardRx.Value() - path1Before; got != 1 {
+		t.Fatalf("remote path1 WG rx metric delta after aux = %d, want 1", got)
+	}
+	if got := metricSourcePathRemotePath1WireGuardAccepted.Value() - path1AcceptedBefore; got != 1 {
+		t.Fatalf("remote path1 WG accepted metric delta after aux = %d, want 1", got)
+	}
+	if got := metricSourcePathRemotePathOtherWireGuardRx.Value() - pathOtherBefore; got != 0 {
+		t.Fatalf("remote path-other WG rx metric delta = %d, want 0", got)
+	}
+	if got := metricSourcePathRemotePathUnknownWireGuardRx.Value() - pathUnknownBefore; got != 0 {
+		t.Fatalf("remote path-unknown WG rx metric delta = %d, want 0", got)
 	}
 }
 
@@ -840,6 +864,8 @@ func TestReceiveIPRemoteUnknownWireGuardMetric(t *testing.T) {
 	nonBestBefore := metricSourcePathRemoteNonBestWireGuardRx.Value()
 	unknownBefore := metricSourcePathRemoteUnknownWireGuardRx.Value()
 	unknownAcceptedBefore := metricSourcePathRemoteUnknownWireGuardAccepted.Value()
+	path0AcceptedBefore := metricSourcePathRemotePath0WireGuardAccepted.Value()
+	pathUnknownBefore := metricSourcePathRemotePathUnknownWireGuardRx.Value()
 	ep, _, _, ok := c.receiveIP(pkt, src, &cache)
 	if !ok {
 		t.Fatal("unknown endpoint receive returned ok=false")
@@ -860,6 +886,12 @@ func TestReceiveIPRemoteUnknownWireGuardMetric(t *testing.T) {
 	}
 	if got := metricSourcePathRemoteUnknownWireGuardAccepted.Value() - unknownAcceptedBefore; got != 1 {
 		t.Fatalf("remote unknown WG accepted metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathRemotePathUnknownWireGuardRx.Value() - pathUnknownBefore; got != 1 {
+		t.Fatalf("remote path-unknown WG rx metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathRemotePath0WireGuardAccepted.Value() - path0AcceptedBefore; got != 1 {
+		t.Fatalf("remote path0 WG accepted metric delta = %d, want 1 after peer identification", got)
 	}
 }
 
