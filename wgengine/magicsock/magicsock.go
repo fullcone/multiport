@@ -2198,9 +2198,6 @@ func (ep *endpoint) sourcePathPeerAwareEndpoint(src epAddr) conn.Endpoint {
 	if wrapped, ok := ep.sourcePathPeerAware[src]; ok {
 		return wrapped
 	}
-	if len(ep.sourcePathPeerAware) >= 8 {
-		return ep
-	}
 	if ep.sourcePathPeerAware == nil {
 		ep.sourcePathPeerAware = make(map[epAddr]*sourcePathPeerAwareEndpoint, 2)
 	}
