@@ -733,6 +733,7 @@ func NewConn(opts Options) (*Conn, error) {
 	// Phase 21: start the dynamic-multi-endpoint-advertise watcher. No-op
 	// when TS_EXPERIMENTAL_EXTRA_ENDPOINTS_FILE is unset.
 	c.startExtraEndpointsWatcher()
+	c.startSourcePathProbeLoop()
 
 	return c, nil
 }
@@ -1491,6 +1492,8 @@ func (c *Conn) Send(buffs [][]byte, ep conn.Endpoint, offset int) (err error) {
 	switch ep := ep.(type) {
 	case *endpoint:
 		return ep.send(buffs, offset)
+	case *sourcePathPeerAwareEndpoint:
+		return ep.endpoint.send(buffs, offset)
 	case *lazyEndpoint:
 		// A [*lazyEndpoint] may end up on this TX codepath when wireguard-go is
 		// deemed "under handshake load" and ends up transmitting a cookie reply
@@ -1551,6 +1554,88 @@ func (c *Conn) sendUDPBatchFromSource(source sourceRxMeta, addr epAddr, buffs []
 		}
 	}
 	return err == nil, err
+}
+
+type sourcePathDualSendResult struct {
+	err        error
+	primaryErr error
+	auxErr     error
+}
+
+type dualEndpointSendResult struct {
+	err          error
+	primaryErr   error
+	secondaryErr error
+}
+
+func (c *Conn) sendUDPBatchDualSource(aux sourceRxMeta, addr epAddr, buffs [][]byte, offset int) sourcePathDualSendResult {
+	metricSourcePathDualSendPackets.Add(int64(len(buffs)))
+
+	primarySent, primaryErr := c.sendUDPBatch(addr, buffs, offset)
+	auxSent, auxErr := c.sendUDPBatchFromSource(aux, addr, buffs, offset)
+	if primarySent {
+		metricSourcePathDualSendPrimaryPackets.Add(int64(len(buffs)))
+	}
+	if auxSent {
+		metricSourcePathDualSendAuxPackets.Add(int64(len(buffs)))
+	}
+	if primaryErr != nil {
+		metricSourcePathDualSendPrimaryFailed.Add(int64(len(buffs)))
+		c.noteSourcePathPrimarySendFailure(addr, mono.Now())
+	} else {
+		c.noteSourcePathPrimarySendSuccess(addr)
+	}
+	if auxErr != nil {
+		metricSourcePathDualSendAuxFailed.Add(int64(len(buffs)))
+		c.noteSourcePathDualSendAuxFailure(addr, aux, mono.Now(), auxErr)
+	} else {
+		c.noteSourcePathDualSendAuxSuccess(addr, aux)
+	}
+
+	res := sourcePathDualSendResult{
+		primaryErr: primaryErr,
+		auxErr:     auxErr,
+	}
+	switch {
+	case primaryErr != nil && auxErr != nil:
+		metricSourcePathDualSendBothFailed.Add(int64(len(buffs)))
+		res.err = primaryErr
+	case primaryErr != nil:
+		res.err = nil
+	case auxErr != nil:
+		res.err = nil
+	}
+	return res
+}
+
+func (c *Conn) sendUDPBatchDualEndpoint(addrs []epAddr, buffs [][]byte, offset int) dualEndpointSendResult {
+	if len(addrs) == 0 {
+		return dualEndpointSendResult{}
+	}
+	if len(addrs) == 1 {
+		_, err := c.sendUDPBatch(addrs[0], buffs, offset)
+		return dualEndpointSendResult{err: err, primaryErr: err}
+	}
+
+	metricSourcePathDualEndpointPackets.Add(int64(len(buffs)))
+	_, primaryErr := c.sendUDPBatch(addrs[0], buffs, offset)
+	_, secondaryErr := c.sendUDPBatch(addrs[1], buffs, offset)
+	if primaryErr != nil {
+		metricSourcePathDualEndpointPrimaryFailed.Add(int64(len(buffs)))
+	}
+	if secondaryErr != nil {
+		metricSourcePathDualEndpointSecondaryFailed.Add(int64(len(buffs)))
+	}
+
+	res := dualEndpointSendResult{
+		primaryErr:   primaryErr,
+		secondaryErr: secondaryErr,
+	}
+	if primaryErr != nil && secondaryErr != nil {
+		metricSourcePathDualEndpointBothFailed.Add(int64(len(buffs)))
+		res.err = primaryErr
+	}
+	return res
 }
 
 // sendUDP sends UDP packet b to ipp.
@@ -1896,8 +1981,8 @@ func (c *Conn) receiveIPWithSource(b []byte, ipp netip.AddrPort, cache *epAddrEn
 	var geneve packet.GeneveHeader
 	pt, isGeneveEncap := packetLooksLike(b)
 	src := epAddr{ap: ipp}
-	if !rxMeta.isPrimary() && pt == packetLooksLikeWireGuard {
-		metricSourcePathAuxWireGuardRx.Add(1)
+	if pt == packetLooksLikeWireGuard {
+		noteSourcePathLocalWireGuardRx(rxMeta)
 	}
 	if isGeneveEncap {
 		err := geneve.Decode(b)
@@ -1959,12 +2044,22 @@ func (c *Conn) receiveIPWithSource(b []byte, ipp netip.AddrPort, cache *epAddrEn
 		if !ok {
 			// TODO(jwhited): reuse [lazyEndpoint] across calls to receiveIP()
 			//  for the same batch & [epAddr] src.
-			return &lazyEndpoint{c: c, src: src}, size, isGeneveEncap, true
+			if pt == packetLooksLikeWireGuard {
+				noteSourcePathRemoteWireGuardRx(nil, src)
+			}
+			return &lazyEndpoint{c: c, src: src, rxMeta: rxMeta}, size, isGeneveEncap, true
 		}
 		cache.epAddr = src
 		cache.de = de
 		cache.gen = de.numStopAndReset()
 		ep = de
+	}
+	if pt == packetLooksLikeWireGuard {
+		noteSourcePathRemoteWireGuardRx(ep, src)
+	}
+	retEP := conn.Endpoint(ep)
+	if pt == packetLooksLikeWireGuard && src.isDirect() {
+		retEP = ep.sourcePathPeerAwareEndpoint(src, rxMeta)
 	}
 	now := mono.Now()
 	ep.lastRecvUDPAny.StoreAtomic(now)
@@ -1980,9 +2075,195 @@ func (c *Conn) receiveIPWithSource(b []byte, ipp netip.AddrPort, cache *epAddrEn
 		// unlucky and fail to JIT configure the "correct" peer.
 		// TODO(jwhited): relax this to include direct connections
 		//  See http://go/corp/29422 & http://go/corp/30042
-		return &lazyEndpoint{c: c, maybeEP: ep, src: src}, size, isGeneveEncap, true
+		return &lazyEndpoint{c: c, maybeEP: ep, src: src, rxMeta: rxMeta}, size, isGeneveEncap, true
 	}
-	return ep, size, isGeneveEncap, true
+	return retEP, size, isGeneveEncap, true
+}
+
+func noteSourcePathLocalWireGuardRx(rxMeta sourceRxMeta) {
+	if rxMeta.isPrimary() {
+		metricSourcePathPrimaryWireGuardRx.Add(1)
+		metricSourcePathLocalPath0WireGuardRx.Add(1)
+	} else {
+		metricSourcePathAuxWireGuardRx.Add(1)
+		metricSourcePathLocalPath1WireGuardRx.Add(1)
+	}
+}
+
+func noteSourcePathLocalWireGuardAccepted(rxMeta sourceRxMeta) {
+	if rxMeta.isPrimary() {
+		metricSourcePathLocalPath0WireGuardAccepted.Add(1)
+	} else {
+		metricSourcePathLocalPath1WireGuardAccepted.Add(1)
+	}
+}
+
+func noteSourcePathRemoteWireGuardRx(ep *endpoint, src epAddr) {
+	switch classifySourcePathRemoteEndpoint(ep, src) {
+	case sourcePathRemoteBest:
+		metricSourcePathRemoteBestWireGuardRx.Add(1)
+	case sourcePathRemoteNonBest:
+		metricSourcePathRemoteNonBestWireGuardRx.Add(1)
+	default:
+		metricSourcePathRemoteUnknownWireGuardRx.Add(1)
+	}
+	switch classifySourcePathRemoteSlot(ep, src) {
+	case sourcePathRemotePath0:
+		metricSourcePathRemotePath0WireGuardRx.Add(1)
+	case sourcePathRemotePath1:
+		metricSourcePathRemotePath1WireGuardRx.Add(1)
+	case sourcePathRemotePathOther:
+		metricSourcePathRemotePathOtherWireGuardRx.Add(1)
+	default:
+		metricSourcePathRemotePathUnknownWireGuardRx.Add(1)
+	}
+}
+
+func noteSourcePathRemoteWireGuardAccepted(ep *endpoint, src epAddr) {
+	switch classifySourcePathRemoteEndpoint(ep, src) {
+	case sourcePathRemoteBest:
+		metricSourcePathRemoteBestWireGuardAccepted.Add(1)
+	case sourcePathRemoteNonBest:
+		metricSourcePathRemoteNonBestWireGuardAccepted.Add(1)
+	default:
+		metricSourcePathRemoteUnknownWireGuardAccepted.Add(1)
+	}
+	switch classifySourcePathRemoteSlot(ep, src) {
+	case sourcePathRemotePath0:
+		metricSourcePathRemotePath0WireGuardAccepted.Add(1)
+	case sourcePathRemotePath1:
+		metricSourcePathRemotePath1WireGuardAccepted.Add(1)
+	case sourcePathRemotePathOther:
+		metricSourcePathRemotePathOtherWireGuardAccepted.Add(1)
+	default:
+		metricSourcePathRemotePathUnknownWireGuardAccepted.Add(1)
+	}
+}
+
+type sourcePathRemoteEndpointKind uint8
+
+const (
+	sourcePathRemoteUnknown sourcePathRemoteEndpointKind = iota
+	sourcePathRemoteBest
+	sourcePathRemoteNonBest
+)
+
+type sourcePathRemoteSlotKind uint8
+
+const (
+	sourcePathRemotePathUnknown sourcePathRemoteSlotKind = iota
+	sourcePathRemotePath0
+	sourcePathRemotePath1
+	sourcePathRemotePathOther
+)
+
+const sourcePathPeerAwareCacheLimit = 32
+
+func classifySourcePathRemoteEndpoint(ep *endpoint, src epAddr) sourcePathRemoteEndpointKind {
+	if ep == nil || !src.isDirect() {
+		return sourcePathRemoteUnknown
+	}
+	ep.mu.Lock()
+	best := ep.bestAddr.epAddr
+	ep.mu.Unlock()
+	if !best.isDirect() {
+		return sourcePathRemoteUnknown
+	}
+	if best == src {
+		return sourcePathRemoteBest
+	}
+	return sourcePathRemoteNonBest
+}
+
+func classifySourcePathRemoteSlot(ep *endpoint, src epAddr) sourcePathRemoteSlotKind {
+	if ep == nil || !src.isDirect() {
+		return sourcePathRemotePathUnknown
+	}
+	now := mono.Now()
+	ep.mu.Lock()
+	defer ep.mu.Unlock()
+	for i, slot := range ep.sourcePathRemoteSlots {
+		if slot == src {
+			ep.sourcePathRemoteSeen[i] = now
+			if i == 0 {
+				return sourcePathRemotePath0
+			}
+			return sourcePathRemotePath1
+		}
+	}
+	for i, slot := range ep.sourcePathRemoteSlots {
+		if !slot.ap.IsValid() {
+			ep.sourcePathRemoteSlots[i] = src
+			ep.sourcePathRemoteSeen[i] = now
+			if i == 0 {
+				return sourcePathRemotePath0
+			}
+			return sourcePathRemotePath1
+		}
+	}
+	for i, slot := range ep.sourcePathRemoteSlots {
+		seen := ep.sourcePathRemoteSeen[i]
+		if seen.IsZero() || now.Sub(seen) > sessionActiveTimeout {
+			ep.sourcePathRemoteSlots[i] = src
+			ep.sourcePathRemoteSeen[i] = now
+			if i == 0 {
+				return sourcePathRemotePath0
+			}
+			return sourcePathRemotePath1
+		}
+		if st, ok := ep.endpointState[slot.ap]; ok && st.shouldDeleteLocked() {
+			ep.sourcePathRemoteSlots[i] = src
+			ep.sourcePathRemoteSeen[i] = now
+			if i == 0 {
+				return sourcePathRemotePath0
+			}
+			return sourcePathRemotePath1
+		}
+	}
+	return sourcePathRemotePathOther
+}
+
+type sourcePathPeerAwareEndpoint struct {
+	*endpoint
+	src    epAddr
+	rxMeta sourceRxMeta
+}
+
+var _ conn.PeerAwareEndpoint = (*sourcePathPeerAwareEndpoint)(nil)
+
+type sourcePathPeerAwareKey struct {
+	src    epAddr
+	rxMeta sourceRxMeta
+}
+
+func (ep *endpoint) sourcePathPeerAwareEndpoint(src epAddr, rxMeta sourceRxMeta) conn.Endpoint {
+	ep.mu.Lock()
+	defer ep.mu.Unlock()
+	key := sourcePathPeerAwareKey{src: src, rxMeta: rxMeta}
+	if wrapped, ok := ep.sourcePathPeerAware[key]; ok {
+		return wrapped
+	}
+	if ep.sourcePathPeerAware == nil {
+		ep.sourcePathPeerAware = make(map[sourcePathPeerAwareKey]*sourcePathPeerAwareEndpoint, 2)
+	}
+	if len(ep.sourcePathPeerAware) >= sourcePathPeerAwareCacheLimit {
+		for stale := range ep.sourcePathPeerAware {
+			delete(ep.sourcePathPeerAware, stale)
+			break
+		}
+	}
+	wrapped := &sourcePathPeerAwareEndpoint{endpoint: ep, src: src, rxMeta: rxMeta}
+	ep.sourcePathPeerAware[key] = wrapped
+	return wrapped
+}
+
+func (ep *sourcePathPeerAwareEndpoint) FromPeer(peerPublicKey [32]byte) {
+	pubKey := key.NodePublicFromRaw32(mem.B(peerPublicKey[:]))
+	if pubKey.Compare(ep.publicKey) != 0 {
+		return
+	}
+	noteSourcePathLocalWireGuardAccepted(ep.rxMeta)
+	noteSourcePathRemoteWireGuardAccepted(ep.endpoint, ep.src)
 }
 
 // discoLogLevel controls the verbosity of discovery log messages.
@@ -2163,6 +2444,9 @@ const (
 	primarySourceSocketID SourceSocketID = iota
 	sourceIPv4SocketID
 	sourceIPv6SocketID
+
+	sourceIPv4ExtraSocketIDBase SourceSocketID = 100
+	sourceIPv6ExtraSocketIDBase SourceSocketID = 200
 )
 
 type sourceRxMeta struct {
@@ -4310,22 +4594,75 @@ var (
 	metricSendDERP      = clientmetric.NewAggregateCounter("magicsock_send_derp")
 
 	// Data packets (non-disco)
-	metricSendData                          = clientmetric.NewCounter("magicsock_send_data")
-	metricSendDataNetworkDown               = clientmetric.NewCounter("magicsock_send_data_network_down")
-	metricSourcePathDataSendAuxSelected     = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_selected")
-	metricSourcePathDataSendAuxSucceeded    = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_succeeded")
-	metricSourcePathDataSendAuxFallback     = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_fallback")
-	metricSourcePathProbePongAccepted       = clientmetric.NewCounter("magicsock_srcsel_probe_pong_accepted")
-	metricSourcePathProbePendingExpired     = clientmetric.NewCounter("magicsock_srcsel_probe_pending_expired")
-	metricSourcePathProbePongExpired        = clientmetric.NewCounter("magicsock_srcsel_probe_pong_expired")
-	metricSourcePathProbePeerBudgetDropped  = clientmetric.NewCounter("magicsock_srcsel_probe_peer_budget_dropped")
-	metricSourcePathProbeBurstBudgetDropped = clientmetric.NewCounter("magicsock_srcsel_probe_burst_budget_dropped")
-	metricSourcePathProbeHardCapDropped     = clientmetric.NewCounter("magicsock_srcsel_probe_hard_cap_dropped")
-	metricSourcePathProbeSamplesExpired     = clientmetric.NewCounter("magicsock_srcsel_probe_samples_expired")
-	metricSourcePathProbeSamplesEvicted     = clientmetric.NewCounter("magicsock_srcsel_probe_samples_evicted")
-	metricSourcePathAuxWireGuardRx          = clientmetric.NewCounter("magicsock_srcsel_aux_wireguard_rx")
-	metricSourcePathSendFailureInvalidated  = clientmetric.NewCounter("magicsock_srcsel_send_failure_invalidated_samples")
-	metricSourcePathPrimaryBeatRejected     = clientmetric.NewCounter("magicsock_srcsel_primary_beat_rejected")
+	metricSendData                                     = clientmetric.NewCounter("magicsock_send_data")
+	metricSendDataNetworkDown                          = clientmetric.NewCounter("magicsock_send_data_network_down")
+	metricSourcePathDataSendAuxSelected                = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_selected")
+	metricSourcePathDataSendAuxSucceeded               = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_succeeded")
+	metricSourcePathDataSendAuxFallback                = clientmetric.NewCounter("magicsock_srcsel_data_send_aux_fallback")
+	metricSourcePathProbePongAccepted                  = clientmetric.NewCounter("magicsock_srcsel_probe_pong_accepted")
+	metricSourcePathProbePendingExpired                = clientmetric.NewCounter("magicsock_srcsel_probe_pending_expired")
+	metricSourcePathProbePongExpired                   = clientmetric.NewCounter("magicsock_srcsel_probe_pong_expired")
+	metricSourcePathProbePeerBudgetDropped             = clientmetric.NewCounter("magicsock_srcsel_probe_peer_budget_dropped")
+	metricSourcePathProbeBurstBudgetDropped            = clientmetric.NewCounter("magicsock_srcsel_probe_burst_budget_dropped")
+	metricSourcePathProbeHardCapDropped                = clientmetric.NewCounter("magicsock_srcsel_probe_hard_cap_dropped")
+	metricSourcePathProbeSamplesExpired                = clientmetric.NewCounter("magicsock_srcsel_probe_samples_expired")
+	metricSourcePathProbeSamplesEvicted                = clientmetric.NewCounter("magicsock_srcsel_probe_samples_evicted")
+	metricSourcePathProbeOutcomesEvicted               = clientmetric.NewCounter("magicsock_srcsel_probe_outcomes_evicted")
+	metricSourcePathPrimaryWireGuardRx                 = clientmetric.NewCounter("magicsock_srcsel_primary_wireguard_rx")
+	metricSourcePathAuxWireGuardRx                     = clientmetric.NewCounter("magicsock_srcsel_aux_wireguard_rx")
+	metricSourcePathLocalPath0WireGuardRx              = clientmetric.NewCounter("magicsock_srcsel_local_path0_wireguard_rx")
+	metricSourcePathLocalPath1WireGuardRx              = clientmetric.NewCounter("magicsock_srcsel_local_path1_wireguard_rx")
+	metricSourcePathLocalPath0WireGuardAccepted        = clientmetric.NewCounter("magicsock_srcsel_local_path0_wireguard_accepted")
+	metricSourcePathLocalPath1WireGuardAccepted        = clientmetric.NewCounter("magicsock_srcsel_local_path1_wireguard_accepted")
+	metricSourcePathRemoteBestWireGuardRx              = clientmetric.NewCounter("magicsock_srcsel_remote_best_wireguard_rx")
+	metricSourcePathRemoteNonBestWireGuardRx           = clientmetric.NewCounter("magicsock_srcsel_remote_non_best_wireguard_rx")
+	metricSourcePathRemoteUnknownWireGuardRx           = clientmetric.NewCounter("magicsock_srcsel_remote_unknown_wireguard_rx")
+	metricSourcePathRemoteBestWireGuardAccepted        = clientmetric.NewCounter("magicsock_srcsel_remote_best_wireguard_accepted")
+	metricSourcePathRemoteNonBestWireGuardAccepted     = clientmetric.NewCounter("magicsock_srcsel_remote_non_best_wireguard_accepted")
+	metricSourcePathRemoteUnknownWireGuardAccepted     = clientmetric.NewCounter("magicsock_srcsel_remote_unknown_wireguard_accepted")
+	metricSourcePathRemotePath0WireGuardRx             = clientmetric.NewCounter("magicsock_srcsel_remote_path0_wireguard_rx")
+	metricSourcePathRemotePath1WireGuardRx             = clientmetric.NewCounter("magicsock_srcsel_remote_path1_wireguard_rx")
+	metricSourcePathRemotePathOtherWireGuardRx         = clientmetric.NewCounter("magicsock_srcsel_remote_path_other_wireguard_rx")
+	metricSourcePathRemotePathUnknownWireGuardRx       = clientmetric.NewCounter("magicsock_srcsel_remote_path_unknown_wireguard_rx")
+	metricSourcePathRemotePath0WireGuardAccepted       = clientmetric.NewCounter("magicsock_srcsel_remote_path0_wireguard_accepted")
+	metricSourcePathRemotePath1WireGuardAccepted       = clientmetric.NewCounter("magicsock_srcsel_remote_path1_wireguard_accepted")
+	metricSourcePathRemotePathOtherWireGuardAccepted   = clientmetric.NewCounter("magicsock_srcsel_remote_path_other_wireguard_accepted")
+	metricSourcePathRemotePathUnknownWireGuardAccepted = clientmetric.NewCounter("magicsock_srcsel_remote_path_unknown_wireguard_accepted")
+	metricSourcePathSendFailureInvalidated             = clientmetric.NewCounter("magicsock_srcsel_send_failure_invalidated_samples")
+	metricSourcePathPrimaryBeatRejected                = clientmetric.NewCounter("magicsock_srcsel_primary_beat_rejected")
+	metricSourcePathHardAvoidLatency                   = clientmetric.NewCounter("magicsock_srcsel_hard_avoid_latency")
+	metricSourcePathHardAvoidJitter                    = clientmetric.NewCounter("magicsock_srcsel_hard_avoid_jitter")
+	metricSourcePathHardAvoidLoss                      = clientmetric.NewCounter("magicsock_srcsel_hard_avoid_loss")
+	metricSourcePathDualSendPackets                    = clientmetric.NewCounter("magicsock_srcsel_dual_send_packets")
+	metricSourcePathDualSendPrimaryPackets             = clientmetric.NewCounter("magicsock_srcsel_dual_send_primary_packets")
+	metricSourcePathDualSendAuxPackets                 = clientmetric.NewCounter("magicsock_srcsel_dual_send_aux_packets")
+	metricSourcePathDualSendPrimaryFailed              = clientmetric.NewCounter("magicsock_srcsel_dual_send_primary_failed")
+	metricSourcePathDualSendAuxFailed                  = clientmetric.NewCounter("magicsock_srcsel_dual_send_aux_failed")
+	metricSourcePathDualSendBothFailed                 = clientmetric.NewCounter("magicsock_srcsel_dual_send_both_failed")
+	metricSourcePathDualSendDemotedAuxStreak           = clientmetric.NewCounter("magicsock_srcsel_dual_send_demoted_aux_streak")
+	metricSourcePathDualSendSkippedSkew                = clientmetric.NewCounter("magicsock_srcsel_dual_send_skipped_skew")
+	metricSourcePathDualSendDegradedSinglePeriods      = clientmetric.NewCounter("magicsock_srcsel_dual_send_degraded_single_periods")
+	metricSourcePathDualSendDegradedSinglePackets      = clientmetric.NewCounter("magicsock_srcsel_dual_send_degraded_single_packets")
+	metricSourcePathDualSendDegradedSingleRecovered    = clientmetric.NewCounter("magicsock_srcsel_dual_send_degraded_single_recovered")
+	metricSourcePathDualSendDegradedSingleDurationMS   = clientmetric.NewCounter("magicsock_srcsel_dual_send_degraded_single_duration_ms")
+	metricSourcePathDualSendDegradedSingleActivePeers  = clientmetric.NewGauge("magicsock_srcsel_dual_send_degraded_single_active_peers")
+	metricSourcePathDualEndpointPackets                = clientmetric.NewCounter("magicsock_srcsel_dual_endpoint_packets")
+	metricSourcePathDualEndpointPrimaryFailed          = clientmetric.NewCounter("magicsock_srcsel_dual_endpoint_primary_failed")
+	metricSourcePathDualEndpointSecondaryFailed        = clientmetric.NewCounter("magicsock_srcsel_dual_endpoint_secondary_failed")
+	metricSourcePathDualEndpointBothFailed             = clientmetric.NewCounter("magicsock_srcsel_dual_endpoint_both_failed")
+	metricSourcePathDualEndpointObservedRemoved        = clientmetric.NewCounter("magicsock_srcsel_dual_endpoint_observed_removed")
+	metricSourcePathDualSendAuxRebinds                 = clientmetric.NewCounter("magicsock_srcsel_dual_send_aux_rebinds")
+	metricSourcePathDualSendAuxRebindFailed            = clientmetric.NewCounter("magicsock_srcsel_dual_send_aux_rebind_failed")
+	metricSourcePathPrimaryUnhealthySendStreak         = clientmetric.NewCounter("magicsock_srcsel_primary_unhealthy_send_streak")
+	metricSourcePathFailoverToAux                      = clientmetric.NewCounter("magicsock_srcsel_failover_to_aux")
+	metricSourcePathFailoverRecoveredToPrimary         = clientmetric.NewCounter("magicsock_srcsel_failover_recovered_to_primary")
+	metricSourcePathFailoverAuxAlsoDead                = clientmetric.NewCounter("magicsock_srcsel_failover_aux_also_dead")
+	metricSourcePathFlowAssignedPrimary                = clientmetric.NewCounter("magicsock_srcsel_flow_assigned_primary")
+	metricSourcePathFlowAssignedAux                    = clientmetric.NewCounter("magicsock_srcsel_flow_assigned_aux")
+	metricSourcePathFlowEvictedIdle                    = clientmetric.NewCounter("magicsock_srcsel_flow_evicted_idle")
+	metricSourcePathFlowEvictedCap                     = clientmetric.NewCounter("magicsock_srcsel_flow_evicted_cap")
+	metricSourcePathFlowEvictedSourceFailure           = clientmetric.NewCounter("magicsock_srcsel_flow_evicted_source_failure")
+	metricSourcePathFlowHintUnavailable                = clientmetric.NewCounter("magicsock_srcsel_flow_hint_unavailable")
 	// Phase 22 v2: direct-vs-relay latency-aware switching counters.
 	// Only incremented when TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE=true.
 	metricDirectVsRelayCompared            = clientmetric.NewCounter("magicsock_direct_vs_relay_compared")
@@ -4333,18 +4670,18 @@ var (
 	metricDirectVsRelayGateDirectPreferred = clientmetric.NewCounter("magicsock_direct_vs_relay_gate_direct_preferred")
 	metricDirectVsRelayHoldRejected        = clientmetric.NewCounter("magicsock_direct_vs_relay_hold_rejected")
 	// Phase 21: dynamic-multi-endpoint-advertise file watcher counters.
-	metricExtraEndpointsReads   = clientmetric.NewCounter("magicsock_extra_endpoints_reads")
-	metricExtraEndpointsReloads = clientmetric.NewCounter("magicsock_extra_endpoints_reloads")
-	metricRecvDataPacketsDERP               = clientmetric.NewAggregateCounter("magicsock_recv_data_derp")
-	metricRecvDataPacketsIPv4               = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv4")
-	metricRecvDataPacketsIPv6               = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv6")
-	metricRecvDataPacketsPeerRelayIPv4      = clientmetric.NewAggregateCounter("magicsock_recv_data_peer_relay_ipv4")
-	metricRecvDataPacketsPeerRelayIPv6      = clientmetric.NewAggregateCounter("magicsock_recv_data_peer_relay_ipv6")
-	metricSendDataPacketsDERP               = clientmetric.NewAggregateCounter("magicsock_send_data_derp")
-	metricSendDataPacketsIPv4               = clientmetric.NewAggregateCounter("magicsock_send_data_ipv4")
-	metricSendDataPacketsIPv6               = clientmetric.NewAggregateCounter("magicsock_send_data_ipv6")
-	metricSendDataPacketsPeerRelayIPv4      = clientmetric.NewAggregateCounter("magicsock_send_data_peer_relay_ipv4")
-	metricSendDataPacketsPeerRelayIPv6      = clientmetric.NewAggregateCounter("magicsock_send_data_peer_relay_ipv6")
+	metricExtraEndpointsReads          = clientmetric.NewCounter("magicsock_extra_endpoints_reads")
+	metricExtraEndpointsReloads        = clientmetric.NewCounter("magicsock_extra_endpoints_reloads")
+	metricRecvDataPacketsDERP          = clientmetric.NewAggregateCounter("magicsock_recv_data_derp")
+	metricRecvDataPacketsIPv4          = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv4")
+	metricRecvDataPacketsIPv6          = clientmetric.NewAggregateCounter("magicsock_recv_data_ipv6")
+	metricRecvDataPacketsPeerRelayIPv4 = clientmetric.NewAggregateCounter("magicsock_recv_data_peer_relay_ipv4")
+	metricRecvDataPacketsPeerRelayIPv6 = clientmetric.NewAggregateCounter("magicsock_recv_data_peer_relay_ipv6")
+	metricSendDataPacketsDERP          = clientmetric.NewAggregateCounter("magicsock_send_data_derp")
+	metricSendDataPacketsIPv4          = clientmetric.NewAggregateCounter("magicsock_send_data_ipv4")
+	metricSendDataPacketsIPv6          = clientmetric.NewAggregateCounter("magicsock_send_data_ipv6")
+	metricSendDataPacketsPeerRelayIPv4 = clientmetric.NewAggregateCounter("magicsock_send_data_peer_relay_ipv4")
+	metricSendDataPacketsPeerRelayIPv6 = clientmetric.NewAggregateCounter("magicsock_send_data_peer_relay_ipv6")
 
 	// Data bytes (non-disco)
 	metricRecvDataBytesDERP          = clientmetric.NewAggregateCounter("magicsock_recv_data_bytes_derp")
@@ -4497,6 +4834,7 @@ type lazyEndpoint struct {
 	c       *Conn
 	maybeEP *endpoint // or nil if unknown
 	src     epAddr
+	rxMeta  sourceRxMeta
 }
 
 var _ conn.InitiationAwareEndpoint = (*lazyEndpoint)(nil)
@@ -4569,6 +4907,8 @@ func (le *lazyEndpoint) DstToBytes() []byte {
 func (le *lazyEndpoint) FromPeer(peerPublicKey [32]byte) {
 	pubKey := key.NodePublicFromRaw32(mem.B(peerPublicKey[:]))
 	if le.maybeEP != nil && pubKey.Compare(le.maybeEP.publicKey) == 0 {
+		noteSourcePathLocalWireGuardAccepted(le.rxMeta)
+		noteSourcePathRemoteWireGuardAccepted(le.maybeEP, le.src)
 		return
 	}
 	le.c.mu.Lock()
@@ -4577,6 +4917,8 @@ func (le *lazyEndpoint) FromPeer(peerPublicKey [32]byte) {
 	if !ok {
 		return
 	}
+	noteSourcePathLocalWireGuardAccepted(le.rxMeta)
+	noteSourcePathRemoteWireGuardAccepted(ep, le.src)
 	// TODO(jwhited): Consider [lazyEndpoint] effectiveness as a means to make
 	//  this the sole call site for setNodeKeyForEpAddr. If this is the sole
 	//  call site, and we always update the mapping based on successful

@@ -873,10 +873,70 @@ func (c *Direct) doLogin(ctx context.Context, opt loginOpt) (mustRegen bool, new
 	c.persist = persist.View()
 	c.mu.Unlock()
 
+	if resp.AuthURL == "" {
+		if err := c.maybeBindMultiportAuth(ctx, request.NodeKey, machinePrivKey.Public()); err != nil {
+			if envknob.Bool("TS_MULTI_AUTH_BIND_REQUIRED") {
+				return false, "", nil, err
+			}
+			c.logf("multiport auth bind failed: %v", err)
+		}
+	}
+
 	if ctx.Err() != nil {
 		return regen, "", nil, ctx.Err()
 	}
 	return false, resp.AuthURL, nil, nil
+}
+
+type multiportAuthBindRequest struct {
+	Ticket        string `json:"ticket"`
+	NodePublic    string `json:"node_public"`
+	MachinePublic string `json:"machine_public,omitempty"`
+}
+
+func (c *Direct) maybeBindMultiportAuth(ctx context.Context, nodeKey key.NodePublic, machineKey key.MachinePublic) error {
+	bindURL := strings.TrimSpace(os.Getenv("TS_MULTI_AUTH_BIND_URL"))
+	ticket := strings.TrimSpace(os.Getenv("TS_MULTI_AUTH_TICKET"))
+	if bindURL == "" && ticket == "" {
+		return nil
+	}
+	if bindURL == "" {
+		return errors.New("TS_MULTI_AUTH_BIND_URL is empty")
+	}
+	if ticket == "" {
+		return errors.New("TS_MULTI_AUTH_TICKET is empty")
+	}
+
+	bodyData, err := json.Marshal(multiportAuthBindRequest{
+		Ticket:        ticket,
+		NodePublic:    nodeKey.String(),
+		MachinePublic: machineKey.String(),
+	})
+	if err != nil {
+		return fmt.Errorf("marshal multiport auth bind request: %w", err)
+	}
+
+	bindCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(bindCtx, "POST", bindURL, bytes.NewReader(bodyData))
+	if err != nil {
+		return fmt.Errorf("new multiport auth bind request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("multiport auth bind: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		msg, _ := io.ReadAll(io.LimitReader(res.Body, 512))
+		return fmt.Errorf("multiport auth bind: http %d: %.200s", res.StatusCode, strings.TrimSpace(string(msg)))
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 512))
+	return nil
 }
 
 // newEndpoints acquires c.mu and sets the local port and endpoints and reports

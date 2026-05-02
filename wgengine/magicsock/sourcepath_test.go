@@ -5,14 +5,17 @@ package magicsock
 
 import (
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"tailscale.com/disco"
 	"tailscale.com/net/stun"
+	"tailscale.com/tstest"
 	"tailscale.com/tstime/mono"
 	"tailscale.com/types/key"
+	"tailscale.com/types/logger"
 )
 
 func TestPrimarySourceRxMeta(t *testing.T) {
@@ -703,11 +706,23 @@ func TestReceiveIPAuxiliaryAcceptsWireGuard(t *testing.T) {
 	// naked-WireGuard branch in packetLooksLike.
 	pkt := []byte{0x04, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef}
 
+	primaryBefore := metricSourcePathPrimaryWireGuardRx.Value()
 	before := metricSourcePathAuxWireGuardRx.Value()
+	local0Before := metricSourcePathLocalPath0WireGuardRx.Value()
+	local1Before := metricSourcePathLocalPath1WireGuardRx.Value()
 	ep, size, _, ok := c.receiveIPWithSource(pkt, src, &cache, aux)
 
+	if got := metricSourcePathPrimaryWireGuardRx.Value() - primaryBefore; got != 0 {
+		t.Fatalf("primary WG rx metric delta = %d, want 0 for auxiliary receive", got)
+	}
 	if got := metricSourcePathAuxWireGuardRx.Value() - before; got != 1 {
 		t.Fatalf("aux WG rx metric delta = %d, want 1 (auxiliary WireGuard receive drop is still in place)", got)
+	}
+	if got := metricSourcePathLocalPath0WireGuardRx.Value() - local0Before; got != 0 {
+		t.Fatalf("local path0 WG rx metric delta = %d, want 0 for auxiliary receive", got)
+	}
+	if got := metricSourcePathLocalPath1WireGuardRx.Value() - local1Before; got != 1 {
+		t.Fatalf("local path1 WG rx metric delta = %d, want 1 for auxiliary receive", got)
 	}
 	if !ok {
 		t.Fatal("aux receive returned ok=false for a WireGuard-shaped packet; the previous unconditional drop is still in effect")
@@ -717,6 +732,348 @@ func TestReceiveIPAuxiliaryAcceptsWireGuard(t *testing.T) {
 	}
 	if _, isLazy := ep.(*lazyEndpoint); !isLazy {
 		t.Fatalf("returned endpoint type = %T, want *lazyEndpoint", ep)
+	}
+}
+
+func TestReceiveIPPrimaryWireGuardMetric(t *testing.T) {
+	var c Conn
+	c.havePrivateKey.Store(true)
+	var cache epAddrEndpointCache
+	src := netip.MustParseAddrPort("192.0.2.2:41641")
+
+	// A non-disco, non-STUN, non-Geneve packet is classified as WireGuard.
+	pkt := []byte{0x04, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef}
+
+	primaryBefore := metricSourcePathPrimaryWireGuardRx.Value()
+	auxBefore := metricSourcePathAuxWireGuardRx.Value()
+	local0Before := metricSourcePathLocalPath0WireGuardRx.Value()
+	local1Before := metricSourcePathLocalPath1WireGuardRx.Value()
+	ep, size, _, ok := c.receiveIP(pkt, src, &cache)
+
+	if got := metricSourcePathPrimaryWireGuardRx.Value() - primaryBefore; got != 1 {
+		t.Fatalf("primary WG rx metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathAuxWireGuardRx.Value() - auxBefore; got != 0 {
+		t.Fatalf("aux WG rx metric delta = %d, want 0 for primary receive", got)
+	}
+	if got := metricSourcePathLocalPath0WireGuardRx.Value() - local0Before; got != 1 {
+		t.Fatalf("local path0 WG rx metric delta = %d, want 1 for primary receive", got)
+	}
+	if got := metricSourcePathLocalPath1WireGuardRx.Value() - local1Before; got != 0 {
+		t.Fatalf("local path1 WG rx metric delta = %d, want 0 for primary receive", got)
+	}
+	if !ok {
+		t.Fatal("primary receive returned ok=false for a WireGuard-shaped packet")
+	}
+	if size != len(pkt) {
+		t.Fatalf("size = %d, want %d", size, len(pkt))
+	}
+	if _, isLazy := ep.(*lazyEndpoint); !isLazy {
+		t.Fatalf("returned endpoint type = %T, want *lazyEndpoint", ep)
+	}
+}
+
+func TestReceiveIPRemoteWireGuardMetrics(t *testing.T) {
+	primary := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	aux := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:51000")}
+	pkt := []byte{0x04, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef}
+
+	var c Conn
+	c.havePrivateKey.Store(true)
+	c.logf = logger.Discard
+	c.peerMap = newPeerMap()
+	peerKey := key.NewNode().Public()
+	de := &endpoint{
+		c:         &c,
+		publicKey: peerKey,
+		bestAddr:  addrQuality{epAddr: primary},
+	}
+	c.peerMap.byNodeKey[peerKey] = newPeerInfo(de)
+	c.peerMap.setNodeKeyForEpAddr(primary, peerKey)
+	c.peerMap.setNodeKeyForEpAddr(aux, peerKey)
+
+	bestBefore := metricSourcePathRemoteBestWireGuardRx.Value()
+	nonBestBefore := metricSourcePathRemoteNonBestWireGuardRx.Value()
+	unknownBefore := metricSourcePathRemoteUnknownWireGuardRx.Value()
+	bestAcceptedBefore := metricSourcePathRemoteBestWireGuardAccepted.Value()
+	nonBestAcceptedBefore := metricSourcePathRemoteNonBestWireGuardAccepted.Value()
+	path0Before := metricSourcePathRemotePath0WireGuardRx.Value()
+	path1Before := metricSourcePathRemotePath1WireGuardRx.Value()
+	pathOtherBefore := metricSourcePathRemotePathOtherWireGuardRx.Value()
+	pathUnknownBefore := metricSourcePathRemotePathUnknownWireGuardRx.Value()
+	path0AcceptedBefore := metricSourcePathRemotePath0WireGuardAccepted.Value()
+	path1AcceptedBefore := metricSourcePathRemotePath1WireGuardAccepted.Value()
+	local0AcceptedBefore := metricSourcePathLocalPath0WireGuardAccepted.Value()
+	local1AcceptedBefore := metricSourcePathLocalPath1WireGuardAccepted.Value()
+
+	var cache epAddrEndpointCache
+	primaryEP, _, _, ok := c.receiveIP(pkt, primary.ap, &cache)
+	if !ok {
+		t.Fatal("primary endpoint receive returned ok=false")
+	}
+	primaryAware, ok := primaryEP.(*sourcePathPeerAwareEndpoint)
+	if !ok {
+		t.Fatalf("primary endpoint type = %T, want *sourcePathPeerAwareEndpoint", primaryEP)
+	}
+	primaryAware.FromPeer(peerKey.Raw32())
+	if got := metricSourcePathRemoteBestWireGuardRx.Value() - bestBefore; got != 1 {
+		t.Fatalf("remote best WG rx metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathRemoteBestWireGuardAccepted.Value() - bestAcceptedBefore; got != 1 {
+		t.Fatalf("remote best WG accepted metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathRemoteNonBestWireGuardRx.Value() - nonBestBefore; got != 0 {
+		t.Fatalf("remote non-best WG rx metric delta after primary = %d, want 0", got)
+	}
+	if got := metricSourcePathRemotePath0WireGuardRx.Value() - path0Before; got != 1 {
+		t.Fatalf("remote path0 WG rx metric delta after primary = %d, want 1", got)
+	}
+	if got := metricSourcePathRemotePath0WireGuardAccepted.Value() - path0AcceptedBefore; got != 1 {
+		t.Fatalf("remote path0 WG accepted metric delta after primary = %d, want 1", got)
+	}
+	if got := metricSourcePathLocalPath0WireGuardAccepted.Value() - local0AcceptedBefore; got != 1 {
+		t.Fatalf("local path0 WG accepted metric delta after primary = %d, want 1", got)
+	}
+	if got := metricSourcePathLocalPath1WireGuardAccepted.Value() - local1AcceptedBefore; got != 0 {
+		t.Fatalf("local path1 WG accepted metric delta after primary = %d, want 0", got)
+	}
+
+	cache = epAddrEndpointCache{}
+	auxEP, _, _, ok := c.receiveIPWithSource(pkt, aux.ap, &cache, sourceRxMeta{socketID: sourceIPv4SocketID, generation: 1})
+	if !ok {
+		t.Fatal("aux endpoint receive returned ok=false")
+	}
+	auxAware, ok := auxEP.(*sourcePathPeerAwareEndpoint)
+	if !ok {
+		t.Fatalf("aux endpoint type = %T, want *sourcePathPeerAwareEndpoint", auxEP)
+	}
+	auxAware.FromPeer(peerKey.Raw32())
+	if got := metricSourcePathRemoteNonBestWireGuardRx.Value() - nonBestBefore; got != 1 {
+		t.Fatalf("remote non-best WG rx metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathRemoteNonBestWireGuardAccepted.Value() - nonBestAcceptedBefore; got != 1 {
+		t.Fatalf("remote non-best WG accepted metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathRemoteUnknownWireGuardRx.Value() - unknownBefore; got != 0 {
+		t.Fatalf("remote unknown WG rx metric delta = %d, want 0", got)
+	}
+	if got := metricSourcePathRemotePath1WireGuardRx.Value() - path1Before; got != 1 {
+		t.Fatalf("remote path1 WG rx metric delta after aux = %d, want 1", got)
+	}
+	if got := metricSourcePathRemotePath1WireGuardAccepted.Value() - path1AcceptedBefore; got != 1 {
+		t.Fatalf("remote path1 WG accepted metric delta after aux = %d, want 1", got)
+	}
+	if got := metricSourcePathLocalPath0WireGuardAccepted.Value() - local0AcceptedBefore; got != 1 {
+		t.Fatalf("local path0 WG accepted metric delta after aux = %d, want 1", got)
+	}
+	if got := metricSourcePathLocalPath1WireGuardAccepted.Value() - local1AcceptedBefore; got != 1 {
+		t.Fatalf("local path1 WG accepted metric delta after aux = %d, want 1", got)
+	}
+	if got := metricSourcePathRemotePathOtherWireGuardRx.Value() - pathOtherBefore; got != 0 {
+		t.Fatalf("remote path-other WG rx metric delta = %d, want 0", got)
+	}
+	if got := metricSourcePathRemotePathUnknownWireGuardRx.Value() - pathUnknownBefore; got != 0 {
+		t.Fatalf("remote path-unknown WG rx metric delta = %d, want 0", got)
+	}
+}
+
+func TestReceiveIPRemoteUnknownWireGuardMetric(t *testing.T) {
+	var c Conn
+	c.havePrivateKey.Store(true)
+	c.logf = logger.Discard
+	c.peerMap = newPeerMap()
+	peerKey := key.NewNode().Public()
+	de := &endpoint{
+		c:         &c,
+		publicKey: peerKey,
+	}
+	c.peerMap.byNodeKey[peerKey] = newPeerInfo(de)
+	var cache epAddrEndpointCache
+	src := netip.MustParseAddrPort("192.0.2.99:41641")
+	pkt := []byte{0x04, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef}
+
+	bestBefore := metricSourcePathRemoteBestWireGuardRx.Value()
+	nonBestBefore := metricSourcePathRemoteNonBestWireGuardRx.Value()
+	unknownBefore := metricSourcePathRemoteUnknownWireGuardRx.Value()
+	unknownAcceptedBefore := metricSourcePathRemoteUnknownWireGuardAccepted.Value()
+	path0AcceptedBefore := metricSourcePathRemotePath0WireGuardAccepted.Value()
+	pathUnknownBefore := metricSourcePathRemotePathUnknownWireGuardRx.Value()
+	local0AcceptedBefore := metricSourcePathLocalPath0WireGuardAccepted.Value()
+	ep, _, _, ok := c.receiveIP(pkt, src, &cache)
+	if !ok {
+		t.Fatal("unknown endpoint receive returned ok=false")
+	}
+	lazy, ok := ep.(*lazyEndpoint)
+	if !ok {
+		t.Fatalf("unknown endpoint type = %T, want *lazyEndpoint", ep)
+	}
+	lazy.FromPeer(peerKey.Raw32())
+	if got := metricSourcePathRemoteBestWireGuardRx.Value() - bestBefore; got != 0 {
+		t.Fatalf("remote best WG rx metric delta = %d, want 0", got)
+	}
+	if got := metricSourcePathRemoteNonBestWireGuardRx.Value() - nonBestBefore; got != 0 {
+		t.Fatalf("remote non-best WG rx metric delta = %d, want 0", got)
+	}
+	if got := metricSourcePathRemoteUnknownWireGuardRx.Value() - unknownBefore; got != 1 {
+		t.Fatalf("remote unknown WG rx metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathRemoteUnknownWireGuardAccepted.Value() - unknownAcceptedBefore; got != 1 {
+		t.Fatalf("remote unknown WG accepted metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathRemotePathUnknownWireGuardRx.Value() - pathUnknownBefore; got != 1 {
+		t.Fatalf("remote path-unknown WG rx metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathRemotePath0WireGuardAccepted.Value() - path0AcceptedBefore; got != 1 {
+		t.Fatalf("remote path0 WG accepted metric delta = %d, want 1 after peer identification", got)
+	}
+	if got := metricSourcePathLocalPath0WireGuardAccepted.Value() - local0AcceptedBefore; got != 1 {
+		t.Fatalf("local path0 WG accepted metric delta = %d, want 1 after peer identification", got)
+	}
+}
+
+func TestClassifySourcePathRemoteSlotReplacesStaleSlot(t *testing.T) {
+	now := mono.Now()
+	primary := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
+	stale := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:51641")}
+	fresh := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:61641")}
+	ep := &endpoint{
+		sourcePathRemoteSlots: [2]epAddr{primary, stale},
+		sourcePathRemoteSeen:  [2]mono.Time{now, now.Add(-2 * sessionActiveTimeout)},
+	}
+
+	if got := classifySourcePathRemoteSlot(ep, fresh); got != sourcePathRemotePath1 {
+		t.Fatalf("classifySourcePathRemoteSlot = %v, want path1", got)
+	}
+	if ep.sourcePathRemoteSlots[1] != fresh {
+		t.Fatalf("slot1 = %v, want fresh source %v", ep.sourcePathRemoteSlots[1], fresh)
+	}
+	if ep.sourcePathRemoteSeen[1].IsZero() {
+		t.Fatal("slot1 seen time was not refreshed")
+	}
+}
+
+func TestClassifySourcePathRemoteSlotReplacesDeletedEndpointSlot(t *testing.T) {
+	now := mono.Now()
+	primary := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
+	deleted := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:51641")}
+	fresh := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:61641")}
+	ep := &endpoint{
+		endpointState: map[netip.AddrPort]*endpointState{
+			deleted.ap: {index: indexSentinelDeleted},
+		},
+		sourcePathRemoteSlots: [2]epAddr{primary, deleted},
+		sourcePathRemoteSeen:  [2]mono.Time{now, now},
+	}
+
+	if got := classifySourcePathRemoteSlot(ep, fresh); got != sourcePathRemotePath1 {
+		t.Fatalf("classifySourcePathRemoteSlot = %v, want path1", got)
+	}
+	if ep.sourcePathRemoteSlots[1] != fresh {
+		t.Fatalf("slot1 = %v, want fresh source %v", ep.sourcePathRemoteSlots[1], fresh)
+	}
+}
+
+func TestNoteSourcePathObservedEndpointFailureClearsSlot(t *testing.T) {
+	now := mono.Now()
+	primary := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
+	secondary := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:51641")}
+	ep := &endpoint{
+		c:                     &Conn{},
+		sourcePathRemoteSlots: [2]epAddr{primary, secondary},
+		sourcePathRemoteSeen:  [2]mono.Time{now, now},
+	}
+	removedBefore := metricSourcePathDualEndpointObservedRemoved.Value()
+
+	ep.noteSourcePathObservedEndpointFailure(secondary, errSourcePathUnavailable)
+
+	if ep.sourcePathRemoteSlots[0] != primary {
+		t.Fatalf("slot0 = %v, want primary %v", ep.sourcePathRemoteSlots[0], primary)
+	}
+	if ep.sourcePathRemoteSlots[1] != (epAddr{}) {
+		t.Fatalf("slot1 = %v, want cleared", ep.sourcePathRemoteSlots[1])
+	}
+	if !ep.sourcePathRemoteSeen[1].IsZero() {
+		t.Fatal("slot1 seen time was not cleared")
+	}
+	if got := metricSourcePathDualEndpointObservedRemoved.Value() - removedBefore; got != 1 {
+		t.Fatalf("observed endpoint removed metric delta = %d, want 1", got)
+	}
+}
+
+func TestSourcePathDualSendAvailabilityLogsDegradeAndRecovery(t *testing.T) {
+	var logs tstest.MemLogger
+	de := &endpoint{
+		c:         &Conn{logf: logs.Logf},
+		publicKey: key.NewNode().Public(),
+	}
+	now := mono.Now()
+	periodsBefore := metricSourcePathDualSendDegradedSinglePeriods.Value()
+	packetsBefore := metricSourcePathDualSendDegradedSinglePackets.Value()
+	recoveredBefore := metricSourcePathDualSendDegradedSingleRecovered.Value()
+	durationBefore := metricSourcePathDualSendDegradedSingleDurationMS.Value()
+	activeBefore := metricSourcePathDualSendDegradedSingleActivePeers.Value()
+
+	de.noteSourcePathDualSendAvailability(now, "", "no-redundant-path", 3)
+	de.noteSourcePathDualSendAvailability(now.Add(100*time.Millisecond), "", "no-redundant-path", 2)
+	de.noteSourcePathDualSendAvailability(now.Add(2500*time.Millisecond), "aux-source", "", 1)
+
+	if got := metricSourcePathDualSendDegradedSinglePeriods.Value() - periodsBefore; got != 1 {
+		t.Fatalf("degraded single periods delta = %d, want 1", got)
+	}
+	if got := metricSourcePathDualSendDegradedSinglePackets.Value() - packetsBefore; got != 5 {
+		t.Fatalf("degraded single packets delta = %d, want 5", got)
+	}
+	if got := metricSourcePathDualSendDegradedSingleRecovered.Value() - recoveredBefore; got != 1 {
+		t.Fatalf("degraded single recovered delta = %d, want 1", got)
+	}
+	if got := metricSourcePathDualSendDegradedSingleDurationMS.Value() - durationBefore; got != 2500 {
+		t.Fatalf("degraded single duration ms delta = %d, want 2500", got)
+	}
+	if got := metricSourcePathDualSendDegradedSingleActivePeers.Value() - activeBefore; got != 0 {
+		t.Fatalf("degraded single active peers delta = %d, want 0", got)
+	}
+	logText := logs.String()
+	for _, want := range []string{
+		"degraded to single-send reason=no-redundant-path",
+		"recovered dual-send mode=aux-source",
+		"single_duration=2.5s",
+		"single_packets=5",
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("log output missing %q; logs:\n%s", want, logText)
+		}
+	}
+}
+
+func TestSourcePathPeerAwareEndpointReusedPerRemoteSource(t *testing.T) {
+	ep := &endpoint{}
+	src0 := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
+	src1 := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:51641")}
+	auxMeta := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 1}
+
+	wrapper0 := ep.sourcePathPeerAwareEndpoint(src0, primarySourceRxMeta)
+	if wrapper0 != ep.sourcePathPeerAwareEndpoint(src0, primarySourceRxMeta) {
+		t.Fatal("sourcePathPeerAwareEndpoint did not reuse wrapper for the same source and local receive path")
+	}
+	if wrapper0 == ep.sourcePathPeerAwareEndpoint(src1, primarySourceRxMeta) {
+		t.Fatal("sourcePathPeerAwareEndpoint reused wrapper across different sources")
+	}
+	if wrapper0 == ep.sourcePathPeerAwareEndpoint(src0, auxMeta) {
+		t.Fatal("sourcePathPeerAwareEndpoint reused wrapper across different local receive paths")
+	}
+}
+
+func TestSourcePathPeerAwareEndpointCacheEvictsButKeepsPeerAware(t *testing.T) {
+	ep := &endpoint{}
+	for i := 0; i < sourcePathPeerAwareCacheLimit+3; i++ {
+		src := epAddr{ap: netip.AddrPortFrom(netip.MustParseAddr("192.0.2.1"), uint16(40000+i))}
+		wrapper := ep.sourcePathPeerAwareEndpoint(src, primarySourceRxMeta)
+		if _, ok := wrapper.(interface{ FromPeer([32]byte) }); !ok {
+			t.Fatalf("wrapper for source %d is %T, want peer-aware endpoint", i, wrapper)
+		}
+		if len(ep.sourcePathPeerAware) > sourcePathPeerAwareCacheLimit {
+			t.Fatalf("sourcePathPeerAware size = %d, want <= %d", len(ep.sourcePathPeerAware), sourcePathPeerAwareCacheLimit)
+		}
 	}
 }
 

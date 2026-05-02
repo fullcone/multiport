@@ -7,19 +7,23 @@ package magicsock
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"net"
 	"net/netip"
+	"strconv"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/tailscale/wireguard-go/device"
 	"github.com/tailscale/wireguard-go/tun/tuntest"
 	"tailscale.com/envknob"
 	"tailscale.com/net/packet"
 	"tailscale.com/net/stun"
 	"tailscale.com/tstime/mono"
+	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/netmap"
 	"tailscale.com/types/nettype"
@@ -88,6 +92,503 @@ func TestSourcePathProbeManagerPrimaryBaselineThresholdEnvClampedTo100(t *testin
 	}
 }
 
+func TestSourcePathProbeManagerMultiMetricPrefersLowJitter(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MULTI_METRIC", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_SCORE_WEIGHTS", "lat=0.1,jit=0.8,loss=0.1")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MULTI_METRIC", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_SCORE_WEIGHTS", "")
+	})
+
+	var pm sourcePathProbeManager
+	now := mono.Now()
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	jittery := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 5}
+	stable := sourceRxMeta{socketID: sourceIPv6SocketID, generation: 5}
+
+	for i, lat := range []time.Duration{1 * time.Millisecond, 20 * time.Millisecond, 39 * time.Millisecond} {
+		pm.samples = append(pm.samples, sourcePathProbeSample{
+			dst:     dst,
+			source:  jittery,
+			latency: lat,
+			at:      now.Add(-time.Duration(i+1) * time.Second),
+		})
+	}
+	for i := 0; i < sourcePathMinSamplesForUse; i++ {
+		pm.samples = append(pm.samples, sourcePathProbeSample{
+			dst:     dst,
+			source:  stable,
+			latency: 25 * time.Millisecond,
+			at:      now.Add(-time.Duration(i+1) * time.Second),
+		})
+	}
+
+	score, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{jittery, stable}, now, 0)
+	if !ok {
+		t.Fatal("expected multi-metric candidate")
+	}
+	if score.source != stable {
+		t.Fatalf("multi-metric selected source %+v, want stable source %+v", score.source, stable)
+	}
+	if score.jitter != 0 {
+		t.Fatalf("stable source jitter = %v, want 0", score.jitter)
+	}
+}
+
+func TestSourcePathProbeManagerMultiMetricHardAvoidLoss(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MULTI_METRIC", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_LOSS_MAX_PCT", "5")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MULTI_METRIC", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_LOSS_MAX_PCT", "")
+	})
+
+	var pm sourcePathProbeManager
+	now := mono.Now()
+	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 5}
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	for i := 0; i < sourcePathMinSamplesForUse; i++ {
+		pm.samples = append(pm.samples, sourcePathProbeSample{
+			dst:     dst,
+			source:  source,
+			latency: 10 * time.Millisecond,
+			at:      now.Add(-time.Duration(i+1) * time.Second),
+		})
+	}
+	for i := 0; i < 10; i++ {
+		pm.noteOutcomeLocked(dst, source, now.Add(-time.Duration(i)*time.Second), i < 1)
+	}
+
+	before := metricSourcePathHardAvoidLoss.Value()
+	if _, ok := pm.bestCandidateLocked(dst, []sourceRxMeta{source}, now, 0); ok {
+		t.Fatal("candidate selected despite loss above hard-avoid threshold")
+	}
+	if delta := metricSourcePathHardAvoidLoss.Value() - before; delta != 1 {
+		t.Fatalf("hard-avoid-loss metric delta = %d, want 1", delta)
+	}
+}
+
+func TestSourcePathProbeManagerOutcomeHardCap(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MAX_OUTCOMES", "3")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MAX_OUTCOMES", "") })
+
+	var pm sourcePathProbeManager
+	now := mono.Now()
+	source := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 5}
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	for i := 0; i < 5; i++ {
+		pm.noteOutcomeLocked(dst, source, now.Add(time.Duration(i)*time.Millisecond), i%2 == 0)
+	}
+
+	if got := len(pm.outcomes); got != 3 {
+		t.Fatalf("outcome count = %d, want capped count 3", got)
+	}
+	for i, outcome := range pm.outcomes {
+		wantAt := now.Add(time.Duration(i+2) * time.Millisecond)
+		if outcome.at != wantAt {
+			t.Fatalf("outcome[%d].at = %v, want %v", i, outcome.at, wantAt)
+		}
+	}
+}
+
+func TestSourcePathActiveBackupFailoverAndRecovery(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "active-backup")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ACTIVE_BACKUP", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PRIMARY_FAIL_STREAK", "2")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FAILOVER_RECOVERY_PONGS", "2")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ACTIVE_BACKUP", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PRIMARY_FAIL_STREAK", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FAILOVER_RECOVERY_PONGS", "")
+	})
+
+	var c Conn
+	c.peerMap = newPeerMap()
+	c.sourcePath.generation = 25
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	aux := c.sourcePath.aux4.rxMeta()
+	now := mono.Now()
+	c.mu.Lock()
+	c.sourceProbes.samples = []sourcePathProbeSample{
+		{dst: dst, source: aux, latency: 10 * time.Millisecond, at: now.Add(-3 * time.Second)},
+		{dst: dst, source: aux, latency: 11 * time.Millisecond, at: now.Add(-2 * time.Second)},
+		{dst: dst, source: aux, latency: 9 * time.Millisecond, at: now.Add(-1 * time.Second)},
+	}
+	c.mu.Unlock()
+
+	if source, ok := c.noteSourcePathPrimarySendFailure(dst, now); ok {
+		t.Fatalf("first primary failure selected failover source %+v, want no failover yet", source)
+	}
+	source, ok := c.noteSourcePathPrimarySendFailure(dst, now.Add(time.Millisecond))
+	if !ok {
+		t.Fatal("second primary failure did not select failover source")
+	}
+	if source != aux {
+		t.Fatalf("failover source = %+v, want %+v", source, aux)
+	}
+	if got := c.sourcePathDataSendSource(dst); got != aux {
+		t.Fatalf("active-backup data source = %+v, want forced aux %+v", got, aux)
+	}
+
+	peerKey := key.NewNode().Public()
+	state := &endpointState{}
+	state.addPongReplyLocked(pongReply{latency: 7 * time.Millisecond, pongAt: now.Add(2 * time.Millisecond)})
+	state.addPongReplyLocked(pongReply{latency: 8 * time.Millisecond, pongAt: now.Add(3 * time.Millisecond)})
+	de := &endpoint{
+		c:             &c,
+		publicKey:     peerKey,
+		endpointState: map[netip.AddrPort]*endpointState{dst.ap: state},
+	}
+	c.mu.Lock()
+	c.peerMap.byNodeKey[peerKey] = newPeerInfo(de)
+	c.peerMap.setNodeKeyForEpAddr(dst, peerKey)
+	c.mu.Unlock()
+
+	if got := c.sourcePathDataSendSource(dst); !got.isPrimary() {
+		t.Fatalf("active-backup source after recovery pongs = %+v, want primary", got)
+	}
+}
+
+func TestSourcePathActiveBackupDropsStaleFailoverSource(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "active-backup")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ACTIVE_BACKUP", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PRIMARY_FAIL_STREAK", "1")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ACTIVE_BACKUP", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PRIMARY_FAIL_STREAK", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 31
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	oldAux := c.sourcePath.aux4.rxMeta()
+	now := mono.Now()
+	c.mu.Lock()
+	c.sourceProbes.samples = []sourcePathProbeSample{
+		{dst: dst, source: oldAux, latency: 10 * time.Millisecond, at: now.Add(-3 * time.Second)},
+		{dst: dst, source: oldAux, latency: 11 * time.Millisecond, at: now.Add(-2 * time.Second)},
+		{dst: dst, source: oldAux, latency: 9 * time.Millisecond, at: now.Add(-1 * time.Second)},
+	}
+	c.mu.Unlock()
+	if _, ok := c.noteSourcePathPrimarySendFailure(dst, now); !ok {
+		t.Fatal("primary failure did not select initial failover source")
+	}
+
+	c.sourcePath.generation++
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+
+	if got := c.sourcePathDataSendSource(dst); !got.isPrimary() {
+		t.Fatalf("active-backup source after aux generation change = %+v, want primary", got)
+	}
+	c.mu.Lock()
+	_, stillForced := c.sourceProbes.activeBackup[dst]
+	c.mu.Unlock()
+	if stillForced {
+		t.Fatal("active-backup state still forced after cached aux source became stale")
+	}
+}
+
+func TestSourcePathFlowAwareRRStickyAndIdle(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "rr")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_IDLE_S", "1")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_IDLE_S", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 32
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	aux := c.sourcePath.aux4.rxMeta()
+	now := mono.Now()
+	seedSourcePathSamples(t, &c, dst, aux)
+
+	if got := c.sourcePathDataSendSourceForFlow(dst, 1, now); !got.isPrimary() {
+		t.Fatalf("first RR flow source = %+v, want primary", got)
+	}
+	if got := c.sourcePathDataSendSourceForFlow(dst, 2, now.Add(time.Millisecond)); got != aux {
+		t.Fatalf("second RR flow source = %+v, want aux %+v", got, aux)
+	}
+	if got := c.sourcePathDataSendSourceForFlow(dst, 2, now.Add(2*time.Millisecond)); got != aux {
+		t.Fatalf("sticky RR flow source = %+v, want aux %+v", got, aux)
+	}
+	if got := c.sourcePathDataSendSourceForFlow(dst, 2, now.Add(2*time.Second)); !got.isPrimary() {
+		t.Fatalf("expired RR flow source = %+v, want primary after idle remap", got)
+	}
+}
+
+func TestSourcePathFlowAwareRRIndependentPerDestination(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "rr")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 36
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst1 := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	dst2 := epAddr{ap: netip.MustParseAddrPort("192.0.2.3:41641")}
+	aux := c.sourcePath.aux4.rxMeta()
+	now := mono.Now()
+	seedSourcePathSamples(t, &c, dst1, aux)
+	seedSourcePathSamples(t, &c, dst2, aux)
+
+	if got := c.sourcePathDataSendSourceForFlow(dst1, 1, now); !got.isPrimary() {
+		t.Fatalf("first dst1 RR flow source = %+v, want primary", got)
+	}
+	if got := c.sourcePathDataSendSourceForFlow(dst2, 1, now.Add(time.Millisecond)); !got.isPrimary() {
+		t.Fatalf("first dst2 RR flow source = %+v, want independent primary", got)
+	}
+	if got := c.sourcePathDataSendSourceForFlow(dst1, 2, now.Add(2*time.Millisecond)); got != aux {
+		t.Fatalf("second dst1 RR flow source = %+v, want aux %+v", got, aux)
+	}
+	if got := c.sourcePathDataSendSourceForFlow(dst2, 2, now.Add(3*time.Millisecond)); got != aux {
+		t.Fatalf("second dst2 RR flow source = %+v, want aux %+v", got, aux)
+	}
+}
+
+func TestSourcePathFlowAwareDropsStaleAssignedSource(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "rr")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 33
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	aux := c.sourcePath.aux4.rxMeta()
+	now := mono.Now()
+	seedSourcePathSamples(t, &c, dst, aux)
+
+	if got := c.sourcePathDataSendSourceForFlow(dst, 1, now); !got.isPrimary() {
+		t.Fatalf("first RR flow source = %+v, want primary", got)
+	}
+	if got := c.sourcePathDataSendSourceForFlow(dst, 2, now.Add(time.Millisecond)); got != aux {
+		t.Fatalf("second RR flow source = %+v, want aux %+v", got, aux)
+	}
+
+	c.sourcePath.generation++
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+
+	if got := c.sourcePathDataSendSourceForFlow(dst, 2, now.Add(2*time.Millisecond)); !got.isPrimary() {
+		t.Fatalf("stale flow source after aux generation change = %+v, want primary", got)
+	}
+	c.mu.Lock()
+	mapped := c.sourceProbes.flowMap[sourcePathFlowKey{dst: dst, id: 2}]
+	c.mu.Unlock()
+	if !mapped.source.isPrimary() {
+		t.Fatalf("flow map source after stale aux remap = %+v, want primary", mapped.source)
+	}
+}
+
+func TestSourcePathFlowAwareHardCap(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "rr")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_MAX", "1")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_MAX", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 34
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	seedSourcePathSamples(t, &c, dst, c.sourcePath.aux4.rxMeta())
+	now := mono.Now()
+	c.sourcePathDataSendSourceForFlow(dst, 1, now)
+	c.sourcePathDataSendSourceForFlow(dst, 2, now.Add(time.Millisecond))
+
+	c.mu.Lock()
+	got := len(c.sourceProbes.flowMap)
+	c.mu.Unlock()
+	if got != 1 {
+		t.Fatalf("flow map size = %d, want hard cap 1", got)
+	}
+}
+
+func TestSourcePathFlowAwareBatchFallbackStripesTransportPackets(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "rr")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 35
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	aux := c.sourcePath.aux4.rxMeta()
+	seedSourcePathSamples(t, &c, dst, aux)
+
+	pkt1 := sourcePathTestTransportPacket(123, 1)
+	pkt2 := sourcePathTestTransportPacket(123, 2)
+	if got := c.sourcePathDataSendSourceForBatch(dst, [][]byte{pkt1}, 0); !got.isPrimary() {
+		t.Fatalf("first packet-fallback source = %+v, want primary", got)
+	}
+	if got := c.sourcePathDataSendSourceForBatch(dst, [][]byte{pkt2}, 0); got != aux {
+		t.Fatalf("second packet-fallback source = %+v, want aux %+v", got, aux)
+	}
+}
+
+func TestSourcePathFlowIDFromTransportPacketIncludesCounter(t *testing.T) {
+	pkt1 := sourcePathTestTransportPacket(123, 1)
+	pkt2 := sourcePathTestTransportPacket(123, 2)
+
+	id1, ok1 := sourcePathFlowIDFromPacket(pkt1)
+	id2, ok2 := sourcePathFlowIDFromPacket(pkt2)
+	if !ok1 || !ok2 {
+		t.Fatal("transport packet did not produce a flow ID")
+	}
+	if id1 == id2 {
+		t.Fatalf("transport flow IDs match despite different counters: %x", id1)
+	}
+}
+
+func sourcePathTestTransportPacket(receiver uint32, counter uint64) []byte {
+	pkt := make([]byte, 32)
+	binary.LittleEndian.PutUint32(pkt[:4], device.MessageTransportType)
+	binary.LittleEndian.PutUint32(pkt[4:8], receiver)
+	binary.LittleEndian.PutUint64(pkt[8:16], counter)
+	copy(pkt[16:], "ciphertext")
+	return pkt
+}
+
+func TestSourcePathRealtimeProfileValues(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROFILE", "realtime")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROFILE", "") })
+
+	if !sourcePathMultiMetricEnabled() {
+		t.Fatal("realtime profile did not enable multi-metric scoring")
+	}
+	if got := sourcePathProbeIntervalValue(); got != sourcePathRealtimeProbeEvery {
+		t.Fatalf("realtime probe interval = %v, want %v", got, sourcePathRealtimeProbeEvery)
+	}
+	if got := sourcePathSampleTTLValue(); got != sourcePathRealtimeSampleTTL {
+		t.Fatalf("realtime sample TTL = %v, want %v", got, sourcePathRealtimeSampleTTL)
+	}
+}
+
+func TestSourcePathProbeIntervalDefaultAndOptOut(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROFILE", "")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROBE_INTERVAL_MS", "")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROFILE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROBE_INTERVAL_MS", "")
+	})
+
+	if got := sourcePathProbeIntervalValue(); got != sourcePathRealtimeProbeEvery {
+		t.Fatalf("default probe interval = %v, want %v", got, sourcePathRealtimeProbeEvery)
+	}
+
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROBE_INTERVAL_MS", "0")
+	if got := sourcePathProbeIntervalValue(); got != 0 {
+		t.Fatalf("explicit zero probe interval = %v, want disabled", got)
+	}
+}
+
+func TestSourcePathProbeIntervalFloor(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROBE_INTERVAL_MS", "1")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROBE_INTERVAL_MS", "") })
+
+	if got := sourcePathProbeIntervalValue(); got != sourcePathProbeIntervalFloor {
+		t.Fatalf("probe interval = %v, want floor %v", got, sourcePathProbeIntervalFloor)
+	}
+}
+
+func TestSourcePathProbeBurstDefaultScalesWithAuxSocketCount(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "20")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST", "")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST", "")
+	})
+
+	if got, want := sourcePathProbeMaxBurstCount(), 40; got != want {
+		t.Fatalf("default probe burst = %d, want %d for 20 aux sockets", got, want)
+	}
+
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST", "7")
+	if got := sourcePathProbeMaxBurstCount(); got != 7 {
+		t.Fatalf("explicit probe burst = %d, want 7", got)
+	}
+}
+
 func TestSourcePathAuxSocketCountBoundaryDualStack(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -96,8 +597,20 @@ func TestSourcePathAuxSocketCountBoundaryDualStack(t *testing.T) {
 		wantAux int
 	}{
 		{
-			name:    "disabled",
+			name:    "default",
 			enable:  "",
+			aux:     "",
+			wantAux: 1,
+		},
+		{
+			name:    "default-explicit-one",
+			enable:  "",
+			aux:     "1",
+			wantAux: 1,
+		},
+		{
+			name:    "disabled",
+			enable:  "false",
 			aux:     "1",
 			wantAux: 0,
 		},
@@ -120,10 +633,16 @@ func TestSourcePathAuxSocketCountBoundaryDualStack(t *testing.T) {
 			wantAux: 1,
 		},
 		{
-			name:    "more-than-one-clamps",
+			name:    "more-than-one",
 			enable:  "true",
 			aux:     "2",
-			wantAux: 1,
+			wantAux: 2,
+		},
+		{
+			name:    "max-clamps",
+			enable:  "true",
+			aux:     strconv.Itoa(sourcePathMaxAuxSockets + 1),
+			wantAux: sourcePathMaxAuxSockets,
 		},
 	}
 
@@ -151,31 +670,390 @@ func TestSourcePathAuxSocketCountBoundaryDualStack(t *testing.T) {
 
 	var c Conn
 	c.sourcePath.generation = 3
-	c.sourcePath.aux4.setID(sourceIPv4SocketID)
-	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
-	c.sourcePath.aux4Bound = true
-	c.sourcePath.aux6.setID(sourceIPv6SocketID)
-	c.sourcePath.aux6.generation.Store(uint64(c.sourcePath.generation))
-	c.sourcePath.aux6Bound = true
+	c.sourcePath.mu.Lock()
+	c.ensureSourcePathAuxSocketCountLocked(2)
+	c.forEachSourcePathSocketLocked(true, func(_ int, sock *sourcePathSocket, bound *bool) {
+		sock.generation.Store(uint64(c.sourcePath.generation))
+		*bound = true
+	})
+	c.forEachSourcePathSocketLocked(false, func(_ int, sock *sourcePathSocket, bound *bool) {
+		sock.generation.Store(uint64(c.sourcePath.generation))
+		*bound = true
+	})
+	c.sourcePath.mu.Unlock()
 
 	sources4 := c.sourcePathProbeSources(true)
 	sources6 := c.sourcePathProbeSources(false)
-	if len(sources4) != 1 || sources4[0].socketID != sourceIPv4SocketID {
-		t.Fatalf("IPv4 probe sources with AUX_SOCKETS=2 = %+v, want one IPv4 auxiliary source", sources4)
+	if len(sources4) != 2 || sources4[0].socketID != sourceIPv4SocketID || sources4[1].socketID != sourceIPv4ExtraSocketIDBase {
+		t.Fatalf("IPv4 probe sources with AUX_SOCKETS=2 = %+v, want two IPv4 auxiliary sources", sources4)
 	}
-	if len(sources6) != 1 || sources6[0].socketID != sourceIPv6SocketID {
-		t.Fatalf("IPv6 probe sources with AUX_SOCKETS=2 = %+v, want one IPv6 auxiliary source", sources6)
+	if len(sources6) != 2 || sources6[0].socketID != sourceIPv6SocketID || sources6[1].socketID != sourceIPv6ExtraSocketIDBase {
+		t.Fatalf("IPv6 probe sources with AUX_SOCKETS=2 = %+v, want two IPv6 auxiliary sources", sources6)
+	}
+}
+
+func TestSourcePathDualSendDefaultAndOptOut(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	})
+
+	if !sourcePathEnabled() {
+		t.Fatal("source path disabled by default")
+	}
+	if got := sourcePathAuxSocketCount(); got != 1 {
+		t.Fatalf("default sourcePathAuxSocketCount() = %d, want 1", got)
+	}
+	if !sourcePathDualSendEnabled() {
+		t.Fatal("dual-send disabled by default")
+	}
+
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
+	if sourcePathDualSendEnabled() {
+		t.Fatal("dual-send enabled in single-source strategy mode")
+	}
+	if !sourcePathSingleSourceStrategyEnabled() {
+		t.Fatal("single-source strategy mode was not enabled")
+	}
+
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "active-backup")
+	if sourcePathDualSendEnabled() {
+		t.Fatal("dual-send enabled in active-backup strategy mode")
+	}
+
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "dual-endpoint")
+	if sourcePathDualSendEnabled() {
+		t.Fatal("dual-send enabled in dual-endpoint strategy mode")
+	}
+	if !sourcePathDualEndpointStrategyEnabled() {
+		t.Fatal("dual-endpoint strategy mode was not enabled")
+	}
+
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "false")
+	if sourcePathDualSendEnabled() {
+		t.Fatal("dual-send remained enabled with TS_EXPERIMENTAL_SRCSEL_DUAL_SEND=false")
+	}
+
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "0")
+	if sourcePathDualSendEnabled() {
+		t.Fatal("dual-send enabled with TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=0")
+	}
+
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "false")
+	if sourcePathAuxSocketCount() != 0 {
+		t.Fatal("source path aux sockets remained enabled with TS_EXPERIMENTAL_SRCSEL_ENABLE=false")
+	}
+	if sourcePathDualSendEnabled() {
+		t.Fatal("dual-send enabled with TS_EXPERIMENTAL_SRCSEL_ENABLE=false")
+	}
+}
+
+func TestSourcePathDataStrategyDefaultSuppressesSingleSourceControls(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "rr")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 8
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
+	seedSourcePathSamples(t, &c, dst, c.sourcePath.aux4.rxMeta())
+
+	if got := sourcePathDataStrategyMode(); got != sourcePathDataStrategyDualSend {
+		t.Fatalf("default data strategy = %q, want %q", got, sourcePathDataStrategyDualSend)
+	}
+	if sourcePathSingleSourceStrategyEnabled() {
+		t.Fatal("single-source strategy enabled by default")
+	}
+	if sourcePathFlowAwareEnabled() {
+		t.Fatal("flow-aware single-source mode enabled by default")
+	}
+	if got := c.sourcePathDataSendSource(dst); !got.isPrimary() {
+		t.Fatalf("default strategy honored force/auto source = %+v, want primary", got)
+	}
+	if got := c.sourcePathDataSendSourceForBatch(dst, [][]byte{sourcePathTestTransportPacket(123, 1)}, 0); !got.isPrimary() {
+		t.Fatalf("default strategy honored flow-aware source = %+v, want primary", got)
+	}
+}
+
+func TestSourcePathDualEndpointStrategySendsTwoLowestLatencyEndpoints(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "dual-endpoint")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
+	})
+
+	dstFast := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	dstMid := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	dstSlow := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	primaryConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+
+	var c Conn
+	c.pconn4.mu.Lock()
+	c.pconn4.setConnLocked(primaryConn, "udp4", 1)
+	c.pconn4.mu.Unlock()
+
+	now := mono.Now()
+	fast := udpConnAddrPort(t, dstFast.LocalAddr())
+	mid := udpConnAddrPort(t, dstMid.LocalAddr())
+	slow := udpConnAddrPort(t, dstSlow.LocalAddr())
+	fastState := &endpointState{}
+	fastState.addPongReplyLocked(pongReply{latency: 10 * time.Millisecond, pongAt: now})
+	midState := &endpointState{}
+	midState.addPongReplyLocked(pongReply{latency: 20 * time.Millisecond, pongAt: now})
+	slowState := &endpointState{}
+	slowState.addPongReplyLocked(pongReply{latency: 50 * time.Millisecond, pongAt: now})
+
+	de := &endpoint{
+		c:                 &c,
+		heartbeatDisabled: true,
+		endpointState: map[netip.AddrPort]*endpointState{
+			slow: slowState,
+			mid:  midState,
+			fast: fastState,
+		},
+	}
+
+	de.mu.Lock()
+	addrs, _ := de.dualEndpointAddrsForSendLocked(now)
+	de.mu.Unlock()
+	if len(addrs) != 2 {
+		t.Fatalf("dual endpoint candidates = %+v, want two endpoints", addrs)
+	}
+	if addrs[0].ap != fast || addrs[1].ap != mid {
+		t.Fatalf("dual endpoint candidates = %+v, want fast %v then mid %v", addrs, fast, mid)
+	}
+
+	payload := []byte("source-path-dual-endpoint")
+	buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
+	copy(buf[packet.GeneveFixedHeaderLength:], payload)
+	before := metricSourcePathDualEndpointPackets.Value()
+	if err := c.Send([][]byte{buf}, de, packet.GeneveFixedHeaderLength); err != nil {
+		t.Fatalf("Conn.Send returned error: %v", err)
+	}
+	if got := metricSourcePathDualEndpointPackets.Value() - before; got != 1 {
+		t.Fatalf("dual-endpoint packets metric delta = %d, want 1", got)
+	}
+
+	readUDPConnPayload(t, dstFast, payload)
+	readUDPConnPayload(t, dstMid, payload)
+	assertNoUDPConnPayload(t, dstSlow)
+}
+
+func TestSourcePathDualSendUsesObservedRemoteEndpoints(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	})
+
+	primaryDst := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	secondaryDst := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	primaryConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	auxConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+
+	var c Conn
+	c.sourcePath.generation = 29
+	c.pconn4.mu.Lock()
+	c.pconn4.setConnLocked(primaryConn, "udp4", 1)
+	c.pconn4.mu.Unlock()
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4.pconn.mu.Lock()
+	c.sourcePath.aux4.pconn.setConnLocked(auxConn, "udp4", 1)
+	c.sourcePath.aux4.pconn.mu.Unlock()
+	c.sourcePath.aux4Bound = true
+
+	primary := epAddr{ap: udpConnAddrPort(t, primaryDst.LocalAddr())}
+	secondary := epAddr{ap: udpConnAddrPort(t, secondaryDst.LocalAddr())}
+	now := mono.Now()
+	de := &endpoint{
+		c:                     &c,
+		heartbeatDisabled:     true,
+		bestAddr:              addrQuality{epAddr: primary},
+		trustBestAddrUntil:    now.Add(time.Hour),
+		sourcePathRemoteSlots: [2]epAddr{primary, secondary},
+		sourcePathRemoteSeen:  [2]mono.Time{now, now},
+	}
+
+	payload := []byte("source-path-dual-send-observed-endpoints")
+	buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
+	copy(buf[packet.GeneveFixedHeaderLength:], payload)
+	before := metricSourcePathDualEndpointPackets.Value()
+	if err := c.Send([][]byte{buf}, de, packet.GeneveFixedHeaderLength); err != nil {
+		t.Fatalf("Conn.Send returned error: %v", err)
+	}
+	if got := metricSourcePathDualEndpointPackets.Value() - before; got != 1 {
+		t.Fatalf("dual-endpoint packets metric delta = %d, want 1", got)
+	}
+
+	wantPrimarySrc := udpConnAddrPort(t, primaryConn.LocalAddr())
+	for name, conn := range map[string]*net.UDPConn{
+		"primary":   primaryDst,
+		"secondary": secondaryDst,
+	} {
+		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, 128)
+		n, src, err := conn.ReadFromUDPAddrPort(got)
+		if err != nil {
+			t.Fatalf("%s ReadFromUDPAddrPort: %v", name, err)
+		}
+		if string(got[:n]) != string(payload) {
+			t.Fatalf("%s received payload %q, want %q", name, got[:n], payload)
+		}
+		if src.Port() != wantPrimarySrc.Port() {
+			t.Fatalf("%s source port = %d, want primary port %d", name, src.Port(), wantPrimarySrc.Port())
+		}
+	}
+}
+
+func TestSourcePathDualSendObservedRemoteEndpointsSkipStaleAlternate(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	})
+
+	now := mono.Now()
+	primary := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
+	fresh := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:51641")}
+	stale := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:61641")}
+	de := &endpoint{
+		endpointState: map[netip.AddrPort]*endpointState{
+			fresh.ap: &endpointState{},
+			stale.ap: &endpointState{},
+		},
+		sourcePathRemoteSlots: [2]epAddr{primary, stale},
+		sourcePathRemoteSeen:  [2]mono.Time{now, now.Add(-2 * sessionActiveTimeout)},
+	}
+	de.mu.Lock()
+	if got := de.dualSendObservedEndpointAddrsForSendLocked(primary, now); got != nil {
+		de.mu.Unlock()
+		t.Fatalf("observed dual endpoints with stale alternate = %+v, want nil", got)
+	}
+	de.sourcePathRemoteSlots[1] = fresh
+	de.sourcePathRemoteSeen[1] = now
+	got := de.dualSendObservedEndpointAddrsForSendLocked(primary, now)
+	de.mu.Unlock()
+	if len(got) != 2 || got[0] != primary || got[1] != fresh {
+		t.Fatalf("observed dual endpoints = %+v, want primary/fresh", got)
+	}
+}
+
+func TestSourcePathDualEndpointStrategyInvalidatesBadEndpoints(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "dual-endpoint")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
+	})
+
+	pl := &recordingPacketListener{
+		base:     localhostListener{},
+		failures: map[netip.AddrPort]error{},
+	}
+	pc, err := pl.ListenPacket(context.Background(), "udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket: %v", err)
+	}
+	t.Cleanup(func() { pc.Close() })
+	local, ok := addrPortFromNetAddr(pc.LocalAddr())
+	if !ok {
+		t.Fatalf("could not parse local address %v", pc.LocalAddr())
+	}
+	pl.setFailure(local, &net.OpError{Op: "write", Err: syscall.EHOSTUNREACH})
+	t.Cleanup(pl.clearFailures)
+
+	var c Conn
+	c.pconn4.mu.Lock()
+	c.pconn4.setConnLocked(pc.(nettype.PacketConn), "udp4", 1)
+	c.pconn4.mu.Unlock()
+
+	now := mono.Now()
+	fast := netip.MustParseAddrPort("127.0.0.1:11001")
+	mid := netip.MustParseAddrPort("127.0.0.1:11002")
+	slow := netip.MustParseAddrPort("127.0.0.1:11003")
+	fastState := &endpointState{}
+	fastState.addPongReplyLocked(pongReply{latency: 10 * time.Millisecond, pongAt: now})
+	midState := &endpointState{}
+	midState.addPongReplyLocked(pongReply{latency: 20 * time.Millisecond, pongAt: now})
+	slowState := &endpointState{}
+	slowState.addPongReplyLocked(pongReply{latency: 50 * time.Millisecond, pongAt: now})
+
+	de := &endpoint{
+		c:                 &c,
+		heartbeatDisabled: true,
+		endpointState: map[netip.AddrPort]*endpointState{
+			slow: slowState,
+			mid:  midState,
+			fast: fastState,
+		},
+	}
+
+	payload := []byte("source-path-dual-endpoint-bad")
+	buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
+	copy(buf[packet.GeneveFixedHeaderLength:], payload)
+	if err := de.send([][]byte{buf}, packet.GeneveFixedHeaderLength); !isBadEndpointErr(err) {
+		t.Fatalf("endpoint send error = %v, want bad endpoint error", err)
+	}
+
+	de.mu.Lock()
+	defer de.mu.Unlock()
+	if _, ok := fastState.latencyLocked(); ok {
+		t.Fatal("primary dual endpoint still has latency after bad endpoint error")
+	}
+	if _, ok := midState.latencyLocked(); ok {
+		t.Fatal("secondary dual endpoint still has latency after bad endpoint error")
+	}
+	if _, ok := slowState.latencyLocked(); !ok {
+		t.Fatal("unselected endpoint lost latency after selected endpoints failed")
 	}
 }
 
 func TestSourcePathDataSendSourceForcedAuxDualStack(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	})
@@ -192,7 +1070,7 @@ func TestSourcePathDataSendSourceForcedAuxDualStack(t *testing.T) {
 	v4 := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
 	v6 := epAddr{ap: netip.MustParseAddrPort("[2001:db8::1]:41641")}
 
-	if !envknobSrcSelEnable() {
+	if !sourcePathEnabled() {
 		t.Fatalf("TS_EXPERIMENTAL_SRCSEL_ENABLE was not enabled")
 	}
 	if got := envknobSrcSelAuxSockets(); got != 1 {
@@ -340,11 +1218,13 @@ func TestSourcePathBestCandidateObserveOnlyDoesNotSelectDataSource(t *testing.T)
 func TestSourcePathDataSendSourceAutomaticCandidateDualStack(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "true")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	})
@@ -439,11 +1319,13 @@ func TestSourcePathDataSendSourceAutomaticCandidateDualStack(t *testing.T) {
 func TestSourcePathDataSendSourceNonDirectGuardDualStack(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "true")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	})
@@ -524,7 +1406,7 @@ func TestSourcePathDataSendSourceNonDirectGuardDualStack(t *testing.T) {
 }
 
 func TestSourcePathRebindDisabledClosesAuxAndClearsState(t *testing.T) {
-	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "false")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "true")
@@ -613,11 +1495,13 @@ func TestSourcePathRebindDisabledClosesAuxAndClearsState(t *testing.T) {
 func TestSendUDPBatchFromSourceAuxDualStackLoopback(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	})
@@ -706,11 +1590,13 @@ func TestSendUDPBatchFromSourceAuxDualStackLoopback(t *testing.T) {
 func TestLazyEndpointSendIgnoresForcedAuxDataSourceDualStack(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	})
@@ -834,11 +1720,13 @@ func TestSourcePathWriteWireGuardBatchToRejectsStaleAuxSource(t *testing.T) {
 func TestSendUDPBatchFromSourceAuxErrorDoesNotRebind(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 	})
@@ -915,6 +1803,472 @@ func TestSendUDPBatchFromSourceAuxErrorDoesNotRebind(t *testing.T) {
 	}
 }
 
+func TestSourcePathDualSendSendsPrimaryAndAux(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	})
+
+	dstConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	primaryConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	auxConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+
+	var c Conn
+	c.sourcePath.generation = 23
+	c.pconn4.mu.Lock()
+	c.pconn4.setConnLocked(primaryConn, "udp4", 1)
+	c.pconn4.mu.Unlock()
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4.pconn.mu.Lock()
+	c.sourcePath.aux4.pconn.setConnLocked(auxConn, "udp4", 1)
+	c.sourcePath.aux4.pconn.mu.Unlock()
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: udpConnAddrPort(t, dstConn.LocalAddr())}
+	auxSource := c.sourcePath.aux4.rxMeta()
+	seedSourcePathSamples(t, &c, dst, auxSource)
+
+	source, ok := c.sourcePathDualSendCandidate(dst)
+	if !ok {
+		t.Fatal("sourcePathDualSendCandidate did not select aux")
+	}
+	if source != auxSource {
+		t.Fatalf("dual-send source = %+v, want %+v", source, auxSource)
+	}
+
+	payload := []byte("source-path-dual-send")
+	buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
+	copy(buf[packet.GeneveFixedHeaderLength:], payload)
+	primaryPacketsBefore := metricSourcePathDualSendPrimaryPackets.Value()
+	auxPacketsBefore := metricSourcePathDualSendAuxPackets.Value()
+	res := c.sendUDPBatchDualSource(source, dst, [][]byte{buf}, packet.GeneveFixedHeaderLength)
+	if res.err != nil {
+		t.Fatalf("sendUDPBatchDualSource error = %v", res.err)
+	}
+	if res.primaryErr != nil {
+		t.Fatalf("primary send error = %v", res.primaryErr)
+	}
+	if res.auxErr != nil {
+		t.Fatalf("aux send error = %v", res.auxErr)
+	}
+	if got := metricSourcePathDualSendPrimaryPackets.Value() - primaryPacketsBefore; got != 1 {
+		t.Fatalf("dual-send primary packets metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathDualSendAuxPackets.Value() - auxPacketsBefore; got != 1 {
+		t.Fatalf("dual-send aux packets metric delta = %d, want 1", got)
+	}
+
+	wantPrimary := udpConnAddrPort(t, primaryConn.LocalAddr())
+	wantAux := udpConnAddrPort(t, auxConn.LocalAddr())
+	seen := map[uint16]bool{}
+	for i := 0; i < 2; i++ {
+		if err := dstConn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, 128)
+		n, src, err := dstConn.ReadFromUDPAddrPort(got)
+		if err != nil {
+			t.Fatalf("ReadFromUDPAddrPort #%d: %v", i+1, err)
+		}
+		if string(got[:n]) != string(payload) {
+			t.Fatalf("received payload %q, want %q", got[:n], payload)
+		}
+		seen[src.Port()] = true
+	}
+	if !seen[wantPrimary.Port()] {
+		t.Fatalf("primary source port %d was not seen; seen=%v", wantPrimary.Port(), seen)
+	}
+	if !seen[wantAux.Port()] {
+		t.Fatalf("aux source port %d was not seen; seen=%v", wantAux.Port(), seen)
+	}
+}
+
+func TestSourcePathDualSendUsesBoundAuxWithoutProbeSample(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 23
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	want := c.sourcePath.aux4.rxMeta()
+	got, ok := c.sourcePathDualSendCandidate(dst)
+	if !ok {
+		t.Fatal("sourcePathDualSendCandidate rejected bound aux without probe sample")
+	}
+	if got != want {
+		t.Fatalf("dual-send source = %+v, want %+v", got, want)
+	}
+}
+
+func TestSourcePathDualSendChoosesLowestLatencyAuxSocket(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "2")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 31
+	c.sourcePath.mu.Lock()
+	c.ensureSourcePathAuxSocketCountLocked(2)
+	c.forEachSourcePathSocketLocked(true, func(_ int, sock *sourcePathSocket, bound *bool) {
+		sock.generation.Store(uint64(c.sourcePath.generation))
+		*bound = true
+	})
+	c.sourcePath.mu.Unlock()
+
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	sources := c.sourcePathProbeSources(true)
+	if len(sources) != 2 {
+		t.Fatalf("IPv4 probe sources = %+v, want two candidates", sources)
+	}
+	slow, fast := sources[0], sources[1]
+	now := mono.Now()
+	c.mu.Lock()
+	for i := 0; i < sourcePathMinSamplesForUse; i++ {
+		c.sourceProbes.samples = append(c.sourceProbes.samples,
+			sourcePathProbeSample{
+				dst:     dst,
+				source:  slow,
+				latency: 40 * time.Millisecond,
+				at:      now.Add(-time.Duration(i) * time.Millisecond),
+			},
+			sourcePathProbeSample{
+				dst:     dst,
+				source:  fast,
+				latency: 10 * time.Millisecond,
+				at:      now.Add(-time.Duration(i) * time.Millisecond),
+			},
+		)
+	}
+	c.mu.Unlock()
+
+	got, ok := c.sourcePathDualSendCandidate(dst)
+	if !ok {
+		t.Fatal("sourcePathDualSendCandidate rejected warmed aux candidates")
+	}
+	if got != fast {
+		t.Fatalf("dual-send source = %+v, want lowest-latency candidate %+v", got, fast)
+	}
+}
+
+func TestSourcePathDualSendWritesViaLowestLatencyExtraAuxSocket(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "2")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	})
+
+	dstConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	primaryConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	slowAuxConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	fastAuxConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+
+	var c Conn
+	c.sourcePath.generation = 32
+	c.pconn4.mu.Lock()
+	c.pconn4.setConnLocked(primaryConn, "udp4", 1)
+	c.pconn4.mu.Unlock()
+	c.sourcePath.mu.Lock()
+	c.ensureSourcePathAuxSocketCountLocked(2)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4.pconn.mu.Lock()
+	c.sourcePath.aux4.pconn.setConnLocked(slowAuxConn, "udp4", 1)
+	c.sourcePath.aux4.pconn.mu.Unlock()
+	c.sourcePath.aux4Bound = true
+	c.sourcePath.extraAux4[0].generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.extraAux4[0].pconn.mu.Lock()
+	c.sourcePath.extraAux4[0].pconn.setConnLocked(fastAuxConn, "udp4", 1)
+	c.sourcePath.extraAux4[0].pconn.mu.Unlock()
+	c.sourcePath.extra4Bound[0] = true
+	c.sourcePath.mu.Unlock()
+
+	dst := epAddr{ap: udpConnAddrPort(t, dstConn.LocalAddr())}
+	sources := c.sourcePathProbeSources(true)
+	slow, fast := sources[0], sources[1]
+	now := mono.Now()
+	c.mu.Lock()
+	for i := 0; i < sourcePathMinSamplesForUse; i++ {
+		c.sourceProbes.samples = append(c.sourceProbes.samples,
+			sourcePathProbeSample{
+				dst:     dst,
+				source:  slow,
+				latency: 50 * time.Millisecond,
+				at:      now.Add(-time.Duration(i) * time.Millisecond),
+			},
+			sourcePathProbeSample{
+				dst:     dst,
+				source:  fast,
+				latency: 5 * time.Millisecond,
+				at:      now.Add(-time.Duration(i) * time.Millisecond),
+			},
+		)
+	}
+	c.mu.Unlock()
+
+	source, ok := c.sourcePathDualSendCandidate(dst)
+	if !ok {
+		t.Fatal("sourcePathDualSendCandidate rejected warmed aux candidates")
+	}
+	if source != fast {
+		t.Fatalf("dual-send source = %+v, want extra aux %+v", source, fast)
+	}
+
+	payload := []byte("source-path-dual-send-extra-aux")
+	buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
+	copy(buf[packet.GeneveFixedHeaderLength:], payload)
+	res := c.sendUDPBatchDualSource(source, dst, [][]byte{buf}, packet.GeneveFixedHeaderLength)
+	if res.err != nil {
+		t.Fatalf("sendUDPBatchDualSource error = %v", res.err)
+	}
+	if res.primaryErr != nil {
+		t.Fatalf("primary send error = %v", res.primaryErr)
+	}
+	if res.auxErr != nil {
+		t.Fatalf("aux send error = %v", res.auxErr)
+	}
+
+	wantPrimary := udpConnAddrPort(t, primaryConn.LocalAddr())
+	wantFastAux := udpConnAddrPort(t, fastAuxConn.LocalAddr())
+	wantSlowAux := udpConnAddrPort(t, slowAuxConn.LocalAddr())
+	seen := map[uint16]bool{}
+	for i := 0; i < 2; i++ {
+		if err := dstConn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, 128)
+		n, src, err := dstConn.ReadFromUDPAddrPort(got)
+		if err != nil {
+			t.Fatalf("ReadFromUDPAddrPort #%d: %v", i+1, err)
+		}
+		if string(got[:n]) != string(payload) {
+			t.Fatalf("received payload %q, want %q", got[:n], payload)
+		}
+		seen[src.Port()] = true
+	}
+	if !seen[wantPrimary.Port()] {
+		t.Fatalf("primary source port %d was not seen; seen=%v", wantPrimary.Port(), seen)
+	}
+	if !seen[wantFastAux.Port()] {
+		t.Fatalf("fast aux source port %d was not seen; seen=%v", wantFastAux.Port(), seen)
+	}
+	if seen[wantSlowAux.Port()] {
+		t.Fatalf("slow aux source port %d was used; seen=%v", wantSlowAux.Port(), seen)
+	}
+}
+
+func TestSourcePathDualSendIgnoresPrimaryBeatGate(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MULTI_METRIC", "")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROFILE", "")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MULTI_METRIC", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PROFILE", "")
+	})
+
+	var c Conn
+	c.peerMap = newPeerMap()
+	c.sourcePath.generation = 26
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	aux := c.sourcePath.aux4.rxMeta()
+	now := mono.Now()
+	c.mu.Lock()
+	for i := 0; i < sourcePathMinSamplesForUse; i++ {
+		c.sourceProbes.samples = append(c.sourceProbes.samples, sourcePathProbeSample{
+			dst:     dst,
+			source:  aux,
+			latency: 20 * time.Millisecond,
+			at:      now.Add(-time.Duration(i) * time.Millisecond),
+		})
+	}
+	c.mu.Unlock()
+
+	peerKey := key.NewNode().Public()
+	state := &endpointState{}
+	state.addPongReplyLocked(pongReply{latency: 5 * time.Millisecond, pongAt: now})
+	de := &endpoint{
+		c:             &c,
+		publicKey:     peerKey,
+		endpointState: map[netip.AddrPort]*endpointState{dst.ap: state},
+	}
+	c.mu.Lock()
+	c.peerMap.byNodeKey[peerKey] = newPeerInfo(de)
+	c.peerMap.setNodeKeyForEpAddr(dst, peerKey)
+	c.mu.Unlock()
+
+	if _, ok := c.sourcePathBestCandidate(dst); ok {
+		t.Fatal("auto source-path candidate selected aux that does not beat primary")
+	}
+	source, ok := c.sourcePathDualSendCandidate(dst)
+	if !ok {
+		t.Fatal("dual-send candidate rejected aux solely because primary was faster")
+	}
+	if source != aux {
+		t.Fatalf("dual-send source = %+v, want %+v", source, aux)
+	}
+}
+
+func TestSourcePathDualSendAuxErrorRebindsAuxSocket(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	})
+
+	dstConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	primaryConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	failingAux := &failingSourcePathPacketConn{
+		local: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345},
+		err:   syscall.EPERM,
+	}
+
+	var c Conn
+	c.testOnlyPacketListener = localhostListener{}
+	c.sourcePath.generation = 24
+	c.pconn4.mu.Lock()
+	c.pconn4.setConnLocked(primaryConn, "udp4", 1)
+	c.pconn4.mu.Unlock()
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4.pconn.mu.Lock()
+	c.sourcePath.aux4.pconn.setConnLocked(failingAux, "udp4", 1)
+	c.sourcePath.aux4.pconn.mu.Unlock()
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: udpConnAddrPort(t, dstConn.LocalAddr())}
+	auxSource := c.sourcePath.aux4.rxMeta()
+	seedSourcePathSamples(t, &c, dst, auxSource)
+
+	payload := []byte("source-path-dual-send-aux-error")
+	buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
+	copy(buf[packet.GeneveFixedHeaderLength:], payload)
+	rebindsBefore := metricSourcePathDualSendAuxRebinds.Value()
+	source, ok := c.sourcePathDualSendCandidate(dst)
+	if !ok {
+		t.Fatal("dual-send candidate unexpectedly unavailable before aux failure")
+	}
+	res := c.sendUDPBatchDualSource(source, dst, [][]byte{buf}, packet.GeneveFixedHeaderLength)
+	if res.err != nil {
+		t.Fatalf("sendUDPBatchDualSource error after primary success = %v", res.err)
+	}
+	if res.primaryErr != nil {
+		t.Fatalf("primary send error = %v", res.primaryErr)
+	}
+	if !errors.Is(res.auxErr, syscall.EPERM) {
+		t.Fatalf("aux send error = %v, want %v", res.auxErr, syscall.EPERM)
+	}
+
+	c.mu.Lock()
+	sampleCount := len(c.sourceProbes.samples)
+	c.mu.Unlock()
+	if sampleCount != 0 {
+		t.Fatalf("source-path samples = %d, want old aux samples dropped after rebind", sampleCount)
+	}
+	if !failingAux.closed {
+		t.Fatal("old failing aux socket was not closed during rebind")
+	}
+	newSource := c.sourcePath.aux4.rxMeta()
+	if newSource == auxSource {
+		t.Fatalf("aux source did not rotate: got %+v", newSource)
+	}
+	if got := metricSourcePathDualSendAuxRebinds.Value() - rebindsBefore; got != 1 {
+		t.Fatalf("aux rebind metric delta = %d, want 1", got)
+	}
+	source, ok = c.sourcePathDualSendCandidate(dst)
+	if !ok {
+		t.Fatal("dual-send candidate unavailable after aux socket rebind")
+	}
+	if source != newSource {
+		t.Fatalf("dual-send source after rebind = %+v, want %+v", source, newSource)
+	}
+}
+
+func TestSourcePathProbeTimeoutRebindsPreviouslyWorkingAuxSocket(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_AUX_PROBE_DROP_STREAK", "1")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_AUX_PROBE_DROP_STREAK", "")
+	})
+
+	auxConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	var c Conn
+	c.testOnlyPacketListener = localhostListener{}
+	c.sourcePath.generation = 31
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4.pconn.mu.Lock()
+	c.sourcePath.aux4.pconn.setConnLocked(auxConn, "udp4", 1)
+	c.sourcePath.aux4.pconn.mu.Unlock()
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("127.0.0.1:41641")}
+	oldSource := c.sourcePath.aux4.rxMeta()
+	now := mono.Now()
+	c.mu.Lock()
+	c.sourceProbes.samples = append(c.sourceProbes.samples, sourcePathProbeSample{
+		dst:     dst,
+		source:  oldSource,
+		latency: time.Millisecond,
+		at:      now,
+	})
+	rotations := c.sourceProbes.noteProbeExpirationsLocked([]sourcePathProbeTx{
+		{dst: dst, source: oldSource, at: now.Add(-pingTimeoutDuration)},
+	}, now)
+	c.mu.Unlock()
+
+	if len(rotations) != 1 {
+		t.Fatalf("probe timeout rotations = %d, want 1", len(rotations))
+	}
+	rebindsBefore := metricSourcePathDualSendAuxRebinds.Value()
+	c.rotateSourcePathAuxSocket(rotations[0].dst, rotations[0].source, rotations[0].reason, nil)
+
+	newSource := c.sourcePath.aux4.rxMeta()
+	if newSource == oldSource {
+		t.Fatalf("aux source did not rotate after probe timeout: %+v", newSource)
+	}
+	if got := metricSourcePathDualSendAuxRebinds.Value() - rebindsBefore; got != 1 {
+		t.Fatalf("aux rebind metric delta = %d, want 1", got)
+	}
+}
+
 func TestSourcePathForcedAuxDualNodeRuntime(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -933,11 +2287,13 @@ func TestSourcePathForcedAuxDualNodeRuntime(t *testing.T) {
 			}
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "aux")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 			t.Cleanup(func() {
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
 			})
@@ -1046,8 +2402,10 @@ func TestSourcePathAutomaticAuxDualNodeRuntime(t *testing.T) {
 			}
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "single-source")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "true")
+			envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "false")
 			// On loopback the real primary RTT is sub-millisecond, far below
 			// the seeded 1ms aux samples. Disable the primary-baseline gate
 			// so this test exercises automatic-mode selection logic, not
@@ -1056,8 +2414,10 @@ func TestSourcePathAutomaticAuxDualNodeRuntime(t *testing.T) {
 			t.Cleanup(func() {
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FORCE_DATA_SOURCE", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE", "")
+				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
 				envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT", "")
 			})
 
@@ -1209,6 +2569,36 @@ func listenUDPForSourcePathTest(t *testing.T, network, addr string) *net.UDPConn
 	return c
 }
 
+func readUDPConnPayload(t *testing.T, c *net.UDPConn, want []byte) {
+	t.Helper()
+	if err := c.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, 128)
+	n, _, err := c.ReadFromUDPAddrPort(got)
+	if err != nil {
+		t.Fatalf("ReadFromUDPAddrPort: %v", err)
+	}
+	if string(got[:n]) != string(want) {
+		t.Fatalf("received payload %q, want %q", got[:n], want)
+	}
+}
+
+func assertNoUDPConnPayload(t *testing.T, c *net.UDPConn) {
+	t.Helper()
+	if err := c.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, 128)
+	_, _, err := c.ReadFromUDPAddrPort(got)
+	if err == nil {
+		t.Fatal("unexpected UDP payload")
+	}
+	if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("ReadFromUDPAddrPort error = %v, want timeout", err)
+	}
+}
+
 var (
 	ipv6LoopbackUDPProbeOnce sync.Once
 	ipv6LoopbackUDPProbeErr  error
@@ -1266,6 +2656,21 @@ func udpConnAddrPort(t *testing.T, addr net.Addr) netip.AddrPort {
 		t.Fatalf("ParseAddrPort(%q): %v", addr.String(), err)
 	}
 	return ap
+}
+
+func seedSourcePathSamples(t *testing.T, c *Conn, dst epAddr, source sourceRxMeta) {
+	t.Helper()
+	now := mono.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := 0; i < sourcePathMinSamplesForUse; i++ {
+		c.sourceProbes.samples = append(c.sourceProbes.samples, sourcePathProbeSample{
+			dst:     dst,
+			source:  source,
+			latency: 10 * time.Millisecond,
+			at:      now.Add(-time.Duration(i) * time.Millisecond),
+		})
+	}
 }
 
 type recordedUDPWrite struct {

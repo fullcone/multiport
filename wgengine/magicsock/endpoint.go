@@ -89,12 +89,17 @@ type endpoint struct {
 	lastDiscoKeyAdvertisement mono.Time      // last time we sent a TSMPDiscoAdvertisement or not to this endpoint
 	derpAddr                  netip.AddrPort // fallback/bootstrap path, if non-zero (non-zero for well-behaved clients)
 
-	bestAddr           addrQuality // best non-DERP path; zero if none; mutate via setBestAddrLocked()
-	bestAddrAt         mono.Time   // time best address re-confirmed
-	trustBestAddrUntil mono.Time   // time when bestAddr expires
-	sentPing           map[stun.TxID]sentPing
-	endpointState      map[netip.AddrPort]*endpointState // netip.AddrPort type for key (instead of [epAddr]) as [endpointState] is irrelevant for Geneve-encapsulated paths
-	isCallMeMaybeEP    map[netip.AddrPort]bool
+	bestAddr              addrQuality // best non-DERP path; zero if none; mutate via setBestAddrLocked()
+	bestAddrAt            mono.Time   // time best address re-confirmed
+	trustBestAddrUntil    mono.Time   // time when bestAddr expires
+	sourcePathRemoteSlots [2]epAddr   // first two direct remote source endpoints observed for srcsel metrics
+	sourcePathRemoteSeen  [2]mono.Time
+	sourcePathPeerAware   map[sourcePathPeerAwareKey]*sourcePathPeerAwareEndpoint
+	sourcePathSingleSince mono.Time // non-zero while fixed dual-send has degraded to a single direct send
+	sourcePathSinglePkts  int64
+	sentPing              map[stun.TxID]sentPing
+	endpointState         map[netip.AddrPort]*endpointState // netip.AddrPort type for key (instead of [epAddr]) as [endpointState] is irrelevant for Geneve-encapsulated paths
+	isCallMeMaybeEP       map[netip.AddrPort]bool
 
 	// The following fields are related to the new "silent disco"
 	// implementation that's a WIP as of 2022-10-20.
@@ -440,6 +445,14 @@ type pongReply struct {
 	pongSrc netip.AddrPort // what they reported they heard
 }
 
+type dualEndpointCandidate struct {
+	addr       epAddr
+	latency    time.Duration
+	hasLatency bool
+	lastPing   mono.Time
+	isBest     bool
+}
+
 // EndpointChange is a structure containing information about changes made to a
 // particular endpoint. This is not a stable interface and could change at any
 // time.
@@ -489,6 +502,21 @@ func (de *endpoint) primaryRTTForLocked(dst epAddr) time.Duration {
 	return 0
 }
 
+func (de *endpoint) primaryPongsSinceLocked(dst epAddr, since mono.Time) int {
+	state, ok := de.endpointState[dst.ap]
+	if !ok {
+		return 0
+	}
+	var n int
+	for _, pong := range state.recentPongs {
+		if pong.pongAt.IsZero() || pong.pongAt.Before(since) {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
 // endpoint.mu must be held.
 func (st *endpointState) addPongReplyLocked(r pongReply) {
 	if n := len(st.recentPongs); n < pongHistoryCount {
@@ -504,6 +532,148 @@ func (st *endpointState) addPongReplyLocked(r pongReply) {
 	st.recentPong = i
 }
 
+func compareDualEndpointCandidate(a, b dualEndpointCandidate) int {
+	if a.hasLatency != b.hasLatency {
+		if a.hasLatency {
+			return -1
+		}
+		return 1
+	}
+	if a.hasLatency && a.latency != b.latency {
+		if a.latency < b.latency {
+			return -1
+		}
+		return 1
+	}
+	if a.isBest != b.isBest {
+		if a.isBest {
+			return -1
+		}
+		return 1
+	}
+	if a.addr.ap.Addr().Is6() != b.addr.ap.Addr().Is6() {
+		if a.addr.ap.Addr().Is6() {
+			return -1
+		}
+		return 1
+	}
+	if a.addr.ap.String() < b.addr.ap.String() {
+		return -1
+	}
+	if a.addr.ap.String() > b.addr.ap.String() {
+		return 1
+	}
+	return 0
+}
+
+// dualEndpointAddrsForSendLocked returns up to two direct UDP endpoints for
+// fixed endpoint-level redundant sending. It intentionally only selects peer
+// endpoint addresses; source socket and active-backup policies are separate
+// data strategies.
+//
+// de.mu must be held.
+func (de *endpoint) dualEndpointAddrsForSendLocked(now mono.Time) (addrs []epAddr, needPing bool) {
+	if len(de.endpointState) == 0 {
+		return nil, false
+	}
+
+	var oldestPing mono.Time
+	candidates := make([]dualEndpointCandidate, 0, len(de.endpointState))
+	for ipp, state := range de.endpointState {
+		if state.shouldDeleteLocked() {
+			continue
+		}
+		if oldestPing.IsZero() || state.lastPing.Before(oldestPing) {
+			oldestPing = state.lastPing
+		}
+
+		latency, hasLatency := state.latencyLocked()
+		addr := epAddr{ap: ipp}
+		candidates = append(candidates, dualEndpointCandidate{
+			addr:       addr,
+			latency:    latency,
+			hasLatency: hasLatency && latency > 0,
+			lastPing:   state.lastPing,
+			isBest:     de.bestAddr.epAddr == addr && !now.After(de.trustBestAddrUntil),
+		})
+	}
+	if len(candidates) == 0 {
+		return nil, false
+	}
+	needPing = len(candidates) > 1 && (oldestPing.IsZero() || now.Sub(oldestPing) > wireguardPingInterval)
+
+	slices.SortFunc(candidates, compareDualEndpointCandidate)
+	limit := min(2, len(candidates))
+	addrs = make([]epAddr, 0, limit)
+	for _, candidate := range candidates[:limit] {
+		addrs = append(addrs, candidate.addr)
+	}
+
+	best := candidates[0]
+	de.bestAddr.epAddr = best.addr
+	if best.hasLatency {
+		de.bestAddr.latency = best.latency
+	}
+	if now.After(de.trustBestAddrUntil) {
+		de.trustBestAddrUntil = now.Add(time.Second)
+	}
+	return addrs, needPing
+}
+
+// dualSendObservedEndpointAddrsForSendLocked returns a primary destination and
+// one alternate peer source endpoint observed on receive. This makes fixed
+// dual-send NAT-friendly in the server-to-client direction: the peer has
+// already opened state from both source ports to our primary port.
+//
+// de.mu must be held.
+func (de *endpoint) dualSendObservedEndpointAddrsForSendLocked(primary epAddr, now mono.Time) (addrs []epAddr) {
+	if !primary.isDirect() {
+		return nil
+	}
+	for i, slot := range de.sourcePathRemoteSlots {
+		if !slot.isDirect() || slot == primary {
+			continue
+		}
+		seen := de.sourcePathRemoteSeen[i]
+		if seen.IsZero() || now.Sub(seen) > sessionActiveTimeout {
+			continue
+		}
+		if st, ok := de.endpointState[slot.ap]; !ok || !st.shouldDeleteLocked() {
+			return []epAddr{primary, slot}
+		}
+	}
+	return nil
+}
+
+func (de *endpoint) noteSourcePathObservedEndpointFailure(addr epAddr, err error) {
+	if !addr.isDirect() {
+		return
+	}
+
+	var removed bool
+	var slot int
+	de.mu.Lock()
+	for i, observed := range de.sourcePathRemoteSlots {
+		if observed != addr {
+			continue
+		}
+		de.sourcePathRemoteSlots[i] = epAddr{}
+		de.sourcePathRemoteSeen[i] = 0
+		removed = true
+		slot = i
+		break
+	}
+	de.mu.Unlock()
+
+	if !removed {
+		return
+	}
+	metricSourcePathDualEndpointObservedRemoved.Add(1)
+	if de.c.logf != nil {
+		de.c.logf("magicsock: srcsel: peer %s removed observed fanout endpoint slot=%d addr=%v after send failure: %v", de.publicKey.ShortString(), slot, addr, err)
+	}
+}
+
 func (de *endpoint) deleteEndpointLocked(why string, ep netip.AddrPort) {
 	de.debugUpdates.Add(EndpointChange{
 		When: time.Now(),
@@ -512,6 +682,12 @@ func (de *endpoint) deleteEndpointLocked(why string, ep netip.AddrPort) {
 	})
 	delete(de.endpointState, ep)
 	asEpAddr := epAddr{ap: ep}
+	for i, slot := range de.sourcePathRemoteSlots {
+		if slot == asEpAddr {
+			de.sourcePathRemoteSlots[i] = epAddr{}
+			de.sourcePathRemoteSeen[i] = 0
+		}
+	}
 	if de.bestAddr.epAddr == asEpAddr {
 		de.debugUpdates.Add(EndpointChange{
 			When: time.Now(),
@@ -531,6 +707,48 @@ func (de *endpoint) initFakeUDPAddr() {
 	addr[1] = 0x00
 	binary.BigEndian.PutUint64(addr[2:], uint64(reflect.ValueOf(de).Pointer()))
 	de.fakeWGAddr = netip.AddrPortFrom(netip.AddrFrom16(addr).Unmap(), 12345)
+}
+
+func (de *endpoint) noteSourcePathDualSendAvailability(now mono.Time, dualMode, singleReason string, packets int) {
+	if packets <= 0 {
+		return
+	}
+	var logFormat string
+	var logArgs []any
+	if singleReason != "" {
+		metricSourcePathDualSendDegradedSinglePackets.Add(int64(packets))
+	}
+
+	de.mu.Lock()
+	switch {
+	case singleReason != "":
+		if de.sourcePathSingleSince.IsZero() {
+			de.sourcePathSingleSince = now
+			de.sourcePathSinglePkts = int64(packets)
+			metricSourcePathDualSendDegradedSinglePeriods.Add(1)
+			metricSourcePathDualSendDegradedSingleActivePeers.Add(1)
+			logFormat = "magicsock: srcsel: peer %s degraded to single-send reason=%s"
+			logArgs = []any{de.publicKey.ShortString(), singleReason}
+		} else {
+			de.sourcePathSinglePkts += int64(packets)
+		}
+	case dualMode != "" && !de.sourcePathSingleSince.IsZero():
+		since := de.sourcePathSingleSince
+		singlePkts := de.sourcePathSinglePkts
+		de.sourcePathSingleSince = 0
+		de.sourcePathSinglePkts = 0
+		duration := now.Sub(since)
+		metricSourcePathDualSendDegradedSingleRecovered.Add(1)
+		metricSourcePathDualSendDegradedSingleActivePeers.Add(-1)
+		metricSourcePathDualSendDegradedSingleDurationMS.Add(duration.Milliseconds())
+		logFormat = "magicsock: srcsel: peer %s recovered dual-send mode=%s single_duration=%v single_packets=%d"
+		logArgs = []any{de.publicKey.ShortString(), dualMode, duration.Round(time.Millisecond), singlePkts}
+	}
+	de.mu.Unlock()
+
+	if logFormat != "" {
+		de.c.logf(logFormat, logArgs...)
+	}
 }
 
 // noteRecvActivity records receive activity on de, and invokes
@@ -1100,11 +1318,34 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 	}
 
 	now := mono.Now()
-	udpAddr, derpAddr, startWGPing := de.addrForSendLocked(now)
+	var dualEndpointAddrs []epAddr
+	var udpAddr epAddr
+	var derpAddr netip.AddrPort
+	var startWGPing bool
+	if sourcePathDualEndpointStrategyEnabled() {
+		dualEndpointAddrs, startWGPing = de.dualEndpointAddrsForSendLocked(now)
+		if len(dualEndpointAddrs) > 0 {
+			udpAddr = dualEndpointAddrs[0]
+		} else {
+			udpAddr, derpAddr, startWGPing = de.addrForSendLocked(now)
+		}
+	} else {
+		udpAddr, derpAddr, startWGPing = de.addrForSendLocked(now)
+		if sourcePathDualSendEnabled() {
+			dualEndpointAddrs = de.dualSendObservedEndpointAddrsForSendLocked(udpAddr, now)
+		}
+	}
 
 	if de.isWireguardOnly {
 		if startWGPing {
 			de.sendWireGuardOnlyPingsLocked(now)
+		}
+	} else if sourcePathDualEndpointStrategyEnabled() {
+		if startWGPing {
+			de.sendDiscoPingsLocked(now, true)
+			if de.wantUDPRelayPathDiscoveryLocked(now) {
+				de.discoverUDPRelayPathsLocked(now)
+			}
 		}
 	} else if !udpAddr.isDirect() || now.After(de.trustBestAddrUntil) {
 		de.sendDiscoPingsLocked(now, true)
@@ -1128,31 +1369,101 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 		}
 	}
 	var err error
-	if udpAddr.ap.IsValid() {
-		source := de.c.sourcePathDataSendSource(udpAddr)
-		usingSourcePathAux := !source.isPrimary()
-		if usingSourcePathAux {
+	var dualSendMode, singleSendReason string
+	if len(dualEndpointAddrs) > 0 {
+		dualSendMode = "observed-endpoint-fanout"
+		res := de.c.sendUDPBatchDualEndpoint(dualEndpointAddrs, buffs, offset)
+		err = res.err
+		if res.primaryErr != nil {
+			de.noteSourcePathObservedEndpointFailure(dualEndpointAddrs[0], res.primaryErr)
+			if isBadEndpointErr(res.primaryErr) {
+				de.noteBadEndpoint(dualEndpointAddrs[0])
+			}
+		}
+		if len(dualEndpointAddrs) > 1 && res.secondaryErr != nil {
+			de.noteSourcePathObservedEndpointFailure(dualEndpointAddrs[1], res.secondaryErr)
+			if isBadEndpointErr(res.secondaryErr) {
+				de.noteBadEndpoint(dualEndpointAddrs[1])
+			}
+		}
+	} else if udpAddr.ap.IsValid() {
+		if source, activeBackupForced := de.c.sourcePathActiveBackupCandidate(udpAddr, now); activeBackupForced {
+			if sourcePathDualSendEnabled() && udpAddr.isDirect() {
+				singleSendReason = "active-backup"
+			}
 			metricSourcePathDataSendAuxSelected.Add(1)
-		}
-		usedPrimarySend := source.isPrimary()
-		_, err = de.c.sendUDPBatchFromSource(source, udpAddr, buffs, offset)
-		if err != nil && usingSourcePathAux {
-			metricSourcePathDataSendAuxFallback.Add(1)
-			de.c.logf("magicsock: srcsel: data send from source %d to %v failed, retrying primary: %v", source.socketID, udpAddr, err)
-			de.c.noteSourcePathSendFailure(udpAddr, source)
-			usedPrimarySend = true
+			_, err = de.c.sendUDPBatchFromSource(source, udpAddr, buffs, offset)
+			if err != nil {
+				metricSourcePathFailoverAuxAlsoDead.Add(1)
+				de.c.noteSourcePathSendFailure(udpAddr, source)
+			} else {
+				metricSourcePathDataSendAuxSucceeded.Add(1)
+			}
+		} else if aux, ok := de.c.sourcePathDualSendCandidate(udpAddr); ok {
+			dualSendMode = "aux-source"
+			res := de.c.sendUDPBatchDualSource(aux, udpAddr, buffs, offset)
+			err = res.err
+			if res.primaryErr != nil && res.auxErr != nil && isBadEndpointErr(res.primaryErr) {
+				de.noteBadEndpoint(udpAddr)
+			}
+		} else if sourcePathSingleSourceStrategyEnabled() {
+			if sourcePathDualSendEnabled() && udpAddr.isDirect() {
+				singleSendReason = "single-source-strategy"
+			}
+			source := de.c.sourcePathDataSendSourceForBatch(udpAddr, buffs, offset)
+			usingSourcePathAux := !source.isPrimary()
+			if usingSourcePathAux {
+				metricSourcePathDataSendAuxSelected.Add(1)
+			}
+			usedPrimarySend := source.isPrimary()
+			_, err = de.c.sendUDPBatchFromSource(source, udpAddr, buffs, offset)
+			if err != nil && usingSourcePathAux {
+				metricSourcePathDataSendAuxFallback.Add(1)
+				de.c.logf("magicsock: srcsel: data send from source %d to %v failed, retrying primary: %v", source.socketID, udpAddr, err)
+				de.c.noteSourcePathSendFailure(udpAddr, source)
+				usedPrimarySend = true
+				_, err = de.c.sendUDPBatch(udpAddr, buffs, offset)
+			} else if usingSourcePathAux {
+				metricSourcePathDataSendAuxSucceeded.Add(1)
+			} else if err != nil {
+				if aux, ok := de.c.noteSourcePathPrimarySendFailure(udpAddr, now); ok {
+					metricSourcePathDataSendAuxSelected.Add(1)
+					_, auxErr := de.c.sendUDPBatchFromSource(aux, udpAddr, buffs, offset)
+					if auxErr == nil {
+						err = nil
+						usedPrimarySend = false
+						metricSourcePathDataSendAuxSucceeded.Add(1)
+					} else {
+						metricSourcePathFailoverAuxAlsoDead.Add(1)
+						de.c.noteSourcePathSendFailure(udpAddr, aux)
+					}
+				}
+			} else {
+				de.c.noteSourcePathPrimarySendSuccess(udpAddr)
+			}
+
+			// If the error is known to indicate that the endpoint is no longer
+			// usable, clear the endpoint statistics so that the next send will
+			// re-evaluate the best endpoint.
+			if err != nil && usedPrimarySend && isBadEndpointErr(err) {
+				de.noteBadEndpoint(udpAddr)
+			}
+		} else {
+			if sourcePathDualSendEnabled() && udpAddr.isDirect() {
+				singleSendReason = "no-redundant-path"
+			}
 			_, err = de.c.sendUDPBatch(udpAddr, buffs, offset)
-		} else if usingSourcePathAux {
-			metricSourcePathDataSendAuxSucceeded.Add(1)
-		}
+			if err == nil {
+				de.c.noteSourcePathPrimarySendSuccess(udpAddr)
+			}
 
-		// If the error is known to indicate that the endpoint is no longer
-		// usable, clear the endpoint statistics so that the next send will
-		// re-evaluate the best endpoint.
-		if err != nil && usedPrimarySend && isBadEndpointErr(err) {
-			de.noteBadEndpoint(udpAddr)
+			// If the error is known to indicate that the endpoint is no longer
+			// usable, clear the endpoint statistics so that the next send will
+			// re-evaluate the best endpoint.
+			if err != nil && isBadEndpointErr(err) {
+				de.noteBadEndpoint(udpAddr)
+			}
 		}
-
 		var txBytes int
 		for _, b := range buffs {
 			txBytes += len(b[offset:])
@@ -1182,6 +1493,7 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 			update(0, netip.AddrPortFrom(de.nodeAddr, 0), udpAddr.ap, len(buffs), txBytes, false)
 		}
 	}
+	de.noteSourcePathDualSendAvailability(now, dualSendMode, singleSendReason, len(buffs))
 	if derpAddr.IsValid() {
 		allOk := true
 		var txBytes int
@@ -2250,6 +2562,14 @@ func (de *endpoint) resetLocked() {
 	de.lastSendExt = 0
 	de.lastFullPing = 0
 	de.clearBestAddrLocked()
+	de.sourcePathRemoteSlots = [2]epAddr{}
+	de.sourcePathRemoteSeen = [2]mono.Time{}
+	de.sourcePathPeerAware = nil
+	if !de.sourcePathSingleSince.IsZero() {
+		metricSourcePathDualSendDegradedSingleActivePeers.Add(-1)
+		de.sourcePathSingleSince = 0
+		de.sourcePathSinglePkts = 0
+	}
 	for _, es := range de.endpointState {
 		es.lastPing = 0
 	}

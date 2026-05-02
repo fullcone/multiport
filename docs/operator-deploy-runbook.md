@@ -189,10 +189,11 @@ Environment=TS_EXPERIMENTAL_EXTRA_ENDPOINTS_FILE=/etc/tailscaled/extra-endpoints
 # Environment=TS_EXPERIMENTAL_EXTRA_ENDPOINTS_POLL_S=30
 #   ↑ enable polling backup if fsnotify is unreliable (NFS, some FUSE).
 
-# === srcsel data plane: auto mode (production-recommended) ===
+# === srcsel data plane: fixed dual-send redundancy ===
 Environment=TS_EXPERIMENTAL_SRCSEL_ENABLE=true
 Environment=TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=1
-Environment=TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE=true
+Environment=TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY=dual-send
+Environment=TS_EXPERIMENTAL_SRCSEL_DUAL_SEND=true
 
 ExecStart=/usr/local/bin/tailscaled-srcsel \
     --tun=userspace-networking \
@@ -271,13 +272,14 @@ sudo journalctl -u tailscaled-srcsel | grep envknob | head -10
 #   envknob: TS_EXPERIMENTAL_EXTRA_ENDPOINTS_FILE="..."
 #   envknob: TS_EXPERIMENTAL_SRCSEL_ENABLE="true"
 #   envknob: TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS="1"
-#   envknob: TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE="true"
+#   envknob: TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY="dual-send"
+#   envknob: TS_EXPERIMENTAL_SRCSEL_DUAL_SEND="true"
 
 # 2. extra-endpoints actually loaded
 sudo journalctl -u tailscaled-srcsel | grep "extra-endpoints"
 #   magicsock: extra-endpoints: loaded N endpoint(s) from "..."
 
-# 3. srcsel aux sockets bound (auto/force mode = 4 sockets total)
+# 3. srcsel aux sockets bound (dual-send/force mode = 4 sockets total)
 sudo ss -lunp | grep tailscaled-srcs
 # UNCONN ... 0.0.0.0:41641 ← primary v4
 # UNCONN ... 0.0.0.0:54xxx ← aux v4 (random ephemeral)
@@ -308,7 +310,8 @@ After=network-online.target
 # === srcsel data plane ===
 Environment=TS_EXPERIMENTAL_SRCSEL_ENABLE=true
 Environment=TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=1
-Environment=TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE=true
+Environment=TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY=dual-send
+Environment=TS_EXPERIMENTAL_SRCSEL_DUAL_SEND=true
 
 # === Phase 22 v2: direct-vs-relay latency-aware switching ===
 Environment=TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE=true
@@ -375,10 +378,11 @@ $state = Join-Path $pack "state"
 $logs  = Join-Path $pack "logs"
 New-Item -ItemType Directory -Force -Path $state, $logs | Out-Null
 
-# === srcsel data plane (auto recommended) ===
+# === srcsel data plane (fixed dual-send redundancy) ===
 $env:TS_EXPERIMENTAL_SRCSEL_ENABLE = "true"
 $env:TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS = "1"
-$env:TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE = "true"
+$env:TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY = "dual-send"
+$env:TS_EXPERIMENTAL_SRCSEL_DUAL_SEND = "true"
 
 # === Phase 22 v2 ===
 $env:TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE = "true"
