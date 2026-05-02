@@ -7,6 +7,7 @@ package magicsock
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"net"
 	"net/netip"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tailscale/wireguard-go/device"
 	"github.com/tailscale/wireguard-go/tun/tuntest"
 	"tailscale.com/envknob"
 	"tailscale.com/net/packet"
@@ -297,6 +299,178 @@ func TestSourcePathActiveBackupDropsStaleFailoverSource(t *testing.T) {
 	if stillForced {
 		t.Fatal("active-backup state still forced after cached aux source became stale")
 	}
+}
+
+func TestSourcePathFlowAwareRRStickyAndIdle(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "rr")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_IDLE_S", "1")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_IDLE_S", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 32
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	aux := c.sourcePath.aux4.rxMeta()
+	now := mono.Now()
+	seedSourcePathSamples(t, &c, dst, aux)
+
+	if got := c.sourcePathDataSendSourceForFlow(dst, 1, now); !got.isPrimary() {
+		t.Fatalf("first RR flow source = %+v, want primary", got)
+	}
+	if got := c.sourcePathDataSendSourceForFlow(dst, 2, now.Add(time.Millisecond)); got != aux {
+		t.Fatalf("second RR flow source = %+v, want aux %+v", got, aux)
+	}
+	if got := c.sourcePathDataSendSourceForFlow(dst, 2, now.Add(2*time.Millisecond)); got != aux {
+		t.Fatalf("sticky RR flow source = %+v, want aux %+v", got, aux)
+	}
+	if got := c.sourcePathDataSendSourceForFlow(dst, 2, now.Add(2*time.Second)); !got.isPrimary() {
+		t.Fatalf("expired RR flow source = %+v, want primary after idle remap", got)
+	}
+}
+
+func TestSourcePathFlowAwareDropsStaleAssignedSource(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "rr")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 33
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	aux := c.sourcePath.aux4.rxMeta()
+	now := mono.Now()
+	seedSourcePathSamples(t, &c, dst, aux)
+
+	if got := c.sourcePathDataSendSourceForFlow(dst, 1, now); !got.isPrimary() {
+		t.Fatalf("first RR flow source = %+v, want primary", got)
+	}
+	if got := c.sourcePathDataSendSourceForFlow(dst, 2, now.Add(time.Millisecond)); got != aux {
+		t.Fatalf("second RR flow source = %+v, want aux %+v", got, aux)
+	}
+
+	c.sourcePath.generation++
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+
+	if got := c.sourcePathDataSendSourceForFlow(dst, 2, now.Add(2*time.Millisecond)); !got.isPrimary() {
+		t.Fatalf("stale flow source after aux generation change = %+v, want primary", got)
+	}
+	c.mu.Lock()
+	mapped := c.sourceProbes.flowMap[sourcePathFlowKey{dst: dst, id: 2}]
+	c.mu.Unlock()
+	if !mapped.source.isPrimary() {
+		t.Fatalf("flow map source after stale aux remap = %+v, want primary", mapped.source)
+	}
+}
+
+func TestSourcePathFlowAwareHardCap(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "rr")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_MAX", "1")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_MAX", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 34
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	seedSourcePathSamples(t, &c, dst, c.sourcePath.aux4.rxMeta())
+	now := mono.Now()
+	c.sourcePathDataSendSourceForFlow(dst, 1, now)
+	c.sourcePathDataSendSourceForFlow(dst, 2, now.Add(time.Millisecond))
+
+	c.mu.Lock()
+	got := len(c.sourceProbes.flowMap)
+	c.mu.Unlock()
+	if got != 1 {
+		t.Fatalf("flow map size = %d, want hard cap 1", got)
+	}
+}
+
+func TestSourcePathFlowAwareBatchFallbackStripesTransportPackets(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "rr")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 35
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	aux := c.sourcePath.aux4.rxMeta()
+	seedSourcePathSamples(t, &c, dst, aux)
+
+	pkt1 := sourcePathTestTransportPacket(123, 1)
+	pkt2 := sourcePathTestTransportPacket(123, 2)
+	if got := c.sourcePathDataSendSourceForBatch(dst, [][]byte{pkt1}, 0); !got.isPrimary() {
+		t.Fatalf("first packet-fallback source = %+v, want primary", got)
+	}
+	if got := c.sourcePathDataSendSourceForBatch(dst, [][]byte{pkt2}, 0); got != aux {
+		t.Fatalf("second packet-fallback source = %+v, want aux %+v", got, aux)
+	}
+}
+
+func TestSourcePathFlowIDFromTransportPacketIncludesCounter(t *testing.T) {
+	pkt1 := sourcePathTestTransportPacket(123, 1)
+	pkt2 := sourcePathTestTransportPacket(123, 2)
+
+	id1, ok1 := sourcePathFlowIDFromPacket(pkt1)
+	id2, ok2 := sourcePathFlowIDFromPacket(pkt2)
+	if !ok1 || !ok2 {
+		t.Fatal("transport packet did not produce a flow ID")
+	}
+	if id1 == id2 {
+		t.Fatalf("transport flow IDs match despite different counters: %x", id1)
+	}
+}
+
+func sourcePathTestTransportPacket(receiver uint32, counter uint64) []byte {
+	pkt := make([]byte, 32)
+	binary.LittleEndian.PutUint32(pkt[:4], device.MessageTransportType)
+	binary.LittleEndian.PutUint32(pkt[4:8], receiver)
+	binary.LittleEndian.PutUint64(pkt[8:16], counter)
+	copy(pkt[16:], "ciphertext")
+	return pkt
 }
 
 func TestSourcePathRealtimeProfileValues(t *testing.T) {

@@ -74,6 +74,18 @@ func sourcePathActiveBackupRecoveryPongsValue() int {
 	return sourcePathActiveBackupRecoveryPongs
 }
 
+func sourcePathFlowAwareEnabled() bool { return false }
+
+func sourcePathBalancePolicyValue() string { return "aware" }
+
+func sourcePathFlowIdleValue() time.Duration { return sourcePathFlowIdle }
+
+func sourcePathFlowMaxEntriesValue() int { return sourcePathFlowMaxEntries }
+
+func (c *Conn) sourcePathDataSendSourceForBatch(dst epAddr, buffs [][]byte, offset int) sourceRxMeta {
+	return primarySourceRxMeta
+}
+
 func (c *Conn) sourcePathWriteWireGuardBatchTo(source sourceRxMeta, dst epAddr, buffs [][]byte, offset int) error {
 	return errSourcePathUnavailable
 }

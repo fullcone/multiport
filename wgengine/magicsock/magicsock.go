@@ -4381,6 +4381,12 @@ var (
 	metricSourcePathFailoverToAux              = clientmetric.NewCounter("magicsock_srcsel_failover_to_aux")
 	metricSourcePathFailoverRecoveredToPrimary = clientmetric.NewCounter("magicsock_srcsel_failover_recovered_to_primary")
 	metricSourcePathFailoverAuxAlsoDead        = clientmetric.NewCounter("magicsock_srcsel_failover_aux_also_dead")
+	metricSourcePathFlowAssignedPrimary        = clientmetric.NewCounter("magicsock_srcsel_flow_assigned_primary")
+	metricSourcePathFlowAssignedAux            = clientmetric.NewCounter("magicsock_srcsel_flow_assigned_aux")
+	metricSourcePathFlowEvictedIdle            = clientmetric.NewCounter("magicsock_srcsel_flow_evicted_idle")
+	metricSourcePathFlowEvictedCap             = clientmetric.NewCounter("magicsock_srcsel_flow_evicted_cap")
+	metricSourcePathFlowEvictedSourceFailure   = clientmetric.NewCounter("magicsock_srcsel_flow_evicted_source_failure")
+	metricSourcePathFlowHintUnavailable        = clientmetric.NewCounter("magicsock_srcsel_flow_hint_unavailable")
 	// Phase 22 v2: direct-vs-relay latency-aware switching counters.
 	// Only incremented when TS_EXPERIMENTAL_DIRECT_VS_RELAY_COMPARE=true.
 	metricDirectVsRelayCompared            = clientmetric.NewCounter("magicsock_direct_vs_relay_compared")

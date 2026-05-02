@@ -1160,7 +1160,7 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 				de.noteBadEndpoint(udpAddr)
 			}
 		} else {
-			source := de.c.sourcePathDataSendSource(udpAddr)
+			source := de.c.sourcePathDataSendSourceForBatch(udpAddr, buffs, offset)
 			usingSourcePathAux := !source.isPrimary()
 			if usingSourcePathAux {
 				metricSourcePathDataSendAuxSelected.Add(1)

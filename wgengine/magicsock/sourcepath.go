@@ -4,13 +4,16 @@
 package magicsock
 
 import (
+	"encoding/binary"
 	"errors"
+	"hash/fnv"
 	"io"
 	"math"
 	"net/netip"
 	"sync/atomic"
 	"time"
 
+	"github.com/tailscale/wireguard-go/device"
 	"tailscale.com/disco"
 	"tailscale.com/net/stun"
 	"tailscale.com/syncs"
@@ -101,6 +104,10 @@ const (
 	sourcePathJitterMax          = 50 * time.Millisecond
 	sourcePathLossMax            = 0.05
 	sourcePathScoreImprovePct    = 5
+
+	// Phase 26 flow-aware source selection defaults.
+	sourcePathFlowIdle       = 30 * time.Second
+	sourcePathFlowMaxEntries = 100000
 )
 
 var (
@@ -147,6 +154,8 @@ type sourcePathProbeManager struct {
 	activeBackup           map[epAddr]sourcePathActiveBackupState
 	dualSendAuxFailStreak  map[sourcePathDualSendKey]int
 	dualSendDemotedAuxTill map[sourcePathDualSendKey]mono.Time
+	flowMap                map[sourcePathFlowKey]sourcePathFlowState
+	flowRR                 uint64
 }
 
 type sourcePathActiveBackupState struct {
@@ -159,6 +168,16 @@ type sourcePathActiveBackupState struct {
 type sourcePathDualSendKey struct {
 	dst    epAddr
 	source sourceRxMeta
+}
+
+type sourcePathFlowKey struct {
+	dst epAddr
+	id  uint64
+}
+
+type sourcePathFlowState struct {
+	source       sourceRxMeta
+	lastActivity mono.Time
 }
 
 type sourcePathProbeTx struct {
@@ -293,6 +312,8 @@ func (pm *sourcePathProbeManager) clearLocked() {
 	pm.activeBackup = nil
 	pm.dualSendAuxFailStreak = nil
 	pm.dualSendDemotedAuxTill = nil
+	pm.flowMap = nil
+	pm.flowRR = 0
 }
 
 // noteSourcePathSendFailure invalidates probe samples for (dst, source) after
@@ -305,9 +326,13 @@ func (c *Conn) noteSourcePathSendFailure(dst epAddr, source sourceRxMeta) {
 	}
 	c.mu.Lock()
 	dropped := c.sourceProbes.invalidateLocked(dst, source)
+	droppedFlows := c.sourceProbes.dropFlowsLocked(dst, source)
 	c.mu.Unlock()
 	if dropped > 0 {
 		metricSourcePathSendFailureInvalidated.Add(int64(dropped))
+	}
+	if droppedFlows > 0 {
+		metricSourcePathFlowEvictedSourceFailure.Add(int64(droppedFlows))
 	}
 }
 
@@ -714,6 +739,156 @@ func sourcePathExpNorm(v, maxV float64) float64 {
 		x = 1
 	}
 	return 1 / math.Exp(4*x)
+}
+
+func sourcePathFlowIDFromBatch(buffs [][]byte, offset int) (uint64, bool) {
+	if len(buffs) == 0 || offset < 0 || len(buffs[0]) <= offset {
+		return 0, false
+	}
+	return sourcePathFlowIDFromPacket(buffs[0][offset:])
+}
+
+func sourcePathFlowIDFromPacket(b []byte) (uint64, bool) {
+	if len(b) < 4 {
+		return 0, false
+	}
+	msgType := binary.LittleEndian.Uint32(b[:4])
+	if msgType == device.MessageTransportType && len(b) >= 16 {
+		// Without an upstream inner-flow hint, magicsock can only derive a
+		// packet-level fallback from the visible WireGuard transport header.
+		// The explicit sourcePathDataSendSourceForFlow path below remains the
+		// sticky path for a future real 5-tuple hint.
+		h := fnv.New64a()
+		_, _ = h.Write(b[:16])
+		return h.Sum64(), true
+	}
+	h := fnv.New64a()
+	n := min(len(b), 32)
+	_, _ = h.Write(b[:n])
+	return h.Sum64(), true
+}
+
+func (pm *sourcePathProbeManager) assignFlowLocked(key sourcePathFlowKey, source sourceRxMeta, now mono.Time) {
+	if pm.flowMap == nil {
+		pm.flowMap = make(map[sourcePathFlowKey]sourcePathFlowState)
+	}
+	pm.pruneExpiredFlowsLocked(now)
+	if maxEntries := sourcePathFlowMaxEntriesValue(); maxEntries > 0 {
+		for len(pm.flowMap) >= maxEntries {
+			if !pm.evictOldestFlowLocked() {
+				break
+			}
+		}
+	}
+	pm.flowMap[key] = sourcePathFlowState{source: source, lastActivity: now}
+	if source.isPrimary() {
+		metricSourcePathFlowAssignedPrimary.Add(1)
+	} else {
+		metricSourcePathFlowAssignedAux.Add(1)
+	}
+}
+
+func (pm *sourcePathProbeManager) lookupFlowLocked(key sourcePathFlowKey, now mono.Time) (sourcePathFlowState, bool) {
+	if pm.flowMap == nil {
+		return sourcePathFlowState{}, false
+	}
+	pm.pruneExpiredFlowsLocked(now)
+	st, ok := pm.flowMap[key]
+	if !ok {
+		return sourcePathFlowState{}, false
+	}
+	st.lastActivity = now
+	pm.flowMap[key] = st
+	return st, true
+}
+
+func (pm *sourcePathProbeManager) forgetFlowLocked(key sourcePathFlowKey, source sourceRxMeta) {
+	if pm.flowMap == nil {
+		return
+	}
+	if st, ok := pm.flowMap[key]; ok && st.source == source {
+		delete(pm.flowMap, key)
+	}
+}
+
+func (pm *sourcePathProbeManager) pruneExpiredFlowsLocked(now mono.Time) {
+	if len(pm.flowMap) == 0 {
+		return
+	}
+	idle := sourcePathFlowIdleValue()
+	if idle <= 0 {
+		return
+	}
+	var expired int64
+	for key, st := range pm.flowMap {
+		if now.Sub(st.lastActivity) > idle {
+			delete(pm.flowMap, key)
+			expired++
+		}
+	}
+	if expired > 0 {
+		metricSourcePathFlowEvictedIdle.Add(expired)
+	}
+}
+
+func (pm *sourcePathProbeManager) evictOldestFlowLocked() bool {
+	var (
+		oldestKey sourcePathFlowKey
+		oldestAt  mono.Time
+		found     bool
+	)
+	for key, st := range pm.flowMap {
+		if !found || st.lastActivity.Sub(oldestAt) < 0 {
+			oldestKey = key
+			oldestAt = st.lastActivity
+			found = true
+		}
+	}
+	if !found {
+		return false
+	}
+	delete(pm.flowMap, oldestKey)
+	metricSourcePathFlowEvictedCap.Add(1)
+	return true
+}
+
+func (pm *sourcePathProbeManager) dropFlowsLocked(dst epAddr, source sourceRxMeta) int {
+	if len(pm.flowMap) == 0 {
+		return 0
+	}
+	dropped := 0
+	for key, st := range pm.flowMap {
+		if key.dst == dst && st.source == source {
+			delete(pm.flowMap, key)
+			dropped++
+		}
+	}
+	return dropped
+}
+
+func (pm *sourcePathProbeManager) nextFlowRRLocked() uint64 {
+	v := pm.flowRR
+	pm.flowRR++
+	return v
+}
+
+func sourcePathFlowChooseAuxByWeight(flowID uint64, auxWeight, primaryWeight float64) bool {
+	total := auxWeight + primaryWeight
+	if total <= 0 {
+		return sourcePathMix64(flowID)&1 == 1
+	}
+	const buckets = 10000
+	cutoff := uint64((auxWeight / total) * buckets)
+	return sourcePathMix64(flowID)%buckets < cutoff
+}
+
+func sourcePathMix64(v uint64) uint64 {
+	v ^= v >> 30
+	v *= 0xbf58476d1ce4e5b9
+	v ^= v >> 27
+	v *= 0x94d049bb133111eb
+	v ^= v >> 31
+	return v
 }
 
 // invalidateLocked drops all samples for the given (dst, source) pair. Used

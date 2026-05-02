@@ -47,6 +47,10 @@ var (
 	envknobSrcSelScoreImprovePct     = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_SCORE_IMPROVEMENT_PCT")
 	envknobSrcSelProfile             = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_PROFILE")
 	envknobSrcSelSampleTTLS          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_SAMPLE_TTL_S")
+	envknobSrcSelFlowAware           = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_FLOW_AWARE")
+	envknobSrcSelBalancePolicy       = envknob.RegisterString("TS_EXPERIMENTAL_SRCSEL_BALANCE_POLICY")
+	envknobSrcSelFlowIdleS           = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_FLOW_IDLE_S")
+	envknobSrcSelFlowMax             = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_FLOW_MAX")
 )
 
 func sourcePathAuxSocketCount() int {
@@ -299,6 +303,41 @@ func sourcePathActiveBackupRecoveryPongsValue() int {
 	return n
 }
 
+func sourcePathFlowAwareEnabled() bool {
+	return envknobSrcSelFlowAware() && sourcePathAuxSocketCount() > 0
+}
+
+func sourcePathBalancePolicyValue() string {
+	switch strings.ToLower(envknobSrcSelBalancePolicy()) {
+	case "rr", "xor", "aware":
+		return strings.ToLower(envknobSrcSelBalancePolicy())
+	default:
+		return "aware"
+	}
+}
+
+func sourcePathFlowIdleValue() time.Duration {
+	n := envknobSrcSelFlowIdleS()
+	if n < 0 {
+		return 0
+	}
+	if n == 0 {
+		return sourcePathFlowIdle
+	}
+	return time.Duration(n) * time.Second
+}
+
+func sourcePathFlowMaxEntriesValue() int {
+	n := envknobSrcSelFlowMax()
+	if n < 0 {
+		return 0
+	}
+	if n == 0 {
+		return sourcePathFlowMaxEntries
+	}
+	return n
+}
+
 func (c *Conn) sourcePathReceiveFuncs() []conn.ReceiveFunc {
 	if sourcePathAuxSocketCount() == 0 {
 		return nil
@@ -377,6 +416,92 @@ func (c *Conn) sourcePathDataSendSource(dst epAddr) sourceRxMeta {
 		return primarySourceRxMeta
 	}
 	return score.source
+}
+
+func (c *Conn) sourcePathDataSendSourceForBatch(dst epAddr, buffs [][]byte, offset int) sourceRxMeta {
+	if !sourcePathFlowAwareEnabled() {
+		return c.sourcePathDataSendSource(dst)
+	}
+	flowID, ok := sourcePathFlowIDFromBatch(buffs, offset)
+	if !ok {
+		metricSourcePathFlowHintUnavailable.Add(1)
+		return c.sourcePathDataSendSource(dst)
+	}
+	return c.sourcePathDataSendSourceForFlow(dst, flowID, mono.Now())
+}
+
+func (c *Conn) sourcePathDataSendSourceForFlow(dst epAddr, flowID uint64, now mono.Time) sourceRxMeta {
+	if !sourcePathFlowAwareEnabled() || !dst.isDirect() || flowID == 0 {
+		return c.sourcePathDataSendSource(dst)
+	}
+	if source, ok := c.sourcePathActiveBackupCandidate(dst, now); ok {
+		return source
+	}
+	if forceMode := sourcePathForcedDataSourceMode(); forceMode != "" {
+		if !sourcePathForcedDataSourceModeAllowsAddr(forceMode, dst.ap.Addr()) {
+			return primarySourceRxMeta
+		}
+		return c.sourcePathForcedDataSendSource(dst)
+	}
+
+	key := sourcePathFlowKey{dst: dst, id: flowID}
+	c.mu.Lock()
+	st, ok := c.sourceProbes.lookupFlowLocked(key, now)
+	c.mu.Unlock()
+	if ok {
+		if st.source.isPrimary() || c.sourcePathSourceAvailable(dst, st.source) {
+			return st.source
+		}
+		c.mu.Lock()
+		c.sourceProbes.forgetFlowLocked(key, st.source)
+		c.mu.Unlock()
+	}
+
+	score, auxOK := c.sourcePathBestCandidate(dst)
+	source := c.sourcePathNewFlowSource(dst, flowID, score, auxOK)
+	c.mu.Lock()
+	c.sourceProbes.assignFlowLocked(key, source, now)
+	c.mu.Unlock()
+	return source
+}
+
+func (c *Conn) sourcePathNewFlowSource(dst epAddr, flowID uint64, aux sourcePathCandidateScore, auxOK bool) sourceRxMeta {
+	if !auxOK {
+		return primarySourceRxMeta
+	}
+	switch sourcePathBalancePolicyValue() {
+	case "rr":
+		c.mu.Lock()
+		rr := c.sourceProbes.nextFlowRRLocked()
+		c.mu.Unlock()
+		if rr%2 == 0 {
+			return primarySourceRxMeta
+		}
+		return aux.source
+	case "xor":
+		if sourcePathMix64(flowID)&1 == 0 {
+			return primarySourceRxMeta
+		}
+		return aux.source
+	default:
+		auxWeight := 1.0
+		primaryWeight := 1.0
+		if sourcePathMultiMetricEnabled() {
+			weights := sourcePathScoreWeightsValue()
+			auxWeight = aux.score
+			if auxWeight <= 0 {
+				auxWeight = sourcePathQualityScore(aux.latency, aux.jitter, aux.loss, weights)
+			}
+			primaryRTT := c.primaryRTTForDst(dst)
+			if primaryRTT > 0 {
+				primaryWeight = sourcePathQualityScore(primaryRTT, 0, 0, weights)
+			}
+		}
+		if sourcePathFlowChooseAuxByWeight(flowID, auxWeight, primaryWeight) {
+			return aux.source
+		}
+		return primarySourceRxMeta
+	}
 }
 
 func (c *Conn) sourcePathForcedDataSendSource(dst epAddr) sourceRxMeta {
