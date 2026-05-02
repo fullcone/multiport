@@ -13,6 +13,7 @@ import (
 	"tailscale.com/net/stun"
 	"tailscale.com/tstime/mono"
 	"tailscale.com/types/key"
+	"tailscale.com/types/logger"
 )
 
 func TestPrimarySourceRxMeta(t *testing.T) {
@@ -751,6 +752,114 @@ func TestReceiveIPPrimaryWireGuardMetric(t *testing.T) {
 	}
 	if _, isLazy := ep.(*lazyEndpoint); !isLazy {
 		t.Fatalf("returned endpoint type = %T, want *lazyEndpoint", ep)
+	}
+}
+
+func TestReceiveIPRemoteWireGuardMetrics(t *testing.T) {
+	primary := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	aux := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:51000")}
+	pkt := []byte{0x04, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef}
+
+	var c Conn
+	c.havePrivateKey.Store(true)
+	c.logf = logger.Discard
+	c.peerMap = newPeerMap()
+	peerKey := key.NewNode().Public()
+	de := &endpoint{
+		c:         &c,
+		publicKey: peerKey,
+		bestAddr:  addrQuality{epAddr: primary},
+	}
+	c.peerMap.byNodeKey[peerKey] = newPeerInfo(de)
+	c.peerMap.setNodeKeyForEpAddr(primary, peerKey)
+	c.peerMap.setNodeKeyForEpAddr(aux, peerKey)
+
+	bestBefore := metricSourcePathRemoteBestWireGuardRx.Value()
+	nonBestBefore := metricSourcePathRemoteNonBestWireGuardRx.Value()
+	unknownBefore := metricSourcePathRemoteUnknownWireGuardRx.Value()
+	bestAcceptedBefore := metricSourcePathRemoteBestWireGuardAccepted.Value()
+	nonBestAcceptedBefore := metricSourcePathRemoteNonBestWireGuardAccepted.Value()
+
+	var cache epAddrEndpointCache
+	primaryEP, _, _, ok := c.receiveIP(pkt, primary.ap, &cache)
+	if !ok {
+		t.Fatal("primary endpoint receive returned ok=false")
+	}
+	primaryAware, ok := primaryEP.(*sourcePathPeerAwareEndpoint)
+	if !ok {
+		t.Fatalf("primary endpoint type = %T, want *sourcePathPeerAwareEndpoint", primaryEP)
+	}
+	primaryAware.FromPeer(peerKey.Raw32())
+	if got := metricSourcePathRemoteBestWireGuardRx.Value() - bestBefore; got != 1 {
+		t.Fatalf("remote best WG rx metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathRemoteBestWireGuardAccepted.Value() - bestAcceptedBefore; got != 1 {
+		t.Fatalf("remote best WG accepted metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathRemoteNonBestWireGuardRx.Value() - nonBestBefore; got != 0 {
+		t.Fatalf("remote non-best WG rx metric delta after primary = %d, want 0", got)
+	}
+
+	cache = epAddrEndpointCache{}
+	auxEP, _, _, ok := c.receiveIP(pkt, aux.ap, &cache)
+	if !ok {
+		t.Fatal("aux endpoint receive returned ok=false")
+	}
+	auxAware, ok := auxEP.(*sourcePathPeerAwareEndpoint)
+	if !ok {
+		t.Fatalf("aux endpoint type = %T, want *sourcePathPeerAwareEndpoint", auxEP)
+	}
+	auxAware.FromPeer(peerKey.Raw32())
+	if got := metricSourcePathRemoteNonBestWireGuardRx.Value() - nonBestBefore; got != 1 {
+		t.Fatalf("remote non-best WG rx metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathRemoteNonBestWireGuardAccepted.Value() - nonBestAcceptedBefore; got != 1 {
+		t.Fatalf("remote non-best WG accepted metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathRemoteUnknownWireGuardRx.Value() - unknownBefore; got != 0 {
+		t.Fatalf("remote unknown WG rx metric delta = %d, want 0", got)
+	}
+}
+
+func TestReceiveIPRemoteUnknownWireGuardMetric(t *testing.T) {
+	var c Conn
+	c.havePrivateKey.Store(true)
+	c.logf = logger.Discard
+	c.peerMap = newPeerMap()
+	peerKey := key.NewNode().Public()
+	de := &endpoint{
+		c:         &c,
+		publicKey: peerKey,
+	}
+	c.peerMap.byNodeKey[peerKey] = newPeerInfo(de)
+	var cache epAddrEndpointCache
+	src := netip.MustParseAddrPort("192.0.2.99:41641")
+	pkt := []byte{0x04, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef}
+
+	bestBefore := metricSourcePathRemoteBestWireGuardRx.Value()
+	nonBestBefore := metricSourcePathRemoteNonBestWireGuardRx.Value()
+	unknownBefore := metricSourcePathRemoteUnknownWireGuardRx.Value()
+	unknownAcceptedBefore := metricSourcePathRemoteUnknownWireGuardAccepted.Value()
+	ep, _, _, ok := c.receiveIP(pkt, src, &cache)
+	if !ok {
+		t.Fatal("unknown endpoint receive returned ok=false")
+	}
+	lazy, ok := ep.(*lazyEndpoint)
+	if !ok {
+		t.Fatalf("unknown endpoint type = %T, want *lazyEndpoint", ep)
+	}
+	lazy.FromPeer(peerKey.Raw32())
+	if got := metricSourcePathRemoteBestWireGuardRx.Value() - bestBefore; got != 0 {
+		t.Fatalf("remote best WG rx metric delta = %d, want 0", got)
+	}
+	if got := metricSourcePathRemoteNonBestWireGuardRx.Value() - nonBestBefore; got != 0 {
+		t.Fatalf("remote non-best WG rx metric delta = %d, want 0", got)
+	}
+	if got := metricSourcePathRemoteUnknownWireGuardRx.Value() - unknownBefore; got != 1 {
+		t.Fatalf("remote unknown WG rx metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathRemoteUnknownWireGuardAccepted.Value() - unknownAcceptedBefore; got != 1 {
+		t.Fatalf("remote unknown WG accepted metric delta = %d, want 1", got)
 	}
 }
 

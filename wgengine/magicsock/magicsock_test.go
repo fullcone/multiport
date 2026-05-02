@@ -4095,12 +4095,22 @@ func TestConn_receiveIP(t *testing.T) {
 			if (tt.wantEndpointType == nil) != (got == nil) {
 				t.Errorf("receiveIP() (tt.wantEndpointType == nil): %v != (got == nil): %v", tt.wantEndpointType == nil, got == nil)
 			}
-			if tt.wantEndpointType != nil && reflect.TypeOf(got).String() != reflect.TypeOf(tt.wantEndpointType).String() {
+			gotTypeMatches := tt.wantEndpointType == nil || reflect.TypeOf(got).String() == reflect.TypeOf(tt.wantEndpointType).String()
+			if _, wantEndpoint := tt.wantEndpointType.(*endpoint); wantEndpoint {
+				if _, gotPeerAware := got.(*sourcePathPeerAwareEndpoint); gotPeerAware {
+					gotTypeMatches = true
+				}
+			}
+			if tt.wantEndpointType != nil && !gotTypeMatches {
 				t.Errorf("receiveIP() got = %v, want %v", reflect.TypeOf(got).String(), reflect.TypeOf(tt.wantEndpointType).String())
 			} else {
 				switch ep := tt.wantEndpointType.(type) {
 				case *endpoint:
-					if ep != got.(*endpoint) {
+					gotEP := got
+					if wrapped, ok := got.(*sourcePathPeerAwareEndpoint); ok {
+						gotEP = wrapped.endpoint
+					}
+					if ep != gotEP.(*endpoint) {
 						t.Errorf("receiveIP() want [*endpoint]: %p != got [*endpoint]: %p", ep, got)
 					}
 				case *lazyEndpoint:
@@ -4131,6 +4141,10 @@ func TestConn_receiveIP(t *testing.T) {
 				case *endpoint:
 					if tt.cache.de != ep {
 						t.Errorf("receiveIP() cache populated with [*endpoint] %p, want %p", tt.cache.de, ep)
+					}
+				case *sourcePathPeerAwareEndpoint:
+					if tt.cache.de != ep.endpoint {
+						t.Errorf("receiveIP() cache populated with [*endpoint] %p, want wrapped endpoint %p", tt.cache.de, ep.endpoint)
 					}
 				case *lazyEndpoint:
 					if tt.cache.de != ep.maybeEP {
