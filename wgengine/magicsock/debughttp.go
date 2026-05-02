@@ -203,6 +203,7 @@ type sourcePathDebugSnapshot struct {
 	samples        int
 	aux4           sourcePathSocketDebugSnapshot
 	aux6           sourcePathSocketDebugSnapshot
+	extraAux       []sourcePathSocketDebugSnapshot
 }
 
 type sourcePathSocketDebugSnapshot struct {
@@ -230,6 +231,14 @@ func (c *Conn) sourcePathDebugSnapshot() sourcePathDebugSnapshot {
 	s.generation = c.sourcePath.generation
 	s.aux4 = sourcePathSocketDebugSnapshotLocked("auxiliary IPv4", &c.sourcePath.aux4, c.sourcePath.aux4Bound)
 	s.aux6 = sourcePathSocketDebugSnapshotLocked("auxiliary IPv6", &c.sourcePath.aux6, c.sourcePath.aux6Bound)
+	for i := range c.sourcePath.extraAux4 {
+		label := fmt.Sprintf("auxiliary IPv4 #%d", i+2)
+		s.extraAux = append(s.extraAux, sourcePathSocketDebugSnapshotLocked(label, &c.sourcePath.extraAux4[i], c.sourcePath.extra4Bound[i]))
+	}
+	for i := range c.sourcePath.extraAux6 {
+		label := fmt.Sprintf("auxiliary IPv6 #%d", i+2)
+		s.extraAux = append(s.extraAux, sourcePathSocketDebugSnapshotLocked(label, &c.sourcePath.extraAux6[i], c.sourcePath.extra6Bound[i]))
+	}
 	return s
 }
 
@@ -264,6 +273,9 @@ func (c *Conn) printSourcePathDebugHTML(w io.Writer) {
 	fmt.Fprintf(w, "<li>probe burst budget: %d</li>\n", s.maxProbeBurst)
 	sourcePathSocketDebugHTML(w, s.aux4)
 	sourcePathSocketDebugHTML(w, s.aux6)
+	for _, aux := range s.extraAux {
+		sourcePathSocketDebugHTML(w, aux)
+	}
 	fmt.Fprintf(w, "</ul>\n")
 }
 
@@ -289,6 +301,12 @@ func sourceSocketIDDebugString(id SourceSocketID) string {
 	case sourceIPv6SocketID:
 		return "aux6"
 	default:
+		if id >= sourceIPv4ExtraSocketIDBase && id < sourceIPv4ExtraSocketIDBase+SourceSocketID(sourcePathMaxAuxSockets) {
+			return fmt.Sprintf("aux4.%d", id-sourceIPv4ExtraSocketIDBase+2)
+		}
+		if id >= sourceIPv6ExtraSocketIDBase && id < sourceIPv6ExtraSocketIDBase+SourceSocketID(sourcePathMaxAuxSockets) {
+			return fmt.Sprintf("aux6.%d", id-sourceIPv6ExtraSocketIDBase+2)
+		}
 		return fmt.Sprintf("unknown(%d)", id)
 	}
 }

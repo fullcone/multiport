@@ -101,7 +101,10 @@ func sourcePathAuxSocketCount() int {
 	if n < 0 {
 		return 0
 	}
-	return min(n, 1)
+	if n > sourcePathMaxAuxSockets {
+		return sourcePathMaxAuxSockets
+	}
+	return n
 }
 
 // sourcePathProbeMaxPeerCount returns the policy cap on distinct peers with
@@ -122,7 +125,7 @@ func sourcePathProbeMaxPeerCount() int {
 func sourcePathProbeMaxBurstCount() int {
 	n := envknobSrcSelMaxProbeBurst()
 	if n <= 0 {
-		return sourcePathProbeMaxBurst
+		return max(sourcePathProbeMaxBurst, sourcePathAuxSocketCount()*2)
 	}
 	return n
 }
@@ -396,21 +399,25 @@ func sourcePathFlowMaxEntriesValue() int {
 }
 
 func (c *Conn) sourcePathReceiveFuncs() []conn.ReceiveFunc {
-	if sourcePathAuxSocketCount() == 0 {
+	count := sourcePathAuxSocketCount()
+	if count == 0 {
 		return nil
 	}
 
 	c.sourcePath.mu.Lock()
 	defer c.sourcePath.mu.Unlock()
-	c.sourcePath.aux4.setID(sourceIPv4SocketID)
-	c.sourcePath.aux6.setID(sourceIPv6SocketID)
-	c.ensureSourcePathPConnLocked(&c.sourcePath.aux4.pconn)
-	c.ensureSourcePathPConnLocked(&c.sourcePath.aux6.pconn)
+	c.ensureSourcePathAuxSocketCountLocked(count)
 
-	return []conn.ReceiveFunc{
-		c.mkReceiveFuncWithSource(&c.sourcePath.aux4.pconn, nil, nil, nil, nil, nil, c.sourcePath.aux4.rxMeta),
-		c.mkReceiveFuncWithSource(&c.sourcePath.aux6.pconn, nil, nil, nil, nil, nil, c.sourcePath.aux6.rxMeta),
-	}
+	fns := make([]conn.ReceiveFunc, 0, count*2)
+	c.forEachSourcePathSocketLocked(true, func(_ int, sock *sourcePathSocket, _ *bool) {
+		c.ensureSourcePathPConnLocked(&sock.pconn)
+		fns = append(fns, c.mkReceiveFuncWithSource(&sock.pconn, nil, nil, nil, nil, nil, sock.rxMeta))
+	})
+	c.forEachSourcePathSocketLocked(false, func(_ int, sock *sourcePathSocket, _ *bool) {
+		c.ensureSourcePathPConnLocked(&sock.pconn)
+		fns = append(fns, c.mkReceiveFuncWithSource(&sock.pconn, nil, nil, nil, nil, nil, sock.rxMeta))
+	})
+	return fns
 }
 
 func (c *Conn) sourcePathProbeSources(is4 bool) []sourceRxMeta {
@@ -419,16 +426,103 @@ func (c *Conn) sourcePathProbeSources(is4 bool) []sourceRxMeta {
 	}
 	c.sourcePath.mu.Lock()
 	defer c.sourcePath.mu.Unlock()
-	if is4 {
-		if !c.sourcePath.aux4Bound {
-			return nil
+	var sources []sourceRxMeta
+	c.forEachSourcePathSocketLocked(is4, func(_ int, sock *sourcePathSocket, bound *bool) {
+		if *bound {
+			sources = append(sources, sock.rxMeta())
 		}
-		return []sourceRxMeta{c.sourcePath.aux4.rxMeta()}
+	})
+	return sources
+}
+
+func sourcePathAuxSocketID(is4 bool, index int) SourceSocketID {
+	if index == 0 {
+		if is4 {
+			return sourceIPv4SocketID
+		}
+		return sourceIPv6SocketID
 	}
-	if !c.sourcePath.aux6Bound {
-		return nil
+	if is4 {
+		return sourceIPv4ExtraSocketIDBase + SourceSocketID(index-1)
 	}
-	return []sourceRxMeta{c.sourcePath.aux6.rxMeta()}
+	return sourceIPv6ExtraSocketIDBase + SourceSocketID(index-1)
+}
+
+func (c *Conn) ensureSourcePathAuxSocketCountLocked(count int) {
+	if count < 1 {
+		count = 1
+	}
+	if count > sourcePathMaxAuxSockets {
+		count = sourcePathMaxAuxSockets
+	}
+	c.sourcePath.aux4.setID(sourcePathAuxSocketID(true, 0))
+	c.sourcePath.aux6.setID(sourcePathAuxSocketID(false, 0))
+
+	wantExtra := count - 1
+	for len(c.sourcePath.extraAux4) > wantExtra {
+		last := len(c.sourcePath.extraAux4) - 1
+		c.sourcePath.extra4Bound[last] = false
+		c.closeSourcePathPConnLocked(&c.sourcePath.extraAux4[last].pconn)
+		c.sourcePath.extraAux4 = c.sourcePath.extraAux4[:last]
+		c.sourcePath.extra4Bound = c.sourcePath.extra4Bound[:last]
+	}
+	for len(c.sourcePath.extraAux6) > wantExtra {
+		last := len(c.sourcePath.extraAux6) - 1
+		c.sourcePath.extra6Bound[last] = false
+		c.closeSourcePathPConnLocked(&c.sourcePath.extraAux6[last].pconn)
+		c.sourcePath.extraAux6 = c.sourcePath.extraAux6[:last]
+		c.sourcePath.extra6Bound = c.sourcePath.extra6Bound[:last]
+	}
+	for len(c.sourcePath.extraAux4) < wantExtra {
+		c.sourcePath.extraAux4 = append(c.sourcePath.extraAux4, sourcePathSocket{})
+		c.sourcePath.extra4Bound = append(c.sourcePath.extra4Bound, false)
+	}
+	for len(c.sourcePath.extraAux6) < wantExtra {
+		c.sourcePath.extraAux6 = append(c.sourcePath.extraAux6, sourcePathSocket{})
+		c.sourcePath.extra6Bound = append(c.sourcePath.extra6Bound, false)
+	}
+	for i := range c.sourcePath.extraAux4 {
+		c.sourcePath.extraAux4[i].setID(sourcePathAuxSocketID(true, i+1))
+	}
+	for i := range c.sourcePath.extraAux6 {
+		c.sourcePath.extraAux6[i].setID(sourcePathAuxSocketID(false, i+1))
+	}
+}
+
+func (c *Conn) forEachSourcePathSocketLocked(is4 bool, fn func(index int, sock *sourcePathSocket, bound *bool)) {
+	if is4 {
+		fn(0, &c.sourcePath.aux4, &c.sourcePath.aux4Bound)
+		for i := range c.sourcePath.extraAux4 {
+			fn(i+1, &c.sourcePath.extraAux4[i], &c.sourcePath.extra4Bound[i])
+		}
+		return
+	}
+	fn(0, &c.sourcePath.aux6, &c.sourcePath.aux6Bound)
+	for i := range c.sourcePath.extraAux6 {
+		fn(i+1, &c.sourcePath.extraAux6[i], &c.sourcePath.extra6Bound[i])
+	}
+}
+
+func (c *Conn) sourcePathSocketSlotLocked(id SourceSocketID) (sock *sourcePathSocket, bound *bool, network string, ok bool) {
+	if id == sourceIPv4SocketID {
+		return &c.sourcePath.aux4, &c.sourcePath.aux4Bound, "udp4", true
+	}
+	if id == sourceIPv6SocketID {
+		return &c.sourcePath.aux6, &c.sourcePath.aux6Bound, "udp6", true
+	}
+	if id >= sourceIPv4ExtraSocketIDBase && id < sourceIPv4ExtraSocketIDBase+SourceSocketID(sourcePathMaxAuxSockets) {
+		idx := int(id - sourceIPv4ExtraSocketIDBase)
+		if idx >= 0 && idx < len(c.sourcePath.extraAux4) {
+			return &c.sourcePath.extraAux4[idx], &c.sourcePath.extra4Bound[idx], "udp4", true
+		}
+	}
+	if id >= sourceIPv6ExtraSocketIDBase && id < sourceIPv6ExtraSocketIDBase+SourceSocketID(sourcePathMaxAuxSockets) {
+		idx := int(id - sourceIPv6ExtraSocketIDBase)
+		if idx >= 0 && idx < len(c.sourcePath.extraAux6) {
+			return &c.sourcePath.extraAux6[idx], &c.sourcePath.extra6Bound[idx], "udp6", true
+		}
+	}
+	return nil, nil, "", false
 }
 
 func sourcePathForcedDataSourceMode() string {
@@ -573,24 +667,27 @@ func (c *Conn) sourcePathNewFlowSource(dst epAddr, flowID uint64, aux sourcePath
 func (c *Conn) sourcePathForcedDataSendSource(dst epAddr) sourceRxMeta {
 	c.sourcePath.mu.Lock()
 	defer c.sourcePath.mu.Unlock()
-	switch {
-	case dst.ap.Addr().Is4() && c.sourcePath.aux4Bound:
-		return c.sourcePath.aux4.rxMeta()
-	case dst.ap.Addr().Is6() && c.sourcePath.aux6Bound:
-		return c.sourcePath.aux6.rxMeta()
-	default:
+	var source sourceRxMeta
+	c.forEachSourcePathSocketLocked(dst.ap.Addr().Is4(), func(_ int, sock *sourcePathSocket, bound *bool) {
+		if source.isPrimary() && *bound {
+			source = sock.rxMeta()
+		}
+	})
+	if source.isPrimary() {
 		return primarySourceRxMeta
 	}
+	return source
 }
 
 func (c *Conn) sourcePathWriteWireGuardBatchTo(source sourceRxMeta, dst epAddr, buffs [][]byte, offset int) error {
 	c.sourcePath.mu.Lock()
 	var ruc *RebindingUDPConn
-	switch {
-	case dst.ap.Addr().Is4() && dst.isDirect() && c.sourcePath.aux4Bound && source == c.sourcePath.aux4.rxMeta():
-		ruc = &c.sourcePath.aux4.pconn
-	case dst.ap.Addr().Is6() && dst.isDirect() && c.sourcePath.aux6Bound && source == c.sourcePath.aux6.rxMeta():
-		ruc = &c.sourcePath.aux6.pconn
+	if dst.isDirect() {
+		c.forEachSourcePathSocketLocked(dst.ap.Addr().Is4(), func(_ int, sock *sourcePathSocket, bound *bool) {
+			if ruc == nil && *bound && source == sock.rxMeta() {
+				ruc = &sock.pconn
+			}
+		})
 	}
 	c.sourcePath.mu.Unlock()
 	if ruc == nil {
@@ -602,12 +699,11 @@ func (c *Conn) sourcePathWriteWireGuardBatchTo(source sourceRxMeta, dst epAddr, 
 func (c *Conn) sourcePathWriteTo(source sourceRxMeta, dst netip.AddrPort, pkt []byte) (int, error) {
 	c.sourcePath.mu.Lock()
 	var ruc *RebindingUDPConn
-	switch {
-	case dst.Addr().Is4() && c.sourcePath.aux4Bound && source == c.sourcePath.aux4.rxMeta():
-		ruc = &c.sourcePath.aux4.pconn
-	case dst.Addr().Is6() && c.sourcePath.aux6Bound && source == c.sourcePath.aux6.rxMeta():
-		ruc = &c.sourcePath.aux6.pconn
-	}
+	c.forEachSourcePathSocketLocked(dst.Addr().Is4(), func(_ int, sock *sourcePathSocket, bound *bool) {
+		if ruc == nil && *bound && source == sock.rxMeta() {
+			ruc = &sock.pconn
+		}
+	})
 	c.sourcePath.mu.Unlock()
 	if ruc == nil {
 		return 0, errSourcePathUnavailable
@@ -616,7 +712,8 @@ func (c *Conn) sourcePathWriteTo(source sourceRxMeta, dst netip.AddrPort, pkt []
 }
 
 func (c *Conn) rebindSourcePathSockets() error {
-	if sourcePathAuxSocketCount() == 0 {
+	count := sourcePathAuxSocketCount()
+	if count == 0 {
 		c.closeSourcePathSockets()
 		c.mu.Lock()
 		c.sourceProbes.clearLocked()
@@ -626,23 +723,11 @@ func (c *Conn) rebindSourcePathSockets() error {
 
 	c.sourcePath.mu.Lock()
 	defer c.sourcePath.mu.Unlock()
+	c.ensureSourcePathAuxSocketCountLocked(count)
 	c.sourcePath.generation++
-	c.sourcePath.aux4.setID(sourceIPv4SocketID)
-	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
-	c.sourcePath.aux6.setID(sourceIPv6SocketID)
-	c.sourcePath.aux6.generation.Store(uint64(c.sourcePath.generation))
 
-	err4 := c.bindSourcePathSocketLocked(&c.sourcePath.aux4.pconn, "udp4")
-	c.sourcePath.aux4Bound = err4 == nil
-	if err4 != nil {
-		c.setSourcePathBlockForeverLocked(&c.sourcePath.aux4.pconn)
-	}
-
-	err6 := c.bindSourcePathSocketLocked(&c.sourcePath.aux6.pconn, "udp6")
-	c.sourcePath.aux6Bound = err6 == nil
-	if err6 != nil {
-		c.setSourcePathBlockForeverLocked(&c.sourcePath.aux6.pconn)
-	}
+	err4 := c.bindSourcePathSocketFamilyLocked(true, "udp4")
+	err6 := c.bindSourcePathSocketFamilyLocked(false, "udp6")
 
 	return sourcePathBindError(err4, err6)
 }
@@ -655,30 +740,13 @@ func (c *Conn) rebindSourcePathSocket(source sourceRxMeta) (sourceRxMeta, bool, 
 	c.sourcePath.mu.Lock()
 	defer c.sourcePath.mu.Unlock()
 
-	var (
-		target  *sourcePathSocket
-		bound   *bool
-		network string
-	)
-	switch source.socketID {
-	case sourceIPv4SocketID:
-		current := c.sourcePath.aux4.rxMeta()
-		if source != current {
-			return current, false, nil
-		}
-		target = &c.sourcePath.aux4
-		bound = &c.sourcePath.aux4Bound
-		network = "udp4"
-	case sourceIPv6SocketID:
-		current := c.sourcePath.aux6.rxMeta()
-		if source != current {
-			return current, false, nil
-		}
-		target = &c.sourcePath.aux6
-		bound = &c.sourcePath.aux6Bound
-		network = "udp6"
-	default:
+	target, bound, network, ok := c.sourcePathSocketSlotLocked(source.socketID)
+	if !ok {
 		return sourceRxMeta{}, false, errSourcePathUnavailable
+	}
+	current := target.rxMeta()
+	if source != current {
+		return current, false, nil
 	}
 
 	c.sourcePath.generation++
@@ -690,6 +758,28 @@ func (c *Conn) rebindSourcePathSocket(source sourceRxMeta) (sourceRxMeta, bool, 
 		return target.rxMeta(), true, err
 	}
 	return target.rxMeta(), true, nil
+}
+
+func (c *Conn) bindSourcePathSocketFamilyLocked(is4 bool, network string) error {
+	var firstErr error
+	var anyBound bool
+	c.forEachSourcePathSocketLocked(is4, func(_ int, sock *sourcePathSocket, bound *bool) {
+		sock.generation.Store(uint64(c.sourcePath.generation))
+		err := c.bindSourcePathSocketLocked(&sock.pconn, network)
+		*bound = err == nil
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			c.setSourcePathBlockForeverLocked(&sock.pconn)
+			return
+		}
+		anyBound = true
+	})
+	if anyBound {
+		return nil
+	}
+	return firstErr
 }
 
 func (c *Conn) bindSourcePathSocketLocked(ruc *RebindingUDPConn, network string) error {
@@ -732,6 +822,14 @@ func (c *Conn) closeSourcePathSockets() {
 	c.sourcePath.aux6Bound = false
 	c.closeSourcePathPConnLocked(&c.sourcePath.aux4.pconn)
 	c.closeSourcePathPConnLocked(&c.sourcePath.aux6.pconn)
+	for i := range c.sourcePath.extraAux4 {
+		c.sourcePath.extra4Bound[i] = false
+		c.closeSourcePathPConnLocked(&c.sourcePath.extraAux4[i].pconn)
+	}
+	for i := range c.sourcePath.extraAux6 {
+		c.sourcePath.extra6Bound[i] = false
+		c.closeSourcePathPConnLocked(&c.sourcePath.extraAux6[i].pconn)
+	}
 }
 
 func (c *Conn) closeSourcePathPConnLocked(ruc *RebindingUDPConn) {

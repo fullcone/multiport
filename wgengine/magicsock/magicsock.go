@@ -2444,6 +2444,9 @@ const (
 	primarySourceSocketID SourceSocketID = iota
 	sourceIPv4SocketID
 	sourceIPv6SocketID
+
+	sourceIPv4ExtraSocketIDBase SourceSocketID = 100
+	sourceIPv6ExtraSocketIDBase SourceSocketID = 200
 )
 
 type sourceRxMeta struct {

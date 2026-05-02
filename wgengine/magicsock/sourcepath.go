@@ -114,6 +114,11 @@ const (
 	// Phase 26 flow-aware source selection defaults.
 	sourcePathFlowIdle       = 30 * time.Second
 	sourcePathFlowMaxEntries = 100000
+
+	// sourcePathMaxAuxSockets caps auxiliary sockets per address family. A
+	// small hot pool is enough to keep replacement source ports warmed without
+	// turning source-path probing into socket fan-out.
+	sourcePathMaxAuxSockets = 20
 )
 
 var (
@@ -124,12 +129,16 @@ var (
 )
 
 type sourcePathState struct {
-	mu         syncs.Mutex
-	generation sourceGeneration
-	aux4       sourcePathSocket
-	aux6       sourcePathSocket
-	aux4Bound  bool
-	aux6Bound  bool
+	mu          syncs.Mutex
+	generation  sourceGeneration
+	aux4        sourcePathSocket
+	aux6        sourcePathSocket
+	aux4Bound   bool
+	aux6Bound   bool
+	extraAux4   []sourcePathSocket
+	extraAux6   []sourcePathSocket
+	extra4Bound []bool
+	extra6Bound []bool
 }
 
 type sourcePathSocket struct {
