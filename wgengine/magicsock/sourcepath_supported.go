@@ -15,6 +15,7 @@ import (
 
 	"github.com/tailscale/wireguard-go/conn"
 	"tailscale.com/envknob"
+	"tailscale.com/tstime/mono"
 )
 
 var (
@@ -32,6 +33,10 @@ var (
 	envknobSrcSelDualSendAuxDrop     = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_AUX_DROP_STREAK")
 	envknobSrcSelDualSendRecoveryS   = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_RECOVERY_S")
 	envknobSrcSelDualSendMaxSkewMS   = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_MAX_SKEW_MS")
+	envknobSrcSelActiveBackup        = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_ACTIVE_BACKUP")
+	envknobSrcSelPrimaryFailStreak   = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_PRIMARY_FAIL_STREAK")
+	envknobSrcSelFailoverHoldS       = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_FAILOVER_HOLD_S")
+	envknobSrcSelFailoverRecovery    = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_FAILOVER_RECOVERY_PONGS")
 	envknobSrcSelMultiMetric         = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_MULTI_METRIC")
 	envknobSrcSelProbeIntervalMS     = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_PROBE_INTERVAL_MS")
 	envknobSrcSelLossWindowS         = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_LOSS_WINDOW_S")
@@ -263,6 +268,37 @@ func sourcePathDualSendMaxSkewValue() time.Duration {
 	return time.Duration(n) * time.Millisecond
 }
 
+func sourcePathActiveBackupEnabled() bool {
+	return envknobSrcSelActiveBackup() && sourcePathAuxSocketCount() > 0
+}
+
+func sourcePathActiveBackupPrimaryFailStreakValue() int {
+	n := envknobSrcSelPrimaryFailStreak()
+	if n <= 0 {
+		return sourcePathActiveBackupPrimaryFailStreak
+	}
+	return n
+}
+
+func sourcePathActiveBackupFailoverHoldValue() time.Duration {
+	n := envknobSrcSelFailoverHoldS()
+	if n < 0 {
+		return 0
+	}
+	if n == 0 {
+		return sourcePathActiveBackupFailoverHold
+	}
+	return time.Duration(n) * time.Second
+}
+
+func sourcePathActiveBackupRecoveryPongsValue() int {
+	n := envknobSrcSelFailoverRecovery()
+	if n <= 0 {
+		return sourcePathActiveBackupRecoveryPongs
+	}
+	return n
+}
+
 func (c *Conn) sourcePathReceiveFuncs() []conn.ReceiveFunc {
 	if sourcePathAuxSocketCount() == 0 {
 		return nil
@@ -323,6 +359,9 @@ func sourcePathForcedDataSourceModeAllowsAddr(mode string, addr netip.Addr) bool
 func (c *Conn) sourcePathDataSendSource(dst epAddr) sourceRxMeta {
 	if sourcePathAuxSocketCount() == 0 || !dst.isDirect() {
 		return primarySourceRxMeta
+	}
+	if source, ok := c.sourcePathActiveBackupCandidate(dst, mono.Now()); ok {
+		return source
 	}
 	if forceMode := sourcePathForcedDataSourceMode(); forceMode != "" {
 		if !sourcePathForcedDataSourceModeAllowsAddr(forceMode, dst.ap.Addr()) {

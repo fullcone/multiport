@@ -489,6 +489,21 @@ func (de *endpoint) primaryRTTForLocked(dst epAddr) time.Duration {
 	return 0
 }
 
+func (de *endpoint) primaryPongsSinceLocked(dst epAddr, since mono.Time) int {
+	state, ok := de.endpointState[dst.ap]
+	if !ok {
+		return 0
+	}
+	var n int
+	for _, pong := range state.recentPongs {
+		if pong.pongAt.IsZero() || pong.pongAt.Before(since) {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
 // endpoint.mu must be held.
 func (st *endpointState) addPongReplyLocked(r pongReply) {
 	if n := len(st.recentPongs); n < pongHistoryCount {
@@ -1129,7 +1144,16 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 	}
 	var err error
 	if udpAddr.ap.IsValid() {
-		if aux, ok := de.c.sourcePathDualSendCandidate(udpAddr); ok {
+		if source, activeBackupForced := de.c.sourcePathActiveBackupCandidate(udpAddr, now); activeBackupForced {
+			metricSourcePathDataSendAuxSelected.Add(1)
+			_, err = de.c.sendUDPBatchFromSource(source, udpAddr, buffs, offset)
+			if err != nil {
+				metricSourcePathFailoverAuxAlsoDead.Add(1)
+				de.c.noteSourcePathSendFailure(udpAddr, source)
+			} else {
+				metricSourcePathDataSendAuxSucceeded.Add(1)
+			}
+		} else if aux, ok := de.c.sourcePathDualSendCandidate(udpAddr); ok {
 			res := de.c.sendUDPBatchDualSource(aux, udpAddr, buffs, offset)
 			err = res.err
 			if res.primaryErr != nil && res.auxErr != nil && isBadEndpointErr(res.primaryErr) {
@@ -1151,6 +1175,21 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 				_, err = de.c.sendUDPBatch(udpAddr, buffs, offset)
 			} else if usingSourcePathAux {
 				metricSourcePathDataSendAuxSucceeded.Add(1)
+			} else if err != nil {
+				if aux, ok := de.c.noteSourcePathPrimarySendFailure(udpAddr, now); ok {
+					metricSourcePathDataSendAuxSelected.Add(1)
+					_, auxErr := de.c.sendUDPBatchFromSource(aux, udpAddr, buffs, offset)
+					if auxErr == nil {
+						err = nil
+						usedPrimarySend = false
+						metricSourcePathDataSendAuxSucceeded.Add(1)
+					} else {
+						metricSourcePathFailoverAuxAlsoDead.Add(1)
+						de.c.noteSourcePathSendFailure(udpAddr, aux)
+					}
+				}
+			} else {
+				de.c.noteSourcePathPrimarySendSuccess(udpAddr)
 			}
 
 			// If the error is known to indicate that the endpoint is no longer

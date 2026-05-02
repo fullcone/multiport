@@ -20,6 +20,7 @@ import (
 	"tailscale.com/net/packet"
 	"tailscale.com/net/stun"
 	"tailscale.com/tstime/mono"
+	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/netmap"
 	"tailscale.com/types/nettype"
@@ -184,6 +185,71 @@ func TestSourcePathProbeManagerOutcomeHardCap(t *testing.T) {
 		if outcome.at != wantAt {
 			t.Fatalf("outcome[%d].at = %v, want %v", i, outcome.at, wantAt)
 		}
+	}
+}
+
+func TestSourcePathActiveBackupFailoverAndRecovery(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ACTIVE_BACKUP", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PRIMARY_FAIL_STREAK", "2")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FAILOVER_RECOVERY_PONGS", "2")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ACTIVE_BACKUP", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PRIMARY_FAIL_STREAK", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_FAILOVER_RECOVERY_PONGS", "")
+	})
+
+	var c Conn
+	c.peerMap = newPeerMap()
+	c.sourcePath.generation = 25
+	c.sourcePath.aux4.setID(sourceIPv4SocketID)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+
+	dst := epAddr{ap: netip.MustParseAddrPort("192.0.2.2:41641")}
+	aux := c.sourcePath.aux4.rxMeta()
+	now := mono.Now()
+	c.mu.Lock()
+	c.sourceProbes.samples = []sourcePathProbeSample{
+		{dst: dst, source: aux, latency: 10 * time.Millisecond, at: now.Add(-3 * time.Second)},
+		{dst: dst, source: aux, latency: 11 * time.Millisecond, at: now.Add(-2 * time.Second)},
+		{dst: dst, source: aux, latency: 9 * time.Millisecond, at: now.Add(-1 * time.Second)},
+	}
+	c.mu.Unlock()
+
+	if source, ok := c.noteSourcePathPrimarySendFailure(dst, now); ok {
+		t.Fatalf("first primary failure selected failover source %+v, want no failover yet", source)
+	}
+	source, ok := c.noteSourcePathPrimarySendFailure(dst, now.Add(time.Millisecond))
+	if !ok {
+		t.Fatal("second primary failure did not select failover source")
+	}
+	if source != aux {
+		t.Fatalf("failover source = %+v, want %+v", source, aux)
+	}
+	if got := c.sourcePathDataSendSource(dst); got != aux {
+		t.Fatalf("active-backup data source = %+v, want forced aux %+v", got, aux)
+	}
+
+	peerKey := key.NewNode().Public()
+	state := &endpointState{}
+	state.addPongReplyLocked(pongReply{latency: 7 * time.Millisecond, pongAt: now.Add(2 * time.Millisecond)})
+	state.addPongReplyLocked(pongReply{latency: 8 * time.Millisecond, pongAt: now.Add(3 * time.Millisecond)})
+	de := &endpoint{
+		c:             &c,
+		publicKey:     peerKey,
+		endpointState: map[netip.AddrPort]*endpointState{dst.ap: state},
+	}
+	c.mu.Lock()
+	c.peerMap.byNodeKey[peerKey] = newPeerInfo(de)
+	c.peerMap.setNodeKeyForEpAddr(dst, peerKey)
+	c.mu.Unlock()
+
+	if got := c.sourcePathDataSendSource(dst); !got.isPrimary() {
+		t.Fatalf("active-backup source after recovery pongs = %+v, want primary", got)
 	}
 }
 

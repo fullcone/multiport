@@ -60,6 +60,20 @@ func sourcePathDualSendRecoveryValue() time.Duration { return sourcePathDualSend
 
 func sourcePathDualSendMaxSkewValue() time.Duration { return sourcePathDualSendMaxSkew }
 
+func sourcePathActiveBackupEnabled() bool { return false }
+
+func sourcePathActiveBackupPrimaryFailStreakValue() int {
+	return sourcePathActiveBackupPrimaryFailStreak
+}
+
+func sourcePathActiveBackupFailoverHoldValue() time.Duration {
+	return sourcePathActiveBackupFailoverHold
+}
+
+func sourcePathActiveBackupRecoveryPongsValue() int {
+	return sourcePathActiveBackupRecoveryPongs
+}
+
 func (c *Conn) sourcePathWriteWireGuardBatchTo(source sourceRxMeta, dst epAddr, buffs [][]byte, offset int) error {
 	return errSourcePathUnavailable
 }

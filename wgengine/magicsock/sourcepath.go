@@ -88,6 +88,11 @@ const (
 	sourcePathDualSendRecovery      = 30 * time.Second
 	sourcePathDualSendMaxSkew       = 100 * time.Millisecond
 
+	// Phase 25 active-backup defaults.
+	sourcePathActiveBackupPrimaryFailStreak = 3
+	sourcePathActiveBackupFailoverHold      = 30 * time.Second
+	sourcePathActiveBackupRecoveryPongs     = 3
+
 	// Phase 24 multi-metric scorer defaults.
 	sourcePathProbeIntervalFloor = 200 * time.Millisecond
 	sourcePathRealtimeProbeEvery = time.Second
@@ -139,8 +144,16 @@ type sourcePathProbeManager struct {
 	pending                map[stun.TxID]sourcePathProbeTx
 	samples                []sourcePathProbeSample
 	outcomes               []sourcePathProbeOutcome
+	activeBackup           map[epAddr]sourcePathActiveBackupState
 	dualSendAuxFailStreak  map[sourcePathDualSendKey]int
 	dualSendDemotedAuxTill map[sourcePathDualSendKey]mono.Time
+}
+
+type sourcePathActiveBackupState struct {
+	sendFailStreak int
+	failoverAt     mono.Time
+	holdUntil      mono.Time
+	source         sourceRxMeta
 }
 
 type sourcePathDualSendKey struct {
@@ -277,6 +290,7 @@ func (pm *sourcePathProbeManager) clearLocked() {
 	clear(pm.pending)
 	pm.samples = nil
 	pm.outcomes = nil
+	pm.activeBackup = nil
 	pm.dualSendAuxFailStreak = nil
 	pm.dualSendDemotedAuxTill = nil
 }
@@ -312,6 +326,117 @@ func (c *Conn) sourcePathBestCandidate(dst epAddr) (sourcePathCandidateScore, bo
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.sourceProbes.bestCandidateLocked(dst, sources, mono.Now(), primaryRTT)
+}
+
+func (c *Conn) sourcePathBestFailoverCandidate(dst epAddr, now mono.Time) (sourceRxMeta, bool) {
+	if !dst.isDirect() {
+		return sourceRxMeta{}, false
+	}
+	sources := c.sourcePathProbeSources(dst.ap.Addr().Is4())
+	if len(sources) == 0 {
+		return sourceRxMeta{}, false
+	}
+	c.mu.Lock()
+	score, ok := c.sourceProbes.bestCandidateLocked(dst, sources, now, 0)
+	c.mu.Unlock()
+	if !ok {
+		return sourceRxMeta{}, false
+	}
+	return score.source, true
+}
+
+func (c *Conn) noteSourcePathPrimarySendSuccess(dst epAddr) {
+	if !sourcePathActiveBackupEnabled() || !dst.isDirect() {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	st, ok := c.sourceProbes.activeBackup[dst]
+	if !ok {
+		return
+	}
+	st.sendFailStreak = 0
+	c.sourceProbes.activeBackup[dst] = st
+}
+
+func (c *Conn) noteSourcePathPrimarySendFailure(dst epAddr, now mono.Time) (sourceRxMeta, bool) {
+	if !sourcePathActiveBackupEnabled() || !dst.isDirect() || sourcePathAuxSocketCount() == 0 {
+		return sourceRxMeta{}, false
+	}
+
+	c.mu.Lock()
+	if c.sourceProbes.activeBackup == nil {
+		c.sourceProbes.activeBackup = make(map[epAddr]sourcePathActiveBackupState)
+	}
+	st := c.sourceProbes.activeBackup[dst]
+	st.sendFailStreak++
+	if !st.failoverAt.IsZero() && !st.source.isPrimary() {
+		c.sourceProbes.activeBackup[dst] = st
+		source := st.source
+		c.mu.Unlock()
+		return source, true
+	}
+	if st.sendFailStreak < sourcePathActiveBackupPrimaryFailStreakValue() {
+		c.sourceProbes.activeBackup[dst] = st
+		c.mu.Unlock()
+		return sourceRxMeta{}, false
+	}
+	c.mu.Unlock()
+
+	source, ok := c.sourcePathBestFailoverCandidate(dst, now)
+	if !ok {
+		return sourceRxMeta{}, false
+	}
+
+	c.mu.Lock()
+	st = c.sourceProbes.activeBackup[dst]
+	st.failoverAt = now
+	st.holdUntil = now.Add(sourcePathActiveBackupFailoverHoldValue())
+	st.source = source
+	c.sourceProbes.activeBackup[dst] = st
+	c.mu.Unlock()
+
+	metricSourcePathPrimaryUnhealthySendStreak.Add(1)
+	metricSourcePathFailoverToAux.Add(1)
+	return source, true
+}
+
+func (c *Conn) sourcePathActiveBackupCandidate(dst epAddr, now mono.Time) (sourceRxMeta, bool) {
+	if !sourcePathActiveBackupEnabled() || !dst.isDirect() {
+		return sourceRxMeta{}, false
+	}
+
+	c.mu.Lock()
+	st, ok := c.sourceProbes.activeBackup[dst]
+	c.mu.Unlock()
+	if !ok || st.failoverAt.IsZero() || st.source.isPrimary() {
+		return sourceRxMeta{}, false
+	}
+
+	pongs := c.primaryPongsSinceDst(dst, st.failoverAt)
+	recoveryPongs := sourcePathActiveBackupRecoveryPongsValue()
+	if pongs >= recoveryPongs || (now.After(st.holdUntil) && pongs > 0) {
+		c.mu.Lock()
+		if current, ok := c.sourceProbes.activeBackup[dst]; ok && current.failoverAt == st.failoverAt {
+			delete(c.sourceProbes.activeBackup, dst)
+			metricSourcePathFailoverRecoveredToPrimary.Add(1)
+		}
+		c.mu.Unlock()
+		return sourceRxMeta{}, false
+	}
+	return st.source, true
+}
+
+func (c *Conn) primaryPongsSinceDst(dst epAddr, since mono.Time) int {
+	c.mu.Lock()
+	de, ok := c.peerMap.endpointForEpAddr(dst)
+	c.mu.Unlock()
+	if !ok || de == nil {
+		return 0
+	}
+	de.mu.Lock()
+	defer de.mu.Unlock()
+	return de.primaryPongsSinceLocked(dst, since)
 }
 
 func (c *Conn) sourcePathDualSendCandidate(dst epAddr) (sourceRxMeta, bool) {
