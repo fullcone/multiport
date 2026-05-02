@@ -862,15 +862,6 @@ func (c *Direct) doLogin(ctx context.Context, opt loginOpt) (mustRegen bool, new
 		c.logf("[v1] No AuthURL")
 	}
 
-	if resp.AuthURL == "" {
-		if err := c.maybeBindMultiportAuth(ctx, request.NodeKey, machinePrivKey.Public()); err != nil {
-			if envknob.Bool("TS_MULTI_AUTH_BIND_REQUIRED") {
-				return false, "", nil, err
-			}
-			c.logf("multiport auth bind failed: %v", err)
-		}
-	}
-
 	c.mu.Lock()
 	if resp.AuthURL == "" {
 		// key rotation is complete
@@ -881,6 +872,15 @@ func (c *Direct) doLogin(ctx context.Context, opt loginOpt) (mustRegen bool, new
 	}
 	c.persist = persist.View()
 	c.mu.Unlock()
+
+	if resp.AuthURL == "" {
+		if err := c.maybeBindMultiportAuth(ctx, request.NodeKey, machinePrivKey.Public()); err != nil {
+			if envknob.Bool("TS_MULTI_AUTH_BIND_REQUIRED") {
+				return false, "", nil, err
+			}
+			c.logf("multiport auth bind failed: %v", err)
+		}
+	}
 
 	if ctx.Err() != nil {
 		return regen, "", nil, ctx.Err()
