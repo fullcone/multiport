@@ -838,12 +838,10 @@ func TestSourcePathDualSendUsesObservedRemoteEndpoints(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
-	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_OBSERVED_ENDPOINT_FANOUT", "true")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
-		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_OBSERVED_ENDPOINT_FANOUT", "")
 	})
 
 	primaryDst := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
@@ -908,57 +906,14 @@ func TestSourcePathDualSendUsesObservedRemoteEndpoints(t *testing.T) {
 	}
 }
 
-func TestSourcePathDualSendObservedRemoteEndpointsOptIn(t *testing.T) {
-	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
-	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
-	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
-	t.Cleanup(func() {
-		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
-		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
-		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
-		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_OBSERVED_ENDPOINT_FANOUT", "")
-	})
-
-	primary := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41641")}
-	secondary := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:51641")}
-	now := mono.Now()
-	de := &endpoint{
-		sourcePathRemoteSlots: [2]epAddr{primary, secondary},
-		sourcePathRemoteSeen:  [2]mono.Time{now, now},
-	}
-
-	if sourcePathObservedEndpointFanoutEnabled() {
-		t.Fatal("observed endpoint fanout enabled by default")
-	}
-	if sourcePathDualSendEnabled() && sourcePathObservedEndpointFanoutEnabled() {
-		de.mu.Lock()
-		got := de.dualSendObservedEndpointAddrsForSendLocked(primary, now)
-		de.mu.Unlock()
-		t.Fatalf("observed dual endpoint addrs unexpectedly active by default: %+v", got)
-	}
-
-	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_OBSERVED_ENDPOINT_FANOUT", "true")
-	if !sourcePathObservedEndpointFanoutEnabled() {
-		t.Fatal("observed endpoint fanout opt-in did not enable")
-	}
-	de.mu.Lock()
-	got := de.dualSendObservedEndpointAddrsForSendLocked(primary, now)
-	de.mu.Unlock()
-	if len(got) != 2 || got[0] != primary || got[1] != secondary {
-		t.Fatalf("observed dual endpoints = %+v, want primary/secondary", got)
-	}
-}
-
 func TestSourcePathDualSendObservedRemoteEndpointsSkipStaleAlternate(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
-	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_OBSERVED_ENDPOINT_FANOUT", "true")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
-		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_OBSERVED_ENDPOINT_FANOUT", "")
 	})
 
 	now := mono.Now()
