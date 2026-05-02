@@ -695,6 +695,14 @@ func TestSourcePathDualSendDefaultAndOptOut(t *testing.T) {
 		t.Fatal("dual-send enabled in active-backup strategy mode")
 	}
 
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "dual-endpoint")
+	if sourcePathDualSendEnabled() {
+		t.Fatal("dual-send enabled in dual-endpoint strategy mode")
+	}
+	if !sourcePathDualEndpointStrategyEnabled() {
+		t.Fatal("dual-endpoint strategy mode was not enabled")
+	}
+
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "false")
 	if sourcePathDualSendEnabled() {
@@ -759,6 +767,71 @@ func TestSourcePathDataStrategyDefaultSuppressesSingleSourceControls(t *testing.
 	if got := c.sourcePathDataSendSourceForBatch(dst, [][]byte{sourcePathTestTransportPacket(123, 1)}, 0); !got.isPrimary() {
 		t.Fatalf("default strategy honored flow-aware source = %+v, want primary", got)
 	}
+}
+
+func TestSourcePathDualEndpointStrategySendsTwoLowestLatencyEndpoints(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "dual-endpoint")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY", "")
+	})
+
+	dstFast := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	dstMid := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	dstSlow := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	primaryConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+
+	var c Conn
+	c.pconn4.mu.Lock()
+	c.pconn4.setConnLocked(primaryConn, "udp4", 1)
+	c.pconn4.mu.Unlock()
+
+	now := mono.Now()
+	fast := udpConnAddrPort(t, dstFast.LocalAddr())
+	mid := udpConnAddrPort(t, dstMid.LocalAddr())
+	slow := udpConnAddrPort(t, dstSlow.LocalAddr())
+	fastState := &endpointState{}
+	fastState.addPongReplyLocked(pongReply{latency: 10 * time.Millisecond, pongAt: now})
+	midState := &endpointState{}
+	midState.addPongReplyLocked(pongReply{latency: 20 * time.Millisecond, pongAt: now})
+	slowState := &endpointState{}
+	slowState.addPongReplyLocked(pongReply{latency: 50 * time.Millisecond, pongAt: now})
+
+	de := &endpoint{
+		c:                 &c,
+		heartbeatDisabled: true,
+		endpointState: map[netip.AddrPort]*endpointState{
+			slow: slowState,
+			mid:  midState,
+			fast: fastState,
+		},
+	}
+
+	de.mu.Lock()
+	addrs, _ := de.dualEndpointAddrsForSendLocked(now)
+	de.mu.Unlock()
+	if len(addrs) != 2 {
+		t.Fatalf("dual endpoint candidates = %+v, want two endpoints", addrs)
+	}
+	if addrs[0].ap != fast || addrs[1].ap != mid {
+		t.Fatalf("dual endpoint candidates = %+v, want fast %v then mid %v", addrs, fast, mid)
+	}
+
+	payload := []byte("source-path-dual-endpoint")
+	buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
+	copy(buf[packet.GeneveFixedHeaderLength:], payload)
+	before := metricSourcePathDualEndpointPackets.Value()
+	if err := c.Send([][]byte{buf}, de, packet.GeneveFixedHeaderLength); err != nil {
+		t.Fatalf("Conn.Send returned error: %v", err)
+	}
+	if got := metricSourcePathDualEndpointPackets.Value() - before; got != 1 {
+		t.Fatalf("dual-endpoint packets metric delta = %d, want 1", got)
+	}
+
+	readUDPConnPayload(t, dstFast, payload)
+	readUDPConnPayload(t, dstMid, payload)
+	assertNoUDPConnPayload(t, dstSlow)
 }
 
 func TestSourcePathDataSendSourceForcedAuxDualStack(t *testing.T) {
@@ -2021,6 +2094,36 @@ func listenUDPForSourcePathTest(t *testing.T, network, addr string) *net.UDPConn
 	}
 	t.Cleanup(func() { c.Close() })
 	return c
+}
+
+func readUDPConnPayload(t *testing.T, c *net.UDPConn, want []byte) {
+	t.Helper()
+	if err := c.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, 128)
+	n, _, err := c.ReadFromUDPAddrPort(got)
+	if err != nil {
+		t.Fatalf("ReadFromUDPAddrPort: %v", err)
+	}
+	if string(got[:n]) != string(want) {
+		t.Fatalf("received payload %q, want %q", got[:n], want)
+	}
+}
+
+func assertNoUDPConnPayload(t *testing.T, c *net.UDPConn) {
+	t.Helper()
+	if err := c.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, 128)
+	_, _, err := c.ReadFromUDPAddrPort(got)
+	if err == nil {
+		t.Fatal("unexpected UDP payload")
+	}
+	if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("ReadFromUDPAddrPort error = %v, want timeout", err)
+	}
 }
 
 var (

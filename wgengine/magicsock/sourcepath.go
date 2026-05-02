@@ -23,6 +23,7 @@ import (
 
 const (
 	sourcePathDataStrategyDualSend     = "dual-send"
+	sourcePathDataStrategyDualEndpoint = "dual-endpoint"
 	sourcePathDataStrategySingleSource = "single-source"
 	sourcePathDataStrategyActiveBackup = "active-backup"
 

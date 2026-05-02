@@ -440,6 +440,14 @@ type pongReply struct {
 	pongSrc netip.AddrPort // what they reported they heard
 }
 
+type dualEndpointCandidate struct {
+	addr       epAddr
+	latency    time.Duration
+	hasLatency bool
+	lastPing   mono.Time
+	isBest     bool
+}
+
 // EndpointChange is a structure containing information about changes made to a
 // particular endpoint. This is not a stable interface and could change at any
 // time.
@@ -517,6 +525,94 @@ func (st *endpointState) addPongReplyLocked(r pongReply) {
 	}
 	st.recentPongs[i] = r
 	st.recentPong = i
+}
+
+func compareDualEndpointCandidate(a, b dualEndpointCandidate) int {
+	if a.hasLatency != b.hasLatency {
+		if a.hasLatency {
+			return -1
+		}
+		return 1
+	}
+	if a.hasLatency && a.latency != b.latency {
+		if a.latency < b.latency {
+			return -1
+		}
+		return 1
+	}
+	if a.isBest != b.isBest {
+		if a.isBest {
+			return -1
+		}
+		return 1
+	}
+	if a.addr.ap.Addr().Is6() != b.addr.ap.Addr().Is6() {
+		if a.addr.ap.Addr().Is6() {
+			return -1
+		}
+		return 1
+	}
+	if a.addr.ap.String() < b.addr.ap.String() {
+		return -1
+	}
+	if a.addr.ap.String() > b.addr.ap.String() {
+		return 1
+	}
+	return 0
+}
+
+// dualEndpointAddrsForSendLocked returns up to two direct UDP endpoints for
+// fixed endpoint-level redundant sending. It intentionally only selects peer
+// endpoint addresses; source socket and active-backup policies are separate
+// data strategies.
+//
+// de.mu must be held.
+func (de *endpoint) dualEndpointAddrsForSendLocked(now mono.Time) (addrs []epAddr, needPing bool) {
+	if len(de.endpointState) == 0 {
+		return nil, false
+	}
+
+	var oldestPing mono.Time
+	candidates := make([]dualEndpointCandidate, 0, len(de.endpointState))
+	for ipp, state := range de.endpointState {
+		if state.shouldDeleteLocked() {
+			continue
+		}
+		if oldestPing.IsZero() || state.lastPing.Before(oldestPing) {
+			oldestPing = state.lastPing
+		}
+
+		latency, hasLatency := state.latencyLocked()
+		addr := epAddr{ap: ipp}
+		candidates = append(candidates, dualEndpointCandidate{
+			addr:       addr,
+			latency:    latency,
+			hasLatency: hasLatency && latency > 0,
+			lastPing:   state.lastPing,
+			isBest:     de.bestAddr.epAddr == addr && !now.After(de.trustBestAddrUntil),
+		})
+	}
+	if len(candidates) == 0 {
+		return nil, false
+	}
+	needPing = len(candidates) > 1 && (oldestPing.IsZero() || now.Sub(oldestPing) > wireguardPingInterval)
+
+	slices.SortFunc(candidates, compareDualEndpointCandidate)
+	limit := min(2, len(candidates))
+	addrs = make([]epAddr, 0, limit)
+	for _, candidate := range candidates[:limit] {
+		addrs = append(addrs, candidate.addr)
+	}
+
+	best := candidates[0]
+	de.bestAddr.epAddr = best.addr
+	if best.hasLatency {
+		de.bestAddr.latency = best.latency
+	}
+	if now.After(de.trustBestAddrUntil) {
+		de.trustBestAddrUntil = now.Add(time.Second)
+	}
+	return addrs, needPing
 }
 
 func (de *endpoint) deleteEndpointLocked(why string, ep netip.AddrPort) {
@@ -1115,11 +1211,31 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 	}
 
 	now := mono.Now()
-	udpAddr, derpAddr, startWGPing := de.addrForSendLocked(now)
+	var dualEndpointAddrs []epAddr
+	var udpAddr epAddr
+	var derpAddr netip.AddrPort
+	var startWGPing bool
+	if sourcePathDualEndpointStrategyEnabled() {
+		dualEndpointAddrs, startWGPing = de.dualEndpointAddrsForSendLocked(now)
+		if len(dualEndpointAddrs) > 0 {
+			udpAddr = dualEndpointAddrs[0]
+		} else {
+			udpAddr, derpAddr, startWGPing = de.addrForSendLocked(now)
+		}
+	} else {
+		udpAddr, derpAddr, startWGPing = de.addrForSendLocked(now)
+	}
 
 	if de.isWireguardOnly {
 		if startWGPing {
 			de.sendWireGuardOnlyPingsLocked(now)
+		}
+	} else if sourcePathDualEndpointStrategyEnabled() {
+		if startWGPing {
+			de.sendDiscoPingsLocked(now, true)
+			if de.wantUDPRelayPathDiscoveryLocked(now) {
+				de.discoverUDPRelayPathsLocked(now)
+			}
 		}
 	} else if !udpAddr.isDirect() || now.After(de.trustBestAddrUntil) {
 		de.sendDiscoPingsLocked(now, true)
@@ -1143,7 +1259,10 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 		}
 	}
 	var err error
-	if udpAddr.ap.IsValid() {
+	if len(dualEndpointAddrs) > 0 {
+		res := de.c.sendUDPBatchDualEndpoint(dualEndpointAddrs, buffs, offset)
+		err = res.err
+	} else if udpAddr.ap.IsValid() {
 		if source, activeBackupForced := de.c.sourcePathActiveBackupCandidate(udpAddr, now); activeBackupForced {
 			metricSourcePathDataSendAuxSelected.Add(1)
 			_, err = de.c.sendUDPBatchFromSource(source, udpAddr, buffs, offset)

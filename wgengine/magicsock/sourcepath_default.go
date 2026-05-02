@@ -18,6 +18,8 @@ func sourcePathAuxSocketCount() int { return 0 }
 
 func sourcePathDataStrategyMode() string { return sourcePathDataStrategyDualSend }
 
+func sourcePathDualEndpointStrategyEnabled() bool { return false }
+
 func sourcePathSingleSourceStrategyEnabled() bool { return false }
 
 func (c *Conn) sourcePathProbeSources(is4 bool) []sourceRxMeta { return nil }

@@ -70,6 +70,8 @@ func sourcePathDataStrategyMode() string {
 	switch strings.ToLower(strings.TrimSpace(envknobSrcSelDataStrategy())) {
 	case "", "dual", "dual-send", "dual_send", "redundant":
 		return sourcePathDataStrategyDualSend
+	case "dual-endpoint", "dual_endpoint", "endpoint", "endpoints", "redundant-endpoint", "redundant_endpoint", "multipath":
+		return sourcePathDataStrategyDualEndpoint
 	case "single", "single-source", "single_source", "auto", "flow", "flow-aware", "flow_aware", "rr", "round-robin", "round_robin":
 		return sourcePathDataStrategySingleSource
 	case "active-backup", "active_backup", "backup", "failover":
@@ -77,6 +79,10 @@ func sourcePathDataStrategyMode() string {
 	default:
 		return sourcePathDataStrategyDualSend
 	}
+}
+
+func sourcePathDualEndpointStrategyEnabled() bool {
+	return sourcePathDataStrategyMode() == sourcePathDataStrategyDualEndpoint
 }
 
 func sourcePathSingleSourceStrategyEnabled() bool {
