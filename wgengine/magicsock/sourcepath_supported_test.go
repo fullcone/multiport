@@ -571,7 +571,7 @@ func TestSourcePathProbeIntervalFloor(t *testing.T) {
 
 func TestSourcePathProbeBurstDefaultScalesWithAuxSocketCount(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
-	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "20")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", strconv.Itoa(sourcePathMaxAuxSockets))
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST", "")
 	t.Cleanup(func() {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
@@ -579,8 +579,8 @@ func TestSourcePathProbeBurstDefaultScalesWithAuxSocketCount(t *testing.T) {
 		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST", "")
 	})
 
-	if got, want := sourcePathProbeMaxBurstCount(), 40; got != want {
-		t.Fatalf("default probe burst = %d, want %d for 20 aux sockets", got, want)
+	if got, want := sourcePathProbeMaxBurstCount(), sourcePathMaxAuxSockets*2; got != want {
+		t.Fatalf("default probe burst = %d, want %d for %d aux sockets", got, want, sourcePathMaxAuxSockets)
 	}
 
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST", "7")
@@ -600,7 +600,7 @@ func TestSourcePathAuxSocketCountBoundaryDualStack(t *testing.T) {
 			name:    "default",
 			enable:  "",
 			aux:     "",
-			wantAux: 1,
+			wantAux: sourcePathDefaultAuxSockets,
 		},
 		{
 			name:    "default-explicit-one",
@@ -707,8 +707,8 @@ func TestSourcePathDualSendDefaultAndOptOut(t *testing.T) {
 	if !sourcePathEnabled() {
 		t.Fatal("source path disabled by default")
 	}
-	if got := sourcePathAuxSocketCount(); got != 1 {
-		t.Fatalf("default sourcePathAuxSocketCount() = %d, want 1", got)
+	if got := sourcePathAuxSocketCount(); got != sourcePathDefaultAuxSockets {
+		t.Fatalf("default sourcePathAuxSocketCount() = %d, want %d", got, sourcePathDefaultAuxSockets)
 	}
 	if !sourcePathDualSendEnabled() {
 		t.Fatal("dual-send disabled by default")
@@ -908,12 +908,12 @@ func TestSourcePathDualSendUsesObservedRemoteEndpoints(t *testing.T) {
 	payload := []byte("source-path-dual-send-observed-endpoints")
 	buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
 	copy(buf[packet.GeneveFixedHeaderLength:], payload)
-	before := metricSourcePathDualEndpointPackets.Value()
+	before := metricSourcePathDualSendPackets.Value()
 	if err := c.Send([][]byte{buf}, de, packet.GeneveFixedHeaderLength); err != nil {
 		t.Fatalf("Conn.Send returned error: %v", err)
 	}
-	if got := metricSourcePathDualEndpointPackets.Value() - before; got != 1 {
-		t.Fatalf("dual-endpoint packets metric delta = %d, want 1", got)
+	if got := metricSourcePathDualSendPackets.Value() - before; got != 1 {
+		t.Fatalf("dual-send packets metric delta = %d, want 1", got)
 	}
 
 	wantPrimarySrc := udpConnAddrPort(t, primaryConn.LocalAddr())
@@ -935,6 +935,224 @@ func TestSourcePathDualSendUsesObservedRemoteEndpoints(t *testing.T) {
 		if src.Port() != wantPrimarySrc.Port() {
 			t.Fatalf("%s source port = %d, want primary port %d", name, src.Port(), wantPrimarySrc.Port())
 		}
+	}
+}
+
+func TestSourcePathDualSendPathPoolChoosesBestSourcePerEndpoint(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "2")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	})
+
+	dstA := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	dstB := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	dstStandby := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	primaryConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	aux1Conn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+	aux2Conn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
+
+	var c Conn
+	c.sourcePath.generation = 39
+	c.pconn4.mu.Lock()
+	c.pconn4.setConnLocked(primaryConn, "udp4", 1)
+	c.pconn4.mu.Unlock()
+	c.sourcePath.mu.Lock()
+	c.ensureSourcePathAuxSocketCountLocked(2)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4.pconn.mu.Lock()
+	c.sourcePath.aux4.pconn.setConnLocked(aux1Conn, "udp4", 1)
+	c.sourcePath.aux4.pconn.mu.Unlock()
+	c.sourcePath.aux4Bound = true
+	c.sourcePath.extraAux4[0].generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.extraAux4[0].pconn.mu.Lock()
+	c.sourcePath.extraAux4[0].pconn.setConnLocked(aux2Conn, "udp4", 1)
+	c.sourcePath.extraAux4[0].pconn.mu.Unlock()
+	c.sourcePath.extra4Bound[0] = true
+	c.sourcePath.mu.Unlock()
+
+	apA := udpConnAddrPort(t, dstA.LocalAddr())
+	apB := udpConnAddrPort(t, dstB.LocalAddr())
+	apStandby := udpConnAddrPort(t, dstStandby.LocalAddr())
+	epA := epAddr{ap: apA}
+	epB := epAddr{ap: apB}
+	epStandby := epAddr{ap: apStandby}
+	sources := c.sourcePathProbeSources(true)
+	if len(sources) != 2 {
+		t.Fatalf("IPv4 probe sources = %+v, want two aux candidates", sources)
+	}
+	aux1, aux2 := sources[0], sources[1]
+
+	now := mono.Now()
+	c.mu.Lock()
+	for i := 0; i < sourcePathMinSamplesForUse; i++ {
+		at := now.Add(-time.Duration(i) * time.Millisecond)
+		c.sourceProbes.samples = append(c.sourceProbes.samples,
+			sourcePathProbeSample{dst: epA, source: aux1, latency: 30 * time.Millisecond, at: at},
+			sourcePathProbeSample{dst: epA, source: aux2, latency: 10 * time.Millisecond, at: at},
+			sourcePathProbeSample{dst: epB, source: aux1, latency: 5 * time.Millisecond, at: at},
+			sourcePathProbeSample{dst: epB, source: aux2, latency: 40 * time.Millisecond, at: at},
+			sourcePathProbeSample{dst: epStandby, source: aux1, latency: 15 * time.Millisecond, at: at},
+			sourcePathProbeSample{dst: epStandby, source: aux2, latency: 20 * time.Millisecond, at: at},
+		)
+	}
+	c.mu.Unlock()
+
+	stateA := &endpointState{}
+	stateA.addPongReplyLocked(pongReply{latency: 50 * time.Millisecond, pongAt: now})
+	stateB := &endpointState{}
+	stateB.addPongReplyLocked(pongReply{latency: 50 * time.Millisecond, pongAt: now})
+	stateStandby := &endpointState{}
+	stateStandby.addPongReplyLocked(pongReply{latency: 50 * time.Millisecond, pongAt: now})
+	de := &endpoint{
+		c:                 &c,
+		heartbeatDisabled: true,
+		endpointState: map[netip.AddrPort]*endpointState{
+			apA:       stateA,
+			apB:       stateB,
+			apStandby: stateStandby,
+		},
+	}
+
+	payload := []byte("source-path-dual-send-ranked-path-pool")
+	buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
+	copy(buf[packet.GeneveFixedHeaderLength:], payload)
+	before := metricSourcePathDualSendPackets.Value()
+	if err := c.Send([][]byte{buf}, de, packet.GeneveFixedHeaderLength); err != nil {
+		t.Fatalf("Conn.Send returned error: %v", err)
+	}
+	if got := metricSourcePathDualSendPackets.Value() - before; got != 1 {
+		t.Fatalf("dual-send packets metric delta = %d, want 1", got)
+	}
+
+	wantA := udpConnAddrPort(t, aux2Conn.LocalAddr())
+	wantB := udpConnAddrPort(t, aux1Conn.LocalAddr())
+	for name, conn := range map[string]struct {
+		conn    *net.UDPConn
+		wantSrc netip.AddrPort
+	}{
+		"dstA": {conn: dstA, wantSrc: wantA},
+		"dstB": {conn: dstB, wantSrc: wantB},
+	} {
+		if err := conn.conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, 128)
+		n, src, err := conn.conn.ReadFromUDPAddrPort(got)
+		if err != nil {
+			t.Fatalf("%s ReadFromUDPAddrPort: %v", name, err)
+		}
+		if string(got[:n]) != string(payload) {
+			t.Fatalf("%s received payload %q, want %q", name, got[:n], payload)
+		}
+		if src.Port() != conn.wantSrc.Port() {
+			t.Fatalf("%s source port = %d, want %d", name, src.Port(), conn.wantSrc.Port())
+		}
+	}
+	assertNoUDPConnPayload(t, dstStandby)
+}
+
+func TestSourcePathActivePolicyHourlyRefreshAndPromotionCooldown(t *testing.T) {
+	now := mono.Now()
+	dstA := epAddr{ap: netip.MustParseAddrPort("192.0.2.10:41641")}
+	dstB := epAddr{ap: netip.MustParseAddrPort("192.0.2.11:41641")}
+	auxA := sourceRxMeta{socketID: sourceIPv4SocketID, generation: 1}
+	auxB := sourceRxMeta{socketID: sourceIPv4ExtraSocketIDBase, generation: 1}
+	standbyA := sourceRxMeta{socketID: sourceIPv4ExtraSocketIDBase + 1, generation: 1}
+	standbyB := sourceRxMeta{socketID: sourceIPv4ExtraSocketIDBase + 2, generation: 1}
+	path := func(dst epAddr, source sourceRxMeta, latency time.Duration) sourcePathSendPath {
+		return sourcePathSendPath{
+			dst:        dst,
+			source:     source,
+			latency:    latency,
+			hasLatency: true,
+			lastAt:     now,
+		}
+	}
+
+	activeA := path(dstA, auxA, 10*time.Millisecond)
+	activeB := path(dstB, auxB, 20*time.Millisecond)
+	fastStandbyA := path(dstA, standbyA, 5*time.Millisecond)
+	fastStandbyB := path(dstB, standbyB, 6*time.Millisecond)
+
+	de := &endpoint{}
+	de.mu.Lock()
+	selected, ev := de.sourcePathApplyActivePathPolicyLocked(now, []sourcePathSendPath{
+		activeA,
+		activeB,
+		path(dstA, standbyA, 30*time.Millisecond),
+		path(dstB, standbyB, 40*time.Millisecond),
+	})
+	if ev.replaced {
+		de.mu.Unlock()
+		t.Fatalf("initial active selection replaced path unexpectedly")
+	}
+	if !sameSourcePathSendPath(selected[0], activeA) || !sameSourcePathSendPath(selected[1], activeB) {
+		de.mu.Unlock()
+		t.Fatalf("initial active paths = %+v, want activeA/activeB", selected)
+	}
+
+	selected, ev = de.sourcePathApplyActivePathPolicyLocked(now.Add(30*time.Minute), []sourcePathSendPath{
+		fastStandbyA,
+		fastStandbyB,
+		activeA,
+		activeB,
+	})
+	if ev.replaced {
+		de.mu.Unlock()
+		t.Fatalf("standby promoted before hourly refresh: %+v", ev)
+	}
+	if !sameSourcePathSendPath(selected[0], activeA) || !sameSourcePathSendPath(selected[1], activeB) {
+		de.mu.Unlock()
+		t.Fatalf("active paths changed before hourly refresh = %+v", selected)
+	}
+
+	refreshAt := now.Add(sourcePathStandbyRefreshEvery + time.Second)
+	selected, ev = de.sourcePathApplyActivePathPolicyLocked(refreshAt, []sourcePathSendPath{
+		fastStandbyA,
+		fastStandbyB,
+		activeA,
+		activeB,
+	})
+	if !ev.refreshed || !ev.replaced {
+		de.mu.Unlock()
+		t.Fatalf("hourly refresh event = %+v, want refresh plus one promotion", ev)
+	}
+	if !sameSourcePathSendPath(selected[0], fastStandbyA) || !sameSourcePathSendPath(selected[1], activeB) {
+		de.mu.Unlock()
+		t.Fatalf("after first promotion active paths = %+v, want fastStandbyA/activeB", selected)
+	}
+
+	selected, ev = de.sourcePathApplyActivePathPolicyLocked(refreshAt.Add(30*time.Second), []sourcePathSendPath{
+		fastStandbyA,
+		fastStandbyB,
+		activeA,
+		activeB,
+	})
+	if ev.replaced {
+		de.mu.Unlock()
+		t.Fatalf("second path promoted before cooldown elapsed: %+v", ev)
+	}
+	if !sameSourcePathSendPath(selected[0], fastStandbyA) || !sameSourcePathSendPath(selected[1], activeB) {
+		de.mu.Unlock()
+		t.Fatalf("active paths changed during cooldown = %+v", selected)
+	}
+
+	selected, ev = de.sourcePathApplyActivePathPolicyLocked(refreshAt.Add(sourcePathActiveReplaceCooldown+time.Second), []sourcePathSendPath{
+		fastStandbyA,
+		fastStandbyB,
+		activeA,
+		activeB,
+	})
+	de.mu.Unlock()
+	if !ev.replaced {
+		t.Fatalf("second path did not promote after cooldown: %+v", ev)
+	}
+	if !sameSourcePathSendPath(selected[0], fastStandbyA) || !sameSourcePathSendPath(selected[1], fastStandbyB) {
+		t.Fatalf("after second promotion active paths = %+v, want fastStandbyA/fastStandbyB", selected)
 	}
 }
 

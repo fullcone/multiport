@@ -96,7 +96,7 @@ func sourcePathAuxSocketCount() int {
 	}
 	n, ok := envknob.LookupInt("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS")
 	if !ok {
-		return 1
+		return sourcePathDefaultAuxSockets
 	}
 	if n < 0 {
 		return 0

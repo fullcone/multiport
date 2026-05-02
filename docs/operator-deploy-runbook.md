@@ -191,7 +191,7 @@ Environment=TS_EXPERIMENTAL_EXTRA_ENDPOINTS_FILE=/etc/tailscaled/extra-endpoints
 
 # === srcsel data plane: fixed dual-send redundancy ===
 Environment=TS_EXPERIMENTAL_SRCSEL_ENABLE=true
-Environment=TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=1
+Environment=TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=2
 Environment=TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY=dual-send
 Environment=TS_EXPERIMENTAL_SRCSEL_DUAL_SEND=true
 
@@ -271,7 +271,7 @@ sudo journalctl -u tailscaled-srcsel | grep envknob | head -10
 # Expected lines include:
 #   envknob: TS_EXPERIMENTAL_EXTRA_ENDPOINTS_FILE="..."
 #   envknob: TS_EXPERIMENTAL_SRCSEL_ENABLE="true"
-#   envknob: TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS="1"
+#   envknob: TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS="2"
 #   envknob: TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY="dual-send"
 #   envknob: TS_EXPERIMENTAL_SRCSEL_DUAL_SEND="true"
 
@@ -279,12 +279,14 @@ sudo journalctl -u tailscaled-srcsel | grep envknob | head -10
 sudo journalctl -u tailscaled-srcsel | grep "extra-endpoints"
 #   magicsock: extra-endpoints: loaded N endpoint(s) from "..."
 
-# 3. srcsel aux sockets bound (dual-send/force mode = 4 sockets total)
+# 3. srcsel aux sockets bound (dual-send mode = 6 sockets total)
 sudo ss -lunp | grep tailscaled-srcs
 # UNCONN ... 0.0.0.0:41641 ← primary v4
-# UNCONN ... 0.0.0.0:54xxx ← aux v4 (random ephemeral)
+# UNCONN ... 0.0.0.0:54xxx ← aux v4 active candidate (random ephemeral)
+# UNCONN ... 0.0.0.0:54yyy ← aux v4 hot standby candidate
 # UNCONN ... [::]:41641    ← primary v6
-# UNCONN ... [::]:54xxx    ← aux v6
+# UNCONN ... [::]:54xxx    ← aux v6 active candidate
+# UNCONN ... [::]:54yyy    ← aux v6 hot standby candidate
 
 # 4. metrics
 sudo /usr/local/bin/tailscale-srcsel --socket=/tmp/srcsel.sock debug metrics | \
@@ -309,7 +311,7 @@ After=network-online.target
 [Service]
 # === srcsel data plane ===
 Environment=TS_EXPERIMENTAL_SRCSEL_ENABLE=true
-Environment=TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=1
+Environment=TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS=2
 Environment=TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY=dual-send
 Environment=TS_EXPERIMENTAL_SRCSEL_DUAL_SEND=true
 
@@ -380,7 +382,7 @@ New-Item -ItemType Directory -Force -Path $state, $logs | Out-Null
 
 # === srcsel data plane (fixed dual-send redundancy) ===
 $env:TS_EXPERIMENTAL_SRCSEL_ENABLE = "true"
-$env:TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS = "1"
+$env:TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS = "2"
 $env:TS_EXPERIMENTAL_SRCSEL_DATA_STRATEGY = "dual-send"
 $env:TS_EXPERIMENTAL_SRCSEL_DUAL_SEND = "true"
 

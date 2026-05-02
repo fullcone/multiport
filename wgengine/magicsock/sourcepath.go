@@ -6,10 +6,12 @@ package magicsock
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"io"
 	"math"
 	"net/netip"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -115,10 +117,14 @@ const (
 	sourcePathFlowIdle       = 30 * time.Second
 	sourcePathFlowMaxEntries = 100000
 
-	// sourcePathMaxAuxSockets caps auxiliary sockets per address family. A
-	// small hot pool is enough to keep replacement source ports warmed without
-	// turning source-path probing into socket fan-out.
-	sourcePathMaxAuxSockets = 20
+	// sourcePathDefaultAuxSockets keeps one active aux source plus one warmed
+	// standby source for single-endpoint peers. sourcePathMaxAuxSockets caps
+	// the optional hot pool per address family.
+	sourcePathDefaultAuxSockets = 2
+	sourcePathMaxAuxSockets     = 32
+
+	sourcePathActiveReplaceCooldown = time.Minute
+	sourcePathStandbyRefreshEvery   = time.Hour
 )
 
 var (
@@ -236,6 +242,27 @@ type sourcePathCandidateScore struct {
 	score   float64
 	samples int
 	lastAt  mono.Time
+}
+
+type sourcePathDstCandidate struct {
+	dst        epAddr
+	primaryRTT time.Duration
+}
+
+type sourcePathSendPath struct {
+	dst        epAddr
+	source     sourceRxMeta
+	latency    time.Duration
+	hasLatency bool
+	lastAt     mono.Time
+}
+
+func (p sourcePathSendPath) logString() string {
+	latency := "unknown"
+	if p.hasLatency {
+		latency = p.latency.String()
+	}
+	return fmt.Sprintf("%v/source=%d/gen=%d/rtt=%s", p.dst.ap, p.source.socketID, p.source.generation, latency)
 }
 
 type sourcePathScoreWeights struct {
@@ -614,6 +641,134 @@ func (c *Conn) sourcePathDualSendCandidate(dst epAddr) (sourceRxMeta, bool) {
 	return source, true
 }
 
+func (c *Conn) sourcePathRankedDualSendPaths(candidates []sourcePathDstCandidate, now mono.Time) []sourcePathSendPath {
+	if !sourcePathDualSendEnabled() || len(candidates) == 0 {
+		return nil
+	}
+
+	if len(candidates) == 1 {
+		// One peer endpoint still needs two active source paths plus one hot
+		// standby source path for the same IP:port.
+		return c.sourcePathRankedSendPathsForDst(candidates[0], now, 3)
+	}
+
+	// With multiple peer endpoints, keep the best source path and one hot
+	// standby source path per endpoint. The endpoint-level active policy then
+	// chooses the two active paths from this per-endpoint hot pool.
+	paths := make([]sourcePathSendPath, 0, len(candidates)*2)
+	for _, candidate := range candidates {
+		ranked := c.sourcePathRankedSendPathsForDst(candidate, now, 2)
+		if len(ranked) == 0 {
+			continue
+		}
+		paths = append(paths, ranked...)
+	}
+	slices.SortFunc(paths, compareSourcePathSendPath)
+	if len(paths) < 2 {
+		return nil
+	}
+	return paths
+}
+
+func (c *Conn) sourcePathRankedSendPathsForDst(candidate sourcePathDstCandidate, now mono.Time, limit int) []sourcePathSendPath {
+	dst := candidate.dst
+	if !dst.isDirect() {
+		return nil
+	}
+
+	paths := []sourcePathSendPath{{
+		dst:        dst,
+		source:     primarySourceRxMeta,
+		latency:    candidate.primaryRTT,
+		hasLatency: candidate.primaryRTT > 0,
+	}}
+
+	sources := c.sourcePathProbeSources(dst.ap.Addr().Is4())
+	if len(sources) > 0 {
+		maxSkew := sourcePathDualSendMaxSkewValue()
+		c.mu.Lock()
+		for _, source := range sources {
+			if c.sourceProbes.dualSendDemotedLocked(sourcePathDualSendKey{dst: dst, source: source}, now) {
+				continue
+			}
+			path := sourcePathSendPath{
+				dst:    dst,
+				source: source,
+			}
+			if score, ok := c.sourceProbes.candidateScoreLocked(dst, source, now, 0); ok {
+				if maxSkew > 0 && candidate.primaryRTT > 0 && absDuration(score.latency-candidate.primaryRTT) >= maxSkew {
+					metricSourcePathDualSendSkippedSkew.Add(1)
+					continue
+				}
+				path.latency = score.latency
+				path.hasLatency = true
+				path.lastAt = score.lastAt
+			}
+			paths = append(paths, path)
+		}
+		c.mu.Unlock()
+	}
+
+	slices.SortFunc(paths, compareSourcePathSendPath)
+	if limit > 0 && len(paths) > limit {
+		paths = paths[:limit]
+	}
+	return paths
+}
+
+func compareSourcePathSendPath(a, b sourcePathSendPath) int {
+	if a.hasLatency != b.hasLatency {
+		if a.hasLatency {
+			return -1
+		}
+		return 1
+	}
+	if a.hasLatency && a.latency != b.latency {
+		if a.latency < b.latency {
+			return -1
+		}
+		return 1
+	}
+	if a.lastAt != b.lastAt {
+		if a.lastAt.Sub(b.lastAt) > 0 {
+			return -1
+		}
+		return 1
+	}
+	if a.source.isPrimary() != b.source.isPrimary() {
+		if a.source.isPrimary() {
+			return -1
+		}
+		return 1
+	}
+	if a.source.socketID < b.source.socketID {
+		return -1
+	}
+	if a.source.socketID > b.source.socketID {
+		return 1
+	}
+	if a.dst.ap.String() < b.dst.ap.String() {
+		return -1
+	}
+	if a.dst.ap.String() > b.dst.ap.String() {
+		return 1
+	}
+	return 0
+}
+
+func sameSourcePathSendPath(a, b sourcePathSendPath) bool {
+	return a.dst == b.dst && a.source == b.source
+}
+
+func sourcePathSendPathIndex(paths []sourcePathSendPath, want sourcePathSendPath) int {
+	for i, path := range paths {
+		if sameSourcePathSendPath(path, want) {
+			return i
+		}
+	}
+	return -1
+}
+
 func (c *Conn) startSourcePathProbeLoop() {
 	interval := sourcePathProbeIntervalValue()
 	if interval <= 0 || sourcePathAuxSocketCount() == 0 {
@@ -652,17 +807,7 @@ func (c *Conn) sendSourcePathProbeTick() {
 			de.mu.Unlock()
 			continue
 		}
-		var dsts []epAddr
-		if de.bestAddr.epAddr.isDirect() {
-			dsts = append(dsts, de.bestAddr.epAddr)
-		} else {
-			for ap := range de.endpointState {
-				dst := epAddr{ap: ap}
-				if dst.isDirect() {
-					dsts = append(dsts, dst)
-				}
-			}
-		}
+		dsts := de.sourcePathProbeDstsLocked()
 		dstKey := de.publicKey
 		dstDisco := epDisco.key
 		de.mu.Unlock()
@@ -699,78 +844,87 @@ func (c *Conn) primaryRTTForDst(dst epAddr) time.Duration {
 	return de.primaryRTTForLocked(dst)
 }
 
-func (pm *sourcePathProbeManager) bestCandidateLocked(dst epAddr, sources []sourceRxMeta, now mono.Time, primaryRTT time.Duration) (sourcePathCandidateScore, bool) {
+func (pm *sourcePathProbeManager) candidateScoreLocked(dst epAddr, source sourceRxMeta, now mono.Time, primaryRTT time.Duration) (sourcePathCandidateScore, bool) {
 	if !dst.isDirect() {
+		return sourcePathCandidateScore{}, false
+	}
+	if source.isPrimary() {
 		return sourcePathCandidateScore{}, false
 	}
 
 	thresholdPct := sourcePathAuxBeatThresholdPercentValue()
 	multiMetric := sourcePathMultiMetricEnabled()
+	var (
+		candidate    sourcePathCandidateScore
+		candidateOK  bool
+		sumLatencyNs float64
+		sumSqNs      float64
+	)
+	for _, sample := range pm.samples {
+		if sample.dst != dst || sample.source != source {
+			continue
+		}
+		if now.Sub(sample.at) > sourcePathSampleTTLValue() {
+			continue
+		}
+		latencyNs := float64(sample.latency.Nanoseconds())
+		sumLatencyNs += latencyNs
+		sumSqNs += latencyNs * latencyNs
+		if !candidateOK {
+			candidate = sourcePathCandidateScore{
+				source:  source,
+				samples: 1,
+				lastAt:  sample.at,
+			}
+			candidateOK = true
+			continue
+		}
+		candidate.samples++
+		if sample.at.Sub(candidate.lastAt) > 0 {
+			candidate.lastAt = sample.at
+		}
+	}
+	if !candidateOK || candidate.samples < sourcePathMinSamplesForUse {
+		return sourcePathCandidateScore{}, false
+	}
+
+	// Mean latency over TTL-fresh samples. Mean is more representative of
+	// what users will see for real data than the historical minimum, and
+	// it dampens the influence of any single lucky packet.
+	meanNs := sumLatencyNs / float64(candidate.samples)
+	candidate.latency = time.Duration(meanNs)
+	varianceNs := sumSqNs/float64(candidate.samples) - meanNs*meanNs
+	if varianceNs < 0 {
+		varianceNs = 0
+	}
+	candidate.jitter = time.Duration(math.Sqrt(varianceNs))
+	candidate.loss = pm.lossRatioLocked(dst, source, now)
+
+	if multiMetric {
+		if !candidate.applyMultiMetricScore(primaryRTT) {
+			return sourcePathCandidateScore{}, false
+		}
+	} else if primaryRTT > 0 && thresholdPct > 0 {
+		// aux mean must be strictly less than primaryRTT × (1 - threshold).
+		// Convert the percent threshold into an integer Duration cutoff to
+		// avoid float64 rounding noise on small RTTs.
+		cutoff := primaryRTT - primaryRTT*time.Duration(thresholdPct)/100
+		if candidate.latency >= cutoff {
+			metricSourcePathPrimaryBeatRejected.Add(1)
+			return sourcePathCandidateScore{}, false
+		}
+	}
+	return candidate, true
+}
+
+func (pm *sourcePathProbeManager) bestCandidateLocked(dst epAddr, sources []sourceRxMeta, now mono.Time, primaryRTT time.Duration) (sourcePathCandidateScore, bool) {
+	multiMetric := sourcePathMultiMetricEnabled()
 	var best sourcePathCandidateScore
 	var bestOK bool
 	for _, source := range sources {
-		if source.isPrimary() {
+		candidate, ok := pm.candidateScoreLocked(dst, source, now, primaryRTT)
+		if !ok {
 			continue
-		}
-
-		var (
-			candidate    sourcePathCandidateScore
-			candidateOK  bool
-			sumLatencyNs float64
-			sumSqNs      float64
-		)
-		for _, sample := range pm.samples {
-			if sample.dst != dst || sample.source != source {
-				continue
-			}
-			if now.Sub(sample.at) > sourcePathSampleTTLValue() {
-				continue
-			}
-			latencyNs := float64(sample.latency.Nanoseconds())
-			sumLatencyNs += latencyNs
-			sumSqNs += latencyNs * latencyNs
-			if !candidateOK {
-				candidate = sourcePathCandidateScore{
-					source:  source,
-					samples: 1,
-					lastAt:  sample.at,
-				}
-				candidateOK = true
-				continue
-			}
-			candidate.samples++
-			if sample.at.Sub(candidate.lastAt) > 0 {
-				candidate.lastAt = sample.at
-			}
-		}
-		if !candidateOK || candidate.samples < sourcePathMinSamplesForUse {
-			continue
-		}
-		// Mean latency over TTL-fresh samples. Mean is more representative of
-		// what users will see for real data than the historical minimum, and
-		// it dampens the influence of any single lucky packet.
-		meanNs := sumLatencyNs / float64(candidate.samples)
-		candidate.latency = time.Duration(meanNs)
-		varianceNs := sumSqNs/float64(candidate.samples) - meanNs*meanNs
-		if varianceNs < 0 {
-			varianceNs = 0
-		}
-		candidate.jitter = time.Duration(math.Sqrt(varianceNs))
-		candidate.loss = pm.lossRatioLocked(dst, source, now)
-
-		if multiMetric {
-			if !candidate.applyMultiMetricScore(primaryRTT) {
-				continue
-			}
-		} else if primaryRTT > 0 && thresholdPct > 0 {
-			// aux mean must be strictly less than primaryRTT × (1 - threshold).
-			// Convert the percent threshold into an integer Duration cutoff to
-			// avoid float64 rounding noise on small RTTs.
-			cutoff := primaryRTT - primaryRTT*time.Duration(thresholdPct)/100
-			if candidate.latency >= cutoff {
-				metricSourcePathPrimaryBeatRejected.Add(1)
-				continue
-			}
 		}
 		if !bestOK || candidate.betterThan(best, multiMetric) {
 			best = candidate

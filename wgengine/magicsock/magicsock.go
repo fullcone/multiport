@@ -1562,6 +1562,11 @@ type sourcePathDualSendResult struct {
 	auxErr     error
 }
 
+type sourcePathDualSendPathResult struct {
+	err  error
+	errs []error
+}
+
 type dualEndpointSendResult struct {
 	err          error
 	primaryErr   error
@@ -1604,6 +1609,56 @@ func (c *Conn) sendUDPBatchDualSource(aux sourceRxMeta, addr epAddr, buffs [][]b
 		res.err = nil
 	case auxErr != nil:
 		res.err = nil
+	}
+	return res
+}
+
+func (c *Conn) sendUDPBatchDualSourcePath(paths []sourcePathSendPath, buffs [][]byte, offset int) sourcePathDualSendPathResult {
+	if len(paths) == 0 {
+		return sourcePathDualSendPathResult{}
+	}
+	if len(paths) == 1 {
+		_, err := c.sendUDPBatchFromSource(paths[0].source, paths[0].dst, buffs, offset)
+		return sourcePathDualSendPathResult{err: err, errs: []error{err}}
+	}
+
+	metricSourcePathDualSendPackets.Add(int64(len(buffs)))
+	res := sourcePathDualSendPathResult{
+		errs: make([]error, min(2, len(paths))),
+	}
+	var okCount int
+	for i, path := range paths[:min(2, len(paths))] {
+		sent, err := c.sendUDPBatchFromSource(path.source, path.dst, buffs, offset)
+		res.errs[i] = err
+		if sent {
+			okCount++
+			if path.source.isPrimary() {
+				metricSourcePathDualSendPrimaryPackets.Add(int64(len(buffs)))
+			} else {
+				metricSourcePathDualSendAuxPackets.Add(int64(len(buffs)))
+			}
+		}
+		if err == nil {
+			if path.source.isPrimary() {
+				c.noteSourcePathPrimarySendSuccess(path.dst)
+			} else {
+				c.noteSourcePathDualSendAuxSuccess(path.dst, path.source)
+			}
+			continue
+		}
+		if path.source.isPrimary() {
+			metricSourcePathDualSendPrimaryFailed.Add(int64(len(buffs)))
+			c.noteSourcePathPrimarySendFailure(path.dst, mono.Now())
+		} else {
+			metricSourcePathDualSendAuxFailed.Add(int64(len(buffs)))
+			c.noteSourcePathDualSendAuxFailure(path.dst, path.source, mono.Now(), err)
+		}
+	}
+	if okCount == 0 {
+		metricSourcePathDualSendBothFailed.Add(int64(len(buffs)))
+		if len(res.errs) > 0 {
+			res.err = res.errs[0]
+		}
 	}
 	return res
 }
