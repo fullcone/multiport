@@ -95,6 +95,8 @@ type endpoint struct {
 	sourcePathRemoteSlots [2]epAddr   // first two direct remote source endpoints observed for srcsel metrics
 	sourcePathRemoteSeen  [2]mono.Time
 	sourcePathPeerAware   map[epAddr]*sourcePathPeerAwareEndpoint
+	sourcePathSingleSince mono.Time // non-zero while fixed dual-send has degraded to a single direct send
+	sourcePathSinglePkts  int64
 	sentPing              map[stun.TxID]sentPing
 	endpointState         map[netip.AddrPort]*endpointState // netip.AddrPort type for key (instead of [epAddr]) as [endpointState] is irrelevant for Geneve-encapsulated paths
 	isCallMeMaybeEP       map[netip.AddrPort]bool
@@ -676,6 +678,48 @@ func (de *endpoint) initFakeUDPAddr() {
 	addr[1] = 0x00
 	binary.BigEndian.PutUint64(addr[2:], uint64(reflect.ValueOf(de).Pointer()))
 	de.fakeWGAddr = netip.AddrPortFrom(netip.AddrFrom16(addr).Unmap(), 12345)
+}
+
+func (de *endpoint) noteSourcePathDualSendAvailability(now mono.Time, dualMode, singleReason string, packets int) {
+	if packets <= 0 {
+		return
+	}
+	var logFormat string
+	var logArgs []any
+	if singleReason != "" {
+		metricSourcePathDualSendDegradedSinglePackets.Add(int64(packets))
+	}
+
+	de.mu.Lock()
+	switch {
+	case singleReason != "":
+		if de.sourcePathSingleSince.IsZero() {
+			de.sourcePathSingleSince = now
+			de.sourcePathSinglePkts = int64(packets)
+			metricSourcePathDualSendDegradedSinglePeriods.Add(1)
+			metricSourcePathDualSendDegradedSingleActivePeers.Add(1)
+			logFormat = "magicsock: srcsel: peer %s degraded to single-send reason=%s"
+			logArgs = []any{de.publicKey.ShortString(), singleReason}
+		} else {
+			de.sourcePathSinglePkts += int64(packets)
+		}
+	case dualMode != "" && !de.sourcePathSingleSince.IsZero():
+		since := de.sourcePathSingleSince
+		singlePkts := de.sourcePathSinglePkts
+		de.sourcePathSingleSince = 0
+		de.sourcePathSinglePkts = 0
+		duration := now.Sub(since)
+		metricSourcePathDualSendDegradedSingleRecovered.Add(1)
+		metricSourcePathDualSendDegradedSingleActivePeers.Add(-1)
+		metricSourcePathDualSendDegradedSingleDurationMS.Add(duration.Milliseconds())
+		logFormat = "magicsock: srcsel: peer %s recovered dual-send mode=%s single_duration=%v single_packets=%d"
+		logArgs = []any{de.publicKey.ShortString(), dualMode, duration.Round(time.Millisecond), singlePkts}
+	}
+	de.mu.Unlock()
+
+	if logFormat != "" {
+		de.c.logf(logFormat, logArgs...)
+	}
 }
 
 // noteRecvActivity records receive activity on de, and invokes
@@ -1296,7 +1340,9 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 		}
 	}
 	var err error
+	var dualSendMode, singleSendReason string
 	if len(dualEndpointAddrs) > 0 {
+		dualSendMode = "observed-endpoint-fanout"
 		res := de.c.sendUDPBatchDualEndpoint(dualEndpointAddrs, buffs, offset)
 		err = res.err
 		if res.primaryErr != nil && isBadEndpointErr(res.primaryErr) {
@@ -1307,6 +1353,9 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 		}
 	} else if udpAddr.ap.IsValid() {
 		if source, activeBackupForced := de.c.sourcePathActiveBackupCandidate(udpAddr, now); activeBackupForced {
+			if sourcePathDualSendEnabled() && udpAddr.isDirect() {
+				singleSendReason = "active-backup"
+			}
 			metricSourcePathDataSendAuxSelected.Add(1)
 			_, err = de.c.sendUDPBatchFromSource(source, udpAddr, buffs, offset)
 			if err != nil {
@@ -1316,12 +1365,16 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 				metricSourcePathDataSendAuxSucceeded.Add(1)
 			}
 		} else if aux, ok := de.c.sourcePathDualSendCandidate(udpAddr); ok {
+			dualSendMode = "aux-source"
 			res := de.c.sendUDPBatchDualSource(aux, udpAddr, buffs, offset)
 			err = res.err
 			if res.primaryErr != nil && res.auxErr != nil && isBadEndpointErr(res.primaryErr) {
 				de.noteBadEndpoint(udpAddr)
 			}
 		} else if sourcePathSingleSourceStrategyEnabled() {
+			if sourcePathDualSendEnabled() && udpAddr.isDirect() {
+				singleSendReason = "single-source-strategy"
+			}
 			source := de.c.sourcePathDataSendSourceForBatch(udpAddr, buffs, offset)
 			usingSourcePathAux := !source.isPrimary()
 			if usingSourcePathAux {
@@ -1361,6 +1414,9 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 				de.noteBadEndpoint(udpAddr)
 			}
 		} else {
+			if sourcePathDualSendEnabled() && udpAddr.isDirect() {
+				singleSendReason = "no-redundant-path"
+			}
 			_, err = de.c.sendUDPBatch(udpAddr, buffs, offset)
 			if err == nil {
 				de.c.noteSourcePathPrimarySendSuccess(udpAddr)
@@ -1373,7 +1429,6 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 				de.noteBadEndpoint(udpAddr)
 			}
 		}
-
 		var txBytes int
 		for _, b := range buffs {
 			txBytes += len(b[offset:])
@@ -1403,6 +1458,7 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 			update(0, netip.AddrPortFrom(de.nodeAddr, 0), udpAddr.ap, len(buffs), txBytes, false)
 		}
 	}
+	de.noteSourcePathDualSendAvailability(now, dualSendMode, singleSendReason, len(buffs))
 	if derpAddr.IsValid() {
 		allOk := true
 		var txBytes int
@@ -2474,6 +2530,11 @@ func (de *endpoint) resetLocked() {
 	de.sourcePathRemoteSlots = [2]epAddr{}
 	de.sourcePathRemoteSeen = [2]mono.Time{}
 	de.sourcePathPeerAware = nil
+	if !de.sourcePathSingleSince.IsZero() {
+		metricSourcePathDualSendDegradedSingleActivePeers.Add(-1)
+		de.sourcePathSingleSince = 0
+		de.sourcePathSinglePkts = 0
+	}
 	for _, es := range de.endpointState {
 		es.lastPing = 0
 	}

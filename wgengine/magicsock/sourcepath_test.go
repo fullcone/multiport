@@ -5,12 +5,14 @@ package magicsock
 
 import (
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"tailscale.com/disco"
 	"tailscale.com/net/stun"
+	"tailscale.com/tstest"
 	"tailscale.com/tstime/mono"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
@@ -934,6 +936,51 @@ func TestClassifySourcePathRemoteSlotReplacesDeletedEndpointSlot(t *testing.T) {
 	}
 	if ep.sourcePathRemoteSlots[1] != fresh {
 		t.Fatalf("slot1 = %v, want fresh source %v", ep.sourcePathRemoteSlots[1], fresh)
+	}
+}
+
+func TestSourcePathDualSendAvailabilityLogsDegradeAndRecovery(t *testing.T) {
+	var logs tstest.MemLogger
+	de := &endpoint{
+		c:         &Conn{logf: logs.Logf},
+		publicKey: key.NewNode().Public(),
+	}
+	now := mono.Now()
+	periodsBefore := metricSourcePathDualSendDegradedSinglePeriods.Value()
+	packetsBefore := metricSourcePathDualSendDegradedSinglePackets.Value()
+	recoveredBefore := metricSourcePathDualSendDegradedSingleRecovered.Value()
+	durationBefore := metricSourcePathDualSendDegradedSingleDurationMS.Value()
+	activeBefore := metricSourcePathDualSendDegradedSingleActivePeers.Value()
+
+	de.noteSourcePathDualSendAvailability(now, "", "no-redundant-path", 3)
+	de.noteSourcePathDualSendAvailability(now.Add(100*time.Millisecond), "", "no-redundant-path", 2)
+	de.noteSourcePathDualSendAvailability(now.Add(2500*time.Millisecond), "aux-source", "", 1)
+
+	if got := metricSourcePathDualSendDegradedSinglePeriods.Value() - periodsBefore; got != 1 {
+		t.Fatalf("degraded single periods delta = %d, want 1", got)
+	}
+	if got := metricSourcePathDualSendDegradedSinglePackets.Value() - packetsBefore; got != 5 {
+		t.Fatalf("degraded single packets delta = %d, want 5", got)
+	}
+	if got := metricSourcePathDualSendDegradedSingleRecovered.Value() - recoveredBefore; got != 1 {
+		t.Fatalf("degraded single recovered delta = %d, want 1", got)
+	}
+	if got := metricSourcePathDualSendDegradedSingleDurationMS.Value() - durationBefore; got != 2500 {
+		t.Fatalf("degraded single duration ms delta = %d, want 2500", got)
+	}
+	if got := metricSourcePathDualSendDegradedSingleActivePeers.Value() - activeBefore; got != 0 {
+		t.Fatalf("degraded single active peers delta = %d, want 0", got)
+	}
+	logText := logs.String()
+	for _, want := range []string{
+		"degraded to single-send reason=no-redundant-path",
+		"recovered dual-send mode=aux-source",
+		"single_duration=2.5s",
+		"single_packets=5",
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("log output missing %q; logs:\n%s", want, logText)
+		}
 	}
 }
 
