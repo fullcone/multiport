@@ -32,6 +32,7 @@ var (
 	envknobSrcSelMaxOutcomes         = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_OUTCOMES")
 	envknobSrcSelAuxBeatThresholdPct = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_AUX_BEAT_THRESHOLD_PCT")
 	envknobSrcSelDualSend            = envknob.RegisterOptBool("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND")
+	envknobSrcSelObservedFanout      = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_OBSERVED_ENDPOINT_FANOUT")
 	envknobSrcSelDualSendAuxDrop     = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_AUX_DROP_STREAK")
 	envknobSrcSelDualSendRecoveryS   = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_RECOVERY_S")
 	envknobSrcSelDualSendMaxSkewMS   = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_MAX_SKEW_MS")
@@ -290,6 +291,10 @@ func sourcePathDualSendEnabled() bool {
 	return sourcePathDataStrategyMode() == sourcePathDataStrategyDualSend &&
 		sourcePathOptBoolDefaultTrue(envknobSrcSelDualSend()) &&
 		sourcePathAuxSocketCount() > 0
+}
+
+func sourcePathObservedEndpointFanoutEnabled() bool {
+	return envknobSrcSelObservedFanout()
 }
 
 func sourcePathDualSendAuxDropStreakValue() int {

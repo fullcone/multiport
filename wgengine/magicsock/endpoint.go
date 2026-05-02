@@ -1258,7 +1258,7 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 		}
 	} else {
 		udpAddr, derpAddr, startWGPing = de.addrForSendLocked(now)
-		if sourcePathDualSendEnabled() {
+		if sourcePathDualSendEnabled() && sourcePathObservedEndpointFanoutEnabled() {
 			dualEndpointAddrs = de.dualSendObservedEndpointAddrsForSendLocked(udpAddr, now)
 		}
 	}

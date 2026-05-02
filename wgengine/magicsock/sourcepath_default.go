@@ -60,6 +60,8 @@ func sourcePathScoreWeightsValue() sourcePathScoreWeights {
 
 func sourcePathDualSendEnabled() bool { return false }
 
+func sourcePathObservedEndpointFanoutEnabled() bool { return false }
+
 func sourcePathDualSendAuxDropStreakValue() int { return sourcePathDualSendAuxDropStreak }
 
 func sourcePathDualSendRecoveryValue() time.Duration { return sourcePathDualSendRecovery }
