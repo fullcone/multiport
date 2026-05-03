@@ -1289,6 +1289,9 @@ func (c *Conn) determineEndpoints(ctx context.Context) ([]tailcfg.Endpoint, erro
 		if !ipp.IsValid() || (debugOmitLocalAddresses() && et == tailcfg.EndpointLocal) {
 			return
 		}
+		if omitAdvertisedEndpoint(ipp) {
+			return
+		}
 		if _, ok := already[ipp]; !ok {
 			mak.Set(&already, ipp, et)
 			eps = append(eps, tailcfg.Endpoint{Addr: ipp, Type: et})
