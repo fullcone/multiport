@@ -855,7 +855,7 @@ func (de *endpoint) setSourcePathActivePathsLocked(paths []sourcePathSendPath) [
 
 func sourcePathFillActivePaths(current, ranked []sourcePathSendPath) []sourcePathSendPath {
 	current = append([]sourcePathSendPath(nil), current...)
-	preferDistinctDst := len(current) > 0 && sourcePathDistinctDstCount(ranked) >= 2
+	preferDistinctDst := sourcePathDistinctDstCount(ranked) >= 2
 	for len(current) < 2 {
 		idx := sourcePathFirstEligibleActivePath(current, ranked, preferDistinctDst)
 		if idx < 0 && preferDistinctDst {
