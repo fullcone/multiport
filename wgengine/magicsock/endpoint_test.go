@@ -4,12 +4,14 @@
 package magicsock
 
 import (
+	"iter"
 	"net/netip"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"tailscale.com/disco"
+	"tailscale.com/envknob"
 	"tailscale.com/net/packet"
 	"tailscale.com/net/stun"
 	"tailscale.com/tailcfg"
@@ -17,6 +19,97 @@ import (
 	"tailscale.com/types/key"
 	"tailscale.com/util/ringlog"
 )
+
+type endpointTestList []netip.AddrPort
+
+func (l endpointTestList) All() iter.Seq2[int, netip.AddrPort] {
+	return func(yield func(int, netip.AddrPort) bool) {
+		for i, ipp := range l {
+			if !yield(i, ipp) {
+				return
+			}
+		}
+	}
+}
+
+func TestEndpointSetEndpointsLockedOmitsConfiguredEndpoint(t *testing.T) {
+	omitted := netip.MustParseAddrPort("192.0.2.1:41641")
+	keep4 := netip.MustParseAddrPort("192.0.2.2:41641")
+	keep6 := netip.MustParseAddrPort("[2001:db8::1]:41641")
+	envknob.Setenv("TS_EXPERIMENTAL_OMIT_ENDPOINTS", omitted.String())
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_OMIT_ENDPOINTS", "") })
+
+	de := &endpoint{
+		c:             &Conn{logf: func(string, ...any) {}},
+		endpointState: make(map[netip.AddrPort]*endpointState),
+		debugUpdates:  ringlog.New[EndpointChange](10),
+	}
+	de.setEndpointsLocked(endpointTestList{omitted, keep4, keep6})
+
+	if _, ok := de.endpointState[omitted]; ok {
+		t.Fatalf("configured omitted endpoint was installed: %v", omitted)
+	}
+	if _, ok := de.endpointState[keep4]; !ok {
+		t.Fatalf("unconfigured IPv4 endpoint was not installed: %v", keep4)
+	}
+	if _, ok := de.endpointState[keep6]; !ok {
+		t.Fatalf("unconfigured IPv6 endpoint was not installed: %v", keep6)
+	}
+}
+
+func TestEndpointAddCandidateEndpointOmitsConfiguredEndpoint(t *testing.T) {
+	omitted := netip.MustParseAddrPort("192.0.2.1:41641")
+	envknob.Setenv("TS_EXPERIMENTAL_OMIT_ENDPOINTS", omitted.String())
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_OMIT_ENDPOINTS", "") })
+
+	de := &endpoint{
+		c:             &Conn{logf: func(string, ...any) {}},
+		endpointState: make(map[netip.AddrPort]*endpointState),
+		debugUpdates:  ringlog.New[EndpointChange](10),
+	}
+	if duplicate := de.addCandidateEndpoint(omitted, stun.NewTxID()); duplicate {
+		t.Fatal("omitted candidate endpoint unexpectedly reported duplicate ping")
+	}
+	if _, ok := de.endpointState[omitted]; ok {
+		t.Fatalf("configured omitted candidate was installed: %v", omitted)
+	}
+}
+
+func TestEndpointHandlePongConnLockedOmitsConfiguredEndpoint(t *testing.T) {
+	omitted := netip.MustParseAddrPort("192.0.2.1:41641")
+	envknob.Setenv("TS_EXPERIMENTAL_OMIT_ENDPOINTS", omitted.String())
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_OMIT_ENDPOINTS", "") })
+
+	txid := stun.NewTxID()
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	de := &endpoint{
+		c:                  &Conn{logf: func(string, ...any) {}, peerMap: newPeerMap()},
+		bestAddr:           addrQuality{epAddr: epAddr{ap: omitted}, latency: 50 * time.Millisecond},
+		trustBestAddrUntil: mono.Now().Add(time.Hour),
+		sentPing: map[stun.TxID]sentPing{
+			txid: {
+				to:      epAddr{ap: omitted},
+				at:      mono.Now().Add(-50 * time.Millisecond),
+				timer:   timer,
+				purpose: pingDiscovery,
+			},
+		},
+		endpointState: map[netip.AddrPort]*endpointState{omitted: &endpointState{}},
+		debugUpdates:  ringlog.New[EndpointChange](10),
+	}
+
+	knownTxID := de.handlePongConnLocked(&disco.Pong{TxID: txid, Src: omitted}, &discoInfo{}, epAddr{ap: omitted})
+	if !knownTxID {
+		t.Fatal("expected omitted endpoint pong to be recognized")
+	}
+	if _, ok := de.endpointState[omitted]; ok {
+		t.Fatalf("configured omitted endpoint remained installed after pong: %v", omitted)
+	}
+	if de.bestAddr.ap.IsValid() {
+		t.Fatalf("configured omitted endpoint remained bestAddr: %v", de.bestAddr)
+	}
+}
 
 func TestProbeUDPLifetimeConfig_Equals(t *testing.T) {
 	tests := []struct {

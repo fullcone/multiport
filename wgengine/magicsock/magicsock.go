@@ -1289,6 +1289,9 @@ func (c *Conn) determineEndpoints(ctx context.Context) ([]tailcfg.Endpoint, erro
 		if !ipp.IsValid() || (debugOmitLocalAddresses() && et == tailcfg.EndpointLocal) {
 			return
 		}
+		if omitAdvertisedEndpoint(ipp) {
+			return
+		}
 		if _, ok := already[ipp]; !ok {
 			mak.Set(&already, ipp, et)
 			eps = append(eps, tailcfg.Endpoint{Addr: ipp, Type: et})
@@ -1493,17 +1496,31 @@ func (c *Conn) Send(buffs [][]byte, ep conn.Endpoint, offset int) (err error) {
 	case *endpoint:
 		return ep.send(buffs, offset)
 	case *sourcePathPeerAwareEndpoint:
+		if !wireGuardBatchIsTransport(buffs, offset) && ep.src.isDirect() {
+			return c.sendWireGuardBatchDirectTo(buffs, ep.src, offset)
+		}
 		return ep.endpoint.send(buffs, offset)
 	case *lazyEndpoint:
 		// A [*lazyEndpoint] may end up on this TX codepath when wireguard-go is
 		// deemed "under handshake load" and ends up transmitting a cookie reply
 		// using the received [conn.Endpoint] in [device.SendHandshakeCookie].
-		if ep.src.ap.Addr().Is6() {
-			return c.pconn6.WriteWireGuardBatchTo(buffs, ep.src, offset)
-		}
-		return c.pconn4.WriteWireGuardBatchTo(buffs, ep.src, offset)
+		return c.sendWireGuardBatchDirectTo(buffs, ep.src, offset)
 	}
 	return nil
+}
+
+func wireGuardBatchIsTransport(buffs [][]byte, offset int) bool {
+	if len(buffs) == 0 || offset < 0 || len(buffs[0])-offset < 4 {
+		return false
+	}
+	return binary.LittleEndian.Uint32(buffs[0][offset:]) == device.MessageTransportType
+}
+
+func (c *Conn) sendWireGuardBatchDirectTo(buffs [][]byte, dst epAddr, offset int) error {
+	if dst.ap.Addr().Is6() {
+		return c.pconn6.WriteWireGuardBatchTo(buffs, dst, offset)
+	}
+	return c.pconn4.WriteWireGuardBatchTo(buffs, dst, offset)
 }
 
 var errConnClosed = errors.New("Conn closed")
@@ -1562,6 +1579,11 @@ type sourcePathDualSendResult struct {
 	auxErr     error
 }
 
+type sourcePathDualSendPathResult struct {
+	err  error
+	errs []error
+}
+
 type dualEndpointSendResult struct {
 	err          error
 	primaryErr   error
@@ -1604,6 +1626,56 @@ func (c *Conn) sendUDPBatchDualSource(aux sourceRxMeta, addr epAddr, buffs [][]b
 		res.err = nil
 	case auxErr != nil:
 		res.err = nil
+	}
+	return res
+}
+
+func (c *Conn) sendUDPBatchDualSourcePath(paths []sourcePathSendPath, buffs [][]byte, offset int) sourcePathDualSendPathResult {
+	if len(paths) == 0 {
+		return sourcePathDualSendPathResult{}
+	}
+	if len(paths) == 1 {
+		_, err := c.sendUDPBatchFromSource(paths[0].source, paths[0].dst, buffs, offset)
+		return sourcePathDualSendPathResult{err: err, errs: []error{err}}
+	}
+
+	metricSourcePathDualSendPackets.Add(int64(len(buffs)))
+	res := sourcePathDualSendPathResult{
+		errs: make([]error, min(2, len(paths))),
+	}
+	var okCount int
+	for i, path := range paths[:min(2, len(paths))] {
+		sent, err := c.sendUDPBatchFromSource(path.source, path.dst, buffs, offset)
+		res.errs[i] = err
+		if sent {
+			okCount++
+			if path.source.isPrimary() {
+				metricSourcePathDualSendPrimaryPackets.Add(int64(len(buffs)))
+			} else {
+				metricSourcePathDualSendAuxPackets.Add(int64(len(buffs)))
+			}
+		}
+		if err == nil {
+			if path.source.isPrimary() {
+				c.noteSourcePathPrimarySendSuccess(path.dst)
+			} else {
+				c.noteSourcePathDualSendAuxSuccess(path.dst, path.source)
+			}
+			continue
+		}
+		if path.source.isPrimary() {
+			metricSourcePathDualSendPrimaryFailed.Add(int64(len(buffs)))
+			c.noteSourcePathPrimarySendFailure(path.dst, mono.Now())
+		} else {
+			metricSourcePathDualSendAuxFailed.Add(int64(len(buffs)))
+			c.noteSourcePathDualSendAuxFailure(path.dst, path.source, mono.Now(), err)
+		}
+	}
+	if okCount == 0 {
+		metricSourcePathDualSendBothFailed.Add(int64(len(buffs)))
+		if len(res.errs) > 0 {
+			res.err = res.errs[0]
+		}
 	}
 	return res
 }
@@ -2260,6 +2332,23 @@ func (ep *endpoint) sourcePathPeerAwareEndpoint(src epAddr, rxMeta sourceRxMeta)
 func (ep *sourcePathPeerAwareEndpoint) FromPeer(peerPublicKey [32]byte) {
 	pubKey := key.NodePublicFromRaw32(mem.B(peerPublicKey[:]))
 	if pubKey.Compare(ep.publicKey) != 0 {
+		c := ep.c
+		if c == nil {
+			return
+		}
+		c.mu.Lock()
+		actualEP, ok := c.peerMap.endpointForNodeKey(pubKey)
+		if ok {
+			c.peerMap.setNodeKeyForEpAddr(ep.src, pubKey)
+		}
+		c.mu.Unlock()
+		if !ok {
+			return
+		}
+		noteSourcePathLocalWireGuardAccepted(ep.rxMeta)
+		noteSourcePathRemoteWireGuardAccepted(actualEP, ep.src)
+		c.logf("magicsock: sourcePathPeerAwareEndpoint.FromPeer(%v) corrected stale epAddr(%v) mapping from node(%v) to node(%v)",
+			pubKey.ShortString(), ep.src, ep.publicKey.ShortString(), actualEP.nodeAddr)
 		return
 	}
 	noteSourcePathLocalWireGuardAccepted(ep.rxMeta)

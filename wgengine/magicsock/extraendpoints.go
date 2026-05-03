@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -56,6 +57,7 @@ var (
 	envknobExtraEndpointsFile  = envknob.RegisterString("TS_EXPERIMENTAL_EXTRA_ENDPOINTS_FILE")
 	envknobExtraEndpointsMax   = envknob.RegisterInt("TS_EXPERIMENTAL_EXTRA_ENDPOINTS_MAX")
 	envknobExtraEndpointsPollS = envknob.RegisterInt("TS_EXPERIMENTAL_EXTRA_ENDPOINTS_POLL_S")
+	envknobOmitEndpoints       = envknob.RegisterString("TS_EXPERIMENTAL_OMIT_ENDPOINTS")
 )
 
 const (
@@ -209,6 +211,40 @@ func extraEndpointsPollDuration() time.Duration {
 		return 0
 	}
 	return time.Duration(n) * time.Second
+}
+
+// omitAdvertisedEndpoint reports whether ap should be suppressed from the
+// endpoint list advertised to the control plane.
+func omitAdvertisedEndpoint(ap netip.AddrPort) bool {
+	return omitEndpointAddrPort(ap)
+}
+
+// omitEndpointAddrPort reports whether ap should be suppressed from advertised
+// and learned endpoint candidates. The knob is intentionally an exact AddrPort
+// list so operators can hide a known-bad or undesired public mapping without
+// suppressing unrelated IPv6, private, or extra endpoints.
+func omitEndpointAddrPort(ap netip.AddrPort) bool {
+	if !ap.IsValid() {
+		return false
+	}
+	all := envknobOmitEndpoints()
+	if all == "" {
+		return false
+	}
+	for _, part := range strings.Split(all, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		omit, err := netip.ParseAddrPort(part)
+		if err != nil {
+			continue
+		}
+		if omit == ap {
+			return true
+		}
+	}
+	return false
 }
 
 // runWatcher is the watcher goroutine. Owns its own fsnotify.Watcher and

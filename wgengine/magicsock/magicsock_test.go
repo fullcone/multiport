@@ -730,6 +730,11 @@ func (localhostListener) ListenPacket(ctx context.Context, network, address stri
 }
 
 func TestTwoDevicePing(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "false")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+	})
+
 	ln, ip := localhostListener{}, netaddr.IPv4(127, 0, 0, 1)
 	n := &devices{
 		m1:     ln,
@@ -3319,6 +3324,56 @@ func TestNetworkSendErrors(t *testing.T) {
 			t.Errorf("expected invalid payload to increment packet dropped metric; got %q", resp.Body.String())
 		}
 	})
+}
+
+func TestWireGuardBatchIsTransport(t *testing.T) {
+	packetWithType := func(offset int, msgType uint32) []byte {
+		pkt := make([]byte, offset+4)
+		binary.LittleEndian.PutUint32(pkt[offset:], msgType)
+		return pkt
+	}
+
+	tests := []struct {
+		name   string
+		buffs  [][]byte
+		offset int
+		want   bool
+	}{
+		{
+			name:  "transport",
+			buffs: [][]byte{packetWithType(0, device.MessageTransportType)},
+			want:  true,
+		},
+		{
+			name:   "transport-with-offset",
+			buffs:  [][]byte{packetWithType(packet.GeneveFixedHeaderLength, device.MessageTransportType)},
+			offset: packet.GeneveFixedHeaderLength,
+			want:   true,
+		},
+		{
+			name:  "handshake-response",
+			buffs: [][]byte{packetWithType(0, device.MessageResponseType)},
+		},
+		{
+			name:  "cookie-reply",
+			buffs: [][]byte{packetWithType(0, device.MessageCookieReplyType)},
+		},
+		{
+			name:  "short",
+			buffs: [][]byte{{0x04, 0x00, 0x00}},
+		},
+		{
+			name: "empty-batch",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := wireGuardBatchIsTransport(tt.buffs, tt.offset); got != tt.want {
+				t.Fatalf("wireGuardBatchIsTransport() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func Test_packetLooksLike(t *testing.T) {

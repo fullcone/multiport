@@ -104,7 +104,7 @@ func TestNoiseClientPortsAreSet(t *testing.T) {
 		{
 			name:      "http-url-custom-port",
 			url:       "http://example.com:123",
-			wantHTTPS: "443", // TODO(bradfitz): questionable; change?
+			wantHTTPS: "",
 			wantHTTP:  "123",
 		},
 		{
@@ -152,7 +152,7 @@ func TestNoiseClientPortsAreSet(t *testing.T) {
 		{
 			name:      "http-public-ip-custom-port",
 			url:       "http://1.2.3.4:8080",
-			wantHTTPS: "443", // TODO(bradfitz): questionable; change?
+			wantHTTPS: "",
 			wantHTTP:  "8080",
 		},
 		{

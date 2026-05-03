@@ -111,6 +111,8 @@ import (
 
 var controlDebugFlags = getControlDebugFlags()
 
+var srcSelPinWindowsUnattendedProfile = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_PIN_WINDOWS_UNATTENDED_PROFILE")
+
 func getControlDebugFlags() []string {
 	if e := envknob.String("TS_DEBUG_CONTROL_FLAGS"); e != "" {
 		return strings.Split(e, ",")
@@ -4125,16 +4127,16 @@ func (b *LocalBackend) switchToBestProfileLocked(reason string) {
 		}
 	case !switched:
 		if err != nil {
-			b.logf("%s: an error occurred; staying on profile %q (%s): %v", reason, cp.UserProfile().LoginName, cp.ID(), err)
+			b.logf("%s: an error occurred; staying on profile %q (%s): %v", reason, cp.UserProfile().LoginName(), cp.ID(), err)
 		} else {
-			b.logf("%s: staying on profile %q (%s)", reason, cp.UserProfile().LoginName, cp.ID())
+			b.logf("%s: staying on profile %q (%s)", reason, cp.UserProfile().LoginName(), cp.ID())
 		}
 	case cp.ID() == "":
 		b.logf("%s: disconnecting Tailscale", reason)
 	case background:
-		b.logf("%s: switching to background profile %q (%s)", reason, cp.UserProfile().LoginName, cp.ID())
+		b.logf("%s: switching to background profile %q (%s)", reason, cp.UserProfile().LoginName(), cp.ID())
 	default:
-		b.logf("%s: switching to profile %q (%s)", reason, cp.UserProfile().LoginName, cp.ID())
+		b.logf("%s: switching to profile %q (%s)", reason, cp.UserProfile().LoginName(), cp.ID())
 	}
 	if !switched {
 		return
@@ -4173,6 +4175,10 @@ func (b *LocalBackend) resolveBestProfileLocked() (_ ipn.LoginProfileView, isBac
 	// between "foreground" and "background" profiles as we migrate away from the concept
 	// of a single "current user" on Windows. See tailscale/corp#18342.
 	//
+	if envknob.GOOS() == "windows" && srcSelPinWindowsUnattendedProfile() && b.pm.CurrentPrefs().ForceDaemon() {
+		return b.pm.CurrentProfile(), true
+	}
+
 	// If a GUI/CLI client is connected, use the connected user's profile, which means
 	// either the current profile if owned by the user, or their default profile.
 	if b.currentUser != nil {

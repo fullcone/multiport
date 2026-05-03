@@ -331,6 +331,21 @@ func TestConnExtraEndpointsCurrentNilWhenWatcherOff(t *testing.T) {
 	}
 }
 
+func TestOmitAdvertisedEndpoint(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_OMIT_ENDPOINTS", " 192.0.2.1:41641, [2001:db8::1]:41641, invalid ")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_OMIT_ENDPOINTS", "") })
+
+	if !omitAdvertisedEndpoint(netip.MustParseAddrPort("192.0.2.1:41641")) {
+		t.Fatal("configured IPv4 endpoint should be omitted")
+	}
+	if !omitAdvertisedEndpoint(netip.MustParseAddrPort("[2001:db8::1]:41641")) {
+		t.Fatal("configured IPv6 endpoint should be omitted")
+	}
+	if omitAdvertisedEndpoint(netip.MustParseAddrPort("192.0.2.2:41641")) {
+		t.Fatal("unconfigured endpoint should not be omitted")
+	}
+}
+
 // TestExtraEndpointsParseAndApplyEnforcesSizeCapOnRead is a regression
 // test for Codex P2 round 1 on PR #17: the size cap must be enforced
 // during read (via io.LimitReader), not via a pre-read os.Stat. A pre-

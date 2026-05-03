@@ -89,17 +89,22 @@ type endpoint struct {
 	lastDiscoKeyAdvertisement mono.Time      // last time we sent a TSMPDiscoAdvertisement or not to this endpoint
 	derpAddr                  netip.AddrPort // fallback/bootstrap path, if non-zero (non-zero for well-behaved clients)
 
-	bestAddr              addrQuality // best non-DERP path; zero if none; mutate via setBestAddrLocked()
-	bestAddrAt            mono.Time   // time best address re-confirmed
-	trustBestAddrUntil    mono.Time   // time when bestAddr expires
-	sourcePathRemoteSlots [2]epAddr   // first two direct remote source endpoints observed for srcsel metrics
-	sourcePathRemoteSeen  [2]mono.Time
-	sourcePathPeerAware   map[sourcePathPeerAwareKey]*sourcePathPeerAwareEndpoint
-	sourcePathSingleSince mono.Time // non-zero while fixed dual-send has degraded to a single direct send
-	sourcePathSinglePkts  int64
-	sentPing              map[stun.TxID]sentPing
-	endpointState         map[netip.AddrPort]*endpointState // netip.AddrPort type for key (instead of [epAddr]) as [endpointState] is irrelevant for Geneve-encapsulated paths
-	isCallMeMaybeEP       map[netip.AddrPort]bool
+	bestAddr                addrQuality // best non-DERP path; zero if none; mutate via setBestAddrLocked()
+	bestAddrAt              mono.Time   // time best address re-confirmed
+	trustBestAddrUntil      mono.Time   // time when bestAddr expires
+	sourcePathRemoteSlots   [2]epAddr   // first two direct remote source endpoints observed for srcsel metrics
+	sourcePathRemoteSeen    [2]mono.Time
+	sourcePathPeerAware     map[sourcePathPeerAwareKey]*sourcePathPeerAwareEndpoint
+	sourcePathSingleSince   mono.Time // non-zero while fixed dual-send has degraded to a single direct send
+	sourcePathSinglePkts    int64
+	sourcePathActivePaths   [2]sourcePathSendPath
+	sourcePathActiveCount   int
+	sourcePathLastReplace   mono.Time
+	sourcePathLastRefresh   mono.Time
+	sourcePathPromoteBudget int
+	sentPing                map[stun.TxID]sentPing
+	endpointState           map[netip.AddrPort]*endpointState // netip.AddrPort type for key (instead of [epAddr]) as [endpointState] is irrelevant for Geneve-encapsulated paths
+	isCallMeMaybeEP         map[netip.AddrPort]bool
 
 	// The following fields are related to the new "silent disco"
 	// implementation that's a WIP as of 2022-10-20.
@@ -573,30 +578,7 @@ func compareDualEndpointCandidate(a, b dualEndpointCandidate) int {
 //
 // de.mu must be held.
 func (de *endpoint) dualEndpointAddrsForSendLocked(now mono.Time) (addrs []epAddr, needPing bool) {
-	if len(de.endpointState) == 0 {
-		return nil, false
-	}
-
-	var oldestPing mono.Time
-	candidates := make([]dualEndpointCandidate, 0, len(de.endpointState))
-	for ipp, state := range de.endpointState {
-		if state.shouldDeleteLocked() {
-			continue
-		}
-		if oldestPing.IsZero() || state.lastPing.Before(oldestPing) {
-			oldestPing = state.lastPing
-		}
-
-		latency, hasLatency := state.latencyLocked()
-		addr := epAddr{ap: ipp}
-		candidates = append(candidates, dualEndpointCandidate{
-			addr:       addr,
-			latency:    latency,
-			hasLatency: hasLatency && latency > 0,
-			lastPing:   state.lastPing,
-			isBest:     de.bestAddr.epAddr == addr && !now.After(de.trustBestAddrUntil),
-		})
-	}
+	candidates, oldestPing := de.sourcePathDirectEndpointCandidatesLocked(now)
 	if len(candidates) == 0 {
 		return nil, false
 	}
@@ -618,6 +600,128 @@ func (de *endpoint) dualEndpointAddrsForSendLocked(now mono.Time) (addrs []epAdd
 		de.trustBestAddrUntil = now.Add(time.Second)
 	}
 	return addrs, needPing
+}
+
+// sourcePathDualSendDstCandidatesLocked returns direct remote endpoint
+// candidates sorted by their endpoint-level quality. Fixed dual-send uses this
+// list as the remote half of the path pool; local source sockets are ranked
+// later from the current srcsel probe samples.
+//
+// de.mu must be held.
+func (de *endpoint) sourcePathDualSendDstCandidatesLocked(now mono.Time, primary epAddr) []sourcePathDstCandidate {
+	candidates, _ := de.sourcePathDirectEndpointCandidatesLocked(now)
+	if primary.isDirect() {
+		found := false
+		for _, candidate := range candidates {
+			if candidate.addr == primary {
+				found = true
+				break
+			}
+		}
+		if !found {
+			rtt := de.primaryRTTForLocked(primary)
+			candidates = append(candidates, dualEndpointCandidate{
+				addr:       primary,
+				latency:    rtt,
+				hasLatency: rtt > 0,
+				isBest:     de.bestAddr.epAddr == primary && !now.After(de.trustBestAddrUntil),
+			})
+			slices.SortFunc(candidates, compareDualEndpointCandidate)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	dsts := make([]sourcePathDstCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		rtt := de.primaryRTTForLocked(candidate.addr)
+		allowPrimarySource := candidate.addr == primary || candidate.isBest || rtt > 0 || de.sourcePathRemoteSlotFreshLocked(candidate.addr, now)
+		dsts = append(dsts, sourcePathDstCandidate{
+			dst:                candidate.addr,
+			primaryRTT:         rtt,
+			hasPrimaryRTT:      rtt > 0,
+			allowPrimarySource: allowPrimarySource,
+		})
+	}
+	return dsts
+}
+
+func (de *endpoint) sourcePathRemoteSlotFreshLocked(addr epAddr, now mono.Time) bool {
+	for i, slot := range de.sourcePathRemoteSlots {
+		if slot != addr {
+			continue
+		}
+		seen := de.sourcePathRemoteSeen[i]
+		return !seen.IsZero() && now.Sub(seen) <= sessionActiveTimeout
+	}
+	return false
+}
+
+// sourcePathProbeDstsLocked returns the remote endpoints that should be
+// continuously probed from all auxiliary sockets. In fixed dual-send mode this
+// intentionally covers every direct endpoint, not just bestAddr, so standby
+// endpoint/source combinations have fresh samples before they are needed.
+//
+// de.mu must be held.
+func (de *endpoint) sourcePathProbeDstsLocked() []epAddr {
+	if !sourcePathDualSendEnabled() && !sourcePathDualEndpointStrategyEnabled() && de.bestAddr.epAddr.isDirect() {
+		return []epAddr{de.bestAddr.epAddr}
+	}
+	candidates, _ := de.sourcePathDirectEndpointCandidatesLocked(mono.Now())
+	dsts := make([]epAddr, 0, len(candidates))
+	for _, candidate := range candidates {
+		dsts = append(dsts, candidate.addr)
+	}
+	return dsts
+}
+
+// sourcePathDirectEndpointCandidatesLocked returns sorted direct endpoint
+// candidates from both endpointState and the two source endpoints observed on
+// receive. The observed slots matter for server-to-client redundancy, where the
+// peer's extra source port may be known before it has endpointState latency.
+//
+// de.mu must be held.
+func (de *endpoint) sourcePathDirectEndpointCandidatesLocked(now mono.Time) (candidates []dualEndpointCandidate, oldestPing mono.Time) {
+	seen := map[netip.AddrPort]bool{}
+	add := func(addr epAddr, state *endpointState) {
+		if !addr.isDirect() || seen[addr.ap] {
+			return
+		}
+		seen[addr.ap] = true
+		candidate := dualEndpointCandidate{
+			addr:   addr,
+			isBest: de.bestAddr.epAddr == addr && !now.After(de.trustBestAddrUntil),
+		}
+		if state != nil {
+			if state.shouldDeleteLocked() {
+				return
+			}
+			if oldestPing.IsZero() || state.lastPing.Before(oldestPing) {
+				oldestPing = state.lastPing
+			}
+			latency, hasLatency := state.latencyLocked()
+			candidate.latency = latency
+			candidate.hasLatency = hasLatency && latency > 0
+			candidate.lastPing = state.lastPing
+		}
+		candidates = append(candidates, candidate)
+	}
+
+	for ipp, state := range de.endpointState {
+		add(epAddr{ap: ipp}, state)
+	}
+	for i, slot := range de.sourcePathRemoteSlots {
+		if !slot.isDirect() || seen[slot.ap] {
+			continue
+		}
+		seenAt := de.sourcePathRemoteSeen[i]
+		if seenAt.IsZero() || now.Sub(seenAt) > sessionActiveTimeout {
+			continue
+		}
+		add(slot, de.endpointState[slot.ap])
+	}
+	slices.SortFunc(candidates, compareDualEndpointCandidate)
+	return candidates, oldestPing
 }
 
 // dualSendObservedEndpointAddrsForSendLocked returns a primary destination and
@@ -643,6 +747,185 @@ func (de *endpoint) dualSendObservedEndpointAddrsForSendLocked(primary epAddr, n
 		}
 	}
 	return nil
+}
+
+type sourcePathActivePolicyEvent struct {
+	refreshed         bool
+	replaced          bool
+	oldPath           sourcePathSendPath
+	newPath           sourcePathSendPath
+	standbyCandidates int
+}
+
+func (de *endpoint) logSourcePathActivePolicyEvent(ev sourcePathActivePolicyEvent) {
+	if de.c == nil || de.c.logf == nil {
+		return
+	}
+	if ev.refreshed {
+		de.c.logf("magicsock: srcsel: peer %s refreshed hot-standby path pool standby_candidates=%d refresh_interval=%v", de.publicKey.ShortString(), ev.standbyCandidates, sourcePathStandbyRefreshEvery)
+	}
+	if ev.replaced {
+		de.c.logf("magicsock: srcsel: peer %s promoted hot-standby path old=%s new=%s cooldown=%v", de.publicKey.ShortString(), ev.oldPath.logString(), ev.newPath.logString(), sourcePathActiveReplaceCooldown)
+	}
+}
+
+// sourcePathApplyActivePathPolicyLocked selects the two paths that fixed
+// dual-send should use for this peer. The ranked input is the current hot path
+// pool: the first two outputs are active, and the remaining entries stay warm
+// through srcsel probes for future promotion.
+//
+// de.mu must be held.
+func (de *endpoint) sourcePathApplyActivePathPolicyLocked(now mono.Time, ranked []sourcePathSendPath) ([]sourcePathSendPath, sourcePathActivePolicyEvent) {
+	var ev sourcePathActivePolicyEvent
+	if len(ranked) < 2 {
+		de.sourcePathActivePaths = [2]sourcePathSendPath{}
+		de.sourcePathActiveCount = 0
+		return nil, ev
+	}
+
+	if len(ranked) > 2 && (de.sourcePathLastRefresh.IsZero() || now.Sub(de.sourcePathLastRefresh) >= sourcePathStandbyRefreshEvery) {
+		de.sourcePathLastRefresh = now
+		de.sourcePathPromoteBudget = 2
+		ev.refreshed = true
+		ev.standbyCandidates = len(ranked) - 2
+	}
+
+	current := make([]sourcePathSendPath, 0, 2)
+	missingActive := de.sourcePathActiveCount < 2
+	for i := 0; i < de.sourcePathActiveCount && i < len(de.sourcePathActivePaths); i++ {
+		idx := sourcePathSendPathIndex(ranked, de.sourcePathActivePaths[i])
+		if idx < 0 {
+			missingActive = true
+			continue
+		}
+		if sourcePathSendPathIndex(current, ranked[idx]) < 0 {
+			current = append(current, ranked[idx])
+		}
+	}
+
+	if missingActive || len(current) < 2 {
+		current = sourcePathFillActivePaths(current, ranked)
+		if len(current) < 2 {
+			de.sourcePathActivePaths = [2]sourcePathSendPath{}
+			de.sourcePathActiveCount = 0
+			de.sourcePathPromoteBudget = 0
+			return nil, ev
+		}
+		if de.sourcePathActiveCount == 2 {
+			de.sourcePathLastReplace = now
+		}
+		de.sourcePathPromoteBudget = 0
+		return de.setSourcePathActivePathsLocked(current), ev
+	}
+
+	canPromote := de.sourcePathPromoteBudget > 0 &&
+		(de.sourcePathLastReplace.IsZero() || now.Sub(de.sourcePathLastReplace) >= sourcePathActiveReplaceCooldown)
+	if canPromote {
+		if idx, slot := sourcePathBestPromotion(current, ranked); idx >= 0 {
+			ev.replaced = true
+			ev.oldPath = current[slot]
+			ev.newPath = ranked[idx]
+			current[slot] = ranked[idx]
+			de.sourcePathLastReplace = now
+			de.sourcePathPromoteBudget--
+		}
+	}
+	return de.setSourcePathActivePathsLocked(current), ev
+}
+
+// de.mu must be held.
+func (de *endpoint) setSourcePathActivePathsLocked(paths []sourcePathSendPath) []sourcePathSendPath {
+	slices.SortFunc(paths, compareSourcePathSendPath)
+	de.sourcePathActivePaths = [2]sourcePathSendPath{paths[0], paths[1]}
+	de.sourcePathActiveCount = 2
+	return []sourcePathSendPath{paths[0], paths[1]}
+}
+
+func sourcePathFillActivePaths(current, ranked []sourcePathSendPath) []sourcePathSendPath {
+	current = append([]sourcePathSendPath(nil), current...)
+	preferDistinctDst := len(current) > 0 && sourcePathDistinctDstCount(ranked) >= 2
+	for len(current) < 2 {
+		idx := sourcePathFirstEligibleActivePath(current, ranked, preferDistinctDst)
+		if idx < 0 && preferDistinctDst {
+			idx = sourcePathFirstEligibleActivePath(current, ranked, false)
+		}
+		if idx < 0 {
+			break
+		}
+		current = append(current, ranked[idx])
+	}
+	return current
+}
+
+func sourcePathFirstEligibleActivePath(current, ranked []sourcePathSendPath, requireDistinctDst bool) int {
+	for i, candidate := range ranked {
+		if sourcePathSendPathIndex(current, candidate) >= 0 {
+			continue
+		}
+		if requireDistinctDst && len(current) > 0 {
+			hasSameDst := false
+			for _, active := range current {
+				if active.dst == candidate.dst {
+					hasSameDst = true
+					break
+				}
+			}
+			if hasSameDst {
+				continue
+			}
+		}
+		return i
+	}
+	return -1
+}
+
+func sourcePathBestPromotion(current, ranked []sourcePathSendPath) (rankedIdx, activeSlot int) {
+	distinctDstAvailable := sourcePathDistinctDstCount(ranked) >= 2
+	for i, candidate := range ranked {
+		if sourcePathSendPathIndex(current, candidate) >= 0 {
+			continue
+		}
+		slot := sourcePathPromotionSlot(current, candidate, distinctDstAvailable)
+		if slot < 0 || compareSourcePathSendPath(candidate, current[slot]) >= 0 {
+			continue
+		}
+		return i, slot
+	}
+	return -1, -1
+}
+
+func sourcePathPromotionSlot(current []sourcePathSendPath, candidate sourcePathSendPath, distinctDstAvailable bool) int {
+	if len(current) < 2 {
+		return -1
+	}
+	if distinctDstAvailable {
+		for i, active := range current {
+			if active.dst == candidate.dst {
+				return i
+			}
+		}
+	}
+	if compareSourcePathSendPath(current[0], current[1]) >= 0 {
+		return 0
+	}
+	return 1
+}
+
+func sourcePathDistinctDstCount(paths []sourcePathSendPath) int {
+	var seen []epAddr
+	for _, path := range paths {
+		found := false
+		for _, dst := range seen {
+			if dst == path.dst {
+				found = true
+				break
+			}
+		}
+		if !found {
+			seen = append(seen, path.dst)
+		}
+	}
+	return len(seen)
 }
 
 func (de *endpoint) noteSourcePathObservedEndpointFailure(addr epAddr, err error) {
@@ -1318,11 +1601,16 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 	}
 
 	now := mono.Now()
+	useSourcePathDataSend := wireGuardBatchIsTransport(buffs, offset)
 	var dualEndpointAddrs []epAddr
+	var observedEndpointAddrs []epAddr
+	var dualSourcePaths []sourcePathSendPath
+	var dualSourcePathEvent sourcePathActivePolicyEvent
+	var dualSendDstCandidates []sourcePathDstCandidate
 	var udpAddr epAddr
 	var derpAddr netip.AddrPort
 	var startWGPing bool
-	if sourcePathDualEndpointStrategyEnabled() {
+	if useSourcePathDataSend && sourcePathDualEndpointStrategyEnabled() {
 		dualEndpointAddrs, startWGPing = de.dualEndpointAddrsForSendLocked(now)
 		if len(dualEndpointAddrs) > 0 {
 			udpAddr = dualEndpointAddrs[0]
@@ -1331,8 +1619,9 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 		}
 	} else {
 		udpAddr, derpAddr, startWGPing = de.addrForSendLocked(now)
-		if sourcePathDualSendEnabled() {
-			dualEndpointAddrs = de.dualSendObservedEndpointAddrsForSendLocked(udpAddr, now)
+		if useSourcePathDataSend && sourcePathDualSendEnabled() {
+			dualSendDstCandidates = de.sourcePathDualSendDstCandidatesLocked(now, udpAddr)
+			observedEndpointAddrs = de.dualSendObservedEndpointAddrsForSendLocked(udpAddr, now)
 		}
 	}
 
@@ -1340,7 +1629,7 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 		if startWGPing {
 			de.sendWireGuardOnlyPingsLocked(now)
 		}
-	} else if sourcePathDualEndpointStrategyEnabled() {
+	} else if useSourcePathDataSend && sourcePathDualEndpointStrategyEnabled() {
 		if startWGPing {
 			de.sendDiscoPingsLocked(now, true)
 			if de.wantUDPRelayPathDiscoveryLocked(now) {
@@ -1357,6 +1646,22 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 	de.lastSendAny = now
 	de.mu.Unlock()
 
+	if sourcePathDualSendEnabled() && len(dualSendDstCandidates) > 0 {
+		rankedPaths := de.c.sourcePathRankedDualSendPaths(dualSendDstCandidates, now)
+		if len(rankedPaths) >= 2 {
+			de.mu.Lock()
+			dualSourcePaths, dualSourcePathEvent = de.sourcePathApplyActivePathPolicyLocked(now, rankedPaths)
+			de.mu.Unlock()
+		}
+		de.logSourcePathActivePolicyEvent(dualSourcePathEvent)
+		if len(dualSourcePaths) >= 2 {
+			udpAddr = dualSourcePaths[0].dst
+			derpAddr = netip.AddrPort{}
+		} else if len(observedEndpointAddrs) > 0 {
+			dualEndpointAddrs = observedEndpointAddrs
+		}
+	}
+
 	if !udpAddr.ap.IsValid() && !derpAddr.IsValid() {
 		// Make a last ditch effort to see if we have a DERP route for them. If
 		// they contacted us over DERP and we don't know their UDP endpoints or
@@ -1370,7 +1675,20 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 	}
 	var err error
 	var dualSendMode, singleSendReason string
-	if len(dualEndpointAddrs) > 0 {
+	if len(dualSourcePaths) >= 2 {
+		dualSendMode = "path-pool"
+		res := de.c.sendUDPBatchDualSourcePath(dualSourcePaths, buffs, offset)
+		err = res.err
+		for i, pathErr := range res.errs {
+			if pathErr == nil || i >= len(dualSourcePaths) {
+				continue
+			}
+			path := dualSourcePaths[i]
+			if isBadEndpointErr(pathErr) {
+				de.noteBadEndpoint(path.dst)
+			}
+		}
+	} else if len(dualEndpointAddrs) > 0 {
 		dualSendMode = "observed-endpoint-fanout"
 		res := de.c.sendUDPBatchDualEndpoint(dualEndpointAddrs, buffs, offset)
 		err = res.err
@@ -1387,7 +1705,7 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 			}
 		}
 	} else if udpAddr.ap.IsValid() {
-		if source, activeBackupForced := de.c.sourcePathActiveBackupCandidate(udpAddr, now); activeBackupForced {
+		if source, activeBackupForced := de.c.sourcePathActiveBackupCandidate(udpAddr, now); useSourcePathDataSend && activeBackupForced {
 			if sourcePathDualSendEnabled() && udpAddr.isDirect() {
 				singleSendReason = "active-backup"
 			}
@@ -1399,14 +1717,14 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 			} else {
 				metricSourcePathDataSendAuxSucceeded.Add(1)
 			}
-		} else if aux, ok := de.c.sourcePathDualSendCandidate(udpAddr); ok {
+		} else if aux, ok := de.c.sourcePathDualSendCandidate(udpAddr); useSourcePathDataSend && ok {
 			dualSendMode = "aux-source"
 			res := de.c.sendUDPBatchDualSource(aux, udpAddr, buffs, offset)
 			err = res.err
 			if res.primaryErr != nil && res.auxErr != nil && isBadEndpointErr(res.primaryErr) {
 				de.noteBadEndpoint(udpAddr)
 			}
-		} else if sourcePathSingleSourceStrategyEnabled() {
+		} else if useSourcePathDataSend && sourcePathSingleSourceStrategyEnabled() {
 			if sourcePathDualSendEnabled() && udpAddr.isDirect() {
 				singleSendReason = "single-source-strategy"
 			}
@@ -1944,6 +2262,9 @@ func (de *endpoint) setEndpointsLocked(eps interface {
 			de.c.logf("magicsock: bogus netmap endpoint from %v", eps)
 			continue
 		}
+		if omitEndpointAddrPort(ipp) {
+			continue
+		}
 		if st, ok := de.endpointState[ipp]; ok {
 			st.index = int16(i)
 		} else {
@@ -1976,6 +2297,10 @@ func (de *endpoint) setEndpointsLocked(eps interface {
 // This is called once we've already verified that we got a valid
 // discovery message from de via ep.
 func (de *endpoint) addCandidateEndpoint(ep netip.AddrPort, forRxPingTxID stun.TxID) (duplicatePing bool) {
+	if omitEndpointAddrPort(ep) {
+		return false
+	}
+
 	de.mu.Lock()
 	defer de.mu.Unlock()
 
@@ -2126,6 +2451,16 @@ func (de *endpoint) handlePongConnLocked(m *disco.Pong, di *discoInfo, src epAdd
 
 	now := mono.Now()
 	latency := now.Sub(sp.at)
+
+	if !isDerp && sp.to.isDirect() && omitEndpointAddrPort(sp.to.ap) {
+		de.debugUpdates.Add(EndpointChange{
+			When: time.Now(),
+			What: "handlePongConnLocked-omitted-endpoint",
+			From: sp.to,
+		})
+		de.deleteEndpointLocked("handlePongConnLocked-omitted", sp.to.ap)
+		return true
+	}
 
 	if !isDerp && !src.vni.IsSet() {
 		// Note: we check vni.isSet() as relay [epAddr]'s are not stored in
@@ -2442,6 +2777,9 @@ func (de *endpoint) handleCallMeMaybe(m *disco.CallMeMaybe) {
 			// for these.
 			continue
 		}
+		if omitEndpointAddrPort(ep) {
+			continue
+		}
 		mak.Set(&de.isCallMeMaybeEP, ep, true)
 		if es, ok := de.endpointState[ep]; ok {
 			es.callMeMaybeTime = now
@@ -2565,6 +2903,11 @@ func (de *endpoint) resetLocked() {
 	de.sourcePathRemoteSlots = [2]epAddr{}
 	de.sourcePathRemoteSeen = [2]mono.Time{}
 	de.sourcePathPeerAware = nil
+	de.sourcePathActivePaths = [2]sourcePathSendPath{}
+	de.sourcePathActiveCount = 0
+	de.sourcePathLastReplace = 0
+	de.sourcePathLastRefresh = 0
+	de.sourcePathPromoteBudget = 0
 	if !de.sourcePathSingleSince.IsZero() {
 		metricSourcePathDualSendDegradedSingleActivePeers.Add(-1)
 		de.sourcePathSingleSince = 0
