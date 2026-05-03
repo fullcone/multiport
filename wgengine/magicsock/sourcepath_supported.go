@@ -321,11 +321,14 @@ func sourcePathDualSendRecoveryValue() time.Duration {
 }
 
 func sourcePathDualSendMaxSkewValue() time.Duration {
-	n := envknobSrcSelDualSendMaxSkewMS()
-	if n <= 0 {
-		return sourcePathDualSendMaxSkew
+	n, ok := envknob.LookupInt("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_MAX_SKEW_MS")
+	if ok {
+		if n <= 0 {
+			return 0
+		}
+		return time.Duration(n) * time.Millisecond
 	}
-	return time.Duration(n) * time.Millisecond
+	return sourcePathDualSendMaxSkew
 }
 
 func sourcePathActiveBackupEnabled() bool {

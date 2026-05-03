@@ -122,7 +122,6 @@ const (
 	// the optional hot pool per address family.
 	sourcePathDefaultAuxSockets = 2
 	sourcePathMaxAuxSockets     = 32
-	sourcePathMaxRankedPaths    = 32
 
 	sourcePathActiveReplaceCooldown = time.Minute
 	sourcePathStandbyRefreshEvery   = time.Hour
@@ -179,6 +178,9 @@ type sourcePathProbeManager struct {
 	dualSendDemotedAuxTill map[sourcePathDualSendKey]mono.Time
 	flowMap                map[sourcePathFlowKey]sourcePathFlowState
 	flowRR                 map[epAddr]uint64
+	probeDstRR             map[key.NodePublic]int
+	probeRR                map[key.NodePublic]int
+	probeSweep             map[key.NodePublic]int
 }
 
 type sourcePathActiveBackupState struct {
@@ -210,6 +212,11 @@ type sourcePathProbeTx struct {
 	source   sourceRxMeta
 	at       mono.Time
 	size     int
+}
+
+type sourcePathProbeTask struct {
+	dst    epAddr
+	source sourceRxMeta
 }
 
 type sourcePathAuxRotation struct {
@@ -351,6 +358,16 @@ func (pm *sourcePathProbeManager) forgetLocked(txid stun.TxID) {
 
 func (pm *sourcePathProbeManager) pendingLenLocked() int {
 	return len(pm.pending)
+}
+
+func (pm *sourcePathProbeManager) pendingForDiscoLocked(dstDisco key.DiscoPublic) int {
+	var n int
+	for _, pending := range pm.pending {
+		if pending.dstDisco == dstDisco {
+			n++
+		}
+	}
+	return n
 }
 
 func (pm *sourcePathProbeManager) samplesLenLocked() int {
@@ -652,7 +669,7 @@ func (c *Conn) sourcePathRankedDualSendPaths(candidates []sourcePathDstCandidate
 	if len(candidates) == 1 {
 		// One peer endpoint still needs two active source paths plus one hot
 		// standby source path for the same IP:port.
-		return c.sourcePathRankedSendPathsForDst(candidates[0], now, 3)
+		return c.sourcePathRankedSendPathsForDst(candidates[0], now, 3, true)
 	}
 
 	// With multiple peer endpoints, keep the best source path and one hot
@@ -660,36 +677,52 @@ func (c *Conn) sourcePathRankedDualSendPaths(candidates []sourcePathDstCandidate
 	// chooses the two active paths from this per-endpoint hot pool.
 	paths := make([]sourcePathSendPath, 0, len(candidates)*2)
 	for _, candidate := range candidates {
-		ranked := c.sourcePathRankedSendPathsForDst(candidate, now, 2)
+		ranked := c.sourcePathRankedSendPathsForDst(candidate, now, 2, false)
 		if len(ranked) == 0 {
 			continue
 		}
 		paths = append(paths, ranked...)
 	}
-	slices.SortFunc(paths, compareSourcePathSendPath)
-	if len(paths) > sourcePathMaxRankedPaths {
-		paths = paths[:sourcePathMaxRankedPaths]
+	if len(paths) < 2 {
+		// Last-resort compatibility fallback: if there are not enough warmed
+		// auxiliary paths to dual-send, let measured primary paths fill the
+		// active pair instead of silently disabling dual-send.
+		var fallback []sourcePathSendPath
+		for _, candidate := range candidates {
+			ranked := c.sourcePathRankedSendPathsForDst(candidate, now, 2, true)
+			for _, path := range ranked {
+				if sourcePathSendPathIndex(paths, path) < 0 && sourcePathSendPathIndex(fallback, path) < 0 {
+					fallback = append(fallback, path)
+				}
+			}
+		}
+		slices.SortFunc(fallback, compareSourcePathSendPath)
+		paths = sourcePathFillActivePaths(paths, fallback)
 	}
+	slices.SortFunc(paths, compareSourcePathSendPath)
 	if len(paths) < 2 {
 		return nil
 	}
 	return paths
 }
 
-func (c *Conn) sourcePathRankedSendPathsForDst(candidate sourcePathDstCandidate, now mono.Time, limit int) []sourcePathSendPath {
+func (c *Conn) sourcePathRankedSendPathsForDst(candidate sourcePathDstCandidate, now mono.Time, limit int, allowPrimaryFallback bool) []sourcePathSendPath {
 	dst := candidate.dst
 	if !dst.isDirect() {
 		return nil
 	}
 
 	var paths []sourcePathSendPath
+	var primaryPath sourcePathSendPath
+	var havePrimaryPath bool
 	if candidate.allowPrimarySource || candidate.hasPrimaryRTT {
-		paths = append(paths, sourcePathSendPath{
+		primaryPath = sourcePathSendPath{
 			dst:        dst,
 			source:     primarySourceRxMeta,
 			latency:    candidate.primaryRTT,
 			hasLatency: candidate.hasPrimaryRTT,
-		})
+		}
+		havePrimaryPath = true
 	}
 
 	sources := c.sourcePathProbeSources(dst.ap.Addr().Is4())
@@ -718,6 +751,10 @@ func (c *Conn) sourcePathRankedSendPathsForDst(candidate sourcePathDstCandidate,
 	}
 
 	slices.SortFunc(paths, compareSourcePathSendPath)
+	if allowPrimaryFallback && havePrimaryPath && (limit <= 0 || len(paths) < limit) {
+		paths = append(paths, primaryPath)
+		slices.SortFunc(paths, compareSourcePathSendPath)
+	}
 	if limit > 0 && len(paths) > limit {
 		paths = paths[:limit]
 	}
@@ -820,12 +857,138 @@ func (c *Conn) sendSourcePathProbeTick() {
 		dstDisco := epDisco.key
 		de.mu.Unlock()
 
-		for _, dst := range dsts {
-			for _, source := range c.sourcePathProbeSources(dst.ap.Addr().Is4()) {
-				go c.sendSourcePathDiscoPing(source, dst, dstKey, dstDisco, stun.NewTxID(), 0, discoVerboseLog)
-			}
+		capacity, rotations := c.sourcePathProbeAvailableCapacity(dstDisco, sourcePathProbeMaxBurstCount())
+		for _, rotation := range rotations {
+			c.rotateSourcePathAuxSocket(rotation.dst, rotation.source, rotation.reason, nil)
+		}
+		if capacity <= 0 {
+			continue
+		}
+
+		dst, ok := c.sourcePathNextProbeDst(dstKey, dsts)
+		if !ok {
+			continue
+		}
+		var tasks []sourcePathProbeTask
+		for _, source := range c.sourcePathProbeSources(dst.ap.Addr().Is4()) {
+			tasks = append(tasks, sourcePathProbeTask{dst: dst, source: source})
+		}
+		tasks, complete := c.sourcePathNextProbeTasks(dstKey, tasks, capacity)
+		for _, task := range tasks {
+			go c.sendSourcePathDiscoPing(task.source, task.dst, dstKey, dstDisco, stun.NewTxID(), 0, discoVerboseLog)
+		}
+		if complete && c.sourcePathNoteProbeSweepComplete(dstKey, sourcePathMinSamplesForUse) {
+			c.sourcePathAdvanceProbeDst(dstKey, dsts)
 		}
 	}
+}
+
+func (c *Conn) sourcePathProbeAvailableCapacity(dstDisco key.DiscoPublic, maxPending int) (int, []sourcePathAuxRotation) {
+	if maxPending <= 0 {
+		maxPending = sourcePathProbeMaxBurst
+	}
+	now := mono.Now()
+	c.mu.Lock()
+	expired := c.sourceProbes.pruneExpiredLocked(now)
+	rotations := c.sourceProbes.noteProbeExpirationsLocked(expired, now)
+	pending := c.sourceProbes.pendingForDiscoLocked(dstDisco)
+	c.mu.Unlock()
+	if pending >= maxPending {
+		return 0, rotations
+	}
+	return maxPending - pending, rotations
+}
+
+func (c *Conn) sourcePathNextProbeDst(peer key.NodePublic, dsts []epAddr) (epAddr, bool) {
+	if len(dsts) == 0 {
+		return epAddr{}, false
+	}
+	if len(dsts) == 1 {
+		return dsts[0], true
+	}
+
+	c.mu.Lock()
+	if c.sourceProbes.probeDstRR == nil {
+		c.sourceProbes.probeDstRR = make(map[key.NodePublic]int)
+	}
+	idx := c.sourceProbes.probeDstRR[peer] % len(dsts)
+	if idx < 0 {
+		idx = 0
+	}
+	c.mu.Unlock()
+
+	return dsts[idx], true
+}
+
+func (c *Conn) sourcePathAdvanceProbeDst(peer key.NodePublic, dsts []epAddr) {
+	if len(dsts) <= 1 {
+		return
+	}
+
+	c.mu.Lock()
+	if c.sourceProbes.probeDstRR == nil {
+		c.sourceProbes.probeDstRR = make(map[key.NodePublic]int)
+	}
+	idx := c.sourceProbes.probeDstRR[peer] % len(dsts)
+	if idx < 0 {
+		idx = 0
+	}
+	c.sourceProbes.probeDstRR[peer] = (idx + 1) % len(dsts)
+	if c.sourceProbes.probeSweep != nil {
+		delete(c.sourceProbes.probeSweep, peer)
+	}
+	c.mu.Unlock()
+}
+
+func (c *Conn) sourcePathNoteProbeSweepComplete(peer key.NodePublic, wantSweeps int) bool {
+	if wantSweeps <= 1 {
+		return true
+	}
+	c.mu.Lock()
+	if c.sourceProbes.probeSweep == nil {
+		c.sourceProbes.probeSweep = make(map[key.NodePublic]int)
+	}
+	n := c.sourceProbes.probeSweep[peer] + 1
+	if n >= wantSweeps {
+		delete(c.sourceProbes.probeSweep, peer)
+		c.mu.Unlock()
+		return true
+	}
+	c.sourceProbes.probeSweep[peer] = n
+	c.mu.Unlock()
+	return false
+}
+
+func (c *Conn) sourcePathNextProbeTasks(peer key.NodePublic, tasks []sourcePathProbeTask, maxTasks int) ([]sourcePathProbeTask, bool) {
+	if len(tasks) == 0 {
+		return nil, true
+	}
+
+	c.mu.Lock()
+	if c.sourceProbes.probeRR == nil {
+		c.sourceProbes.probeRR = make(map[key.NodePublic]int)
+	}
+	start := c.sourceProbes.probeRR[peer] % len(tasks)
+	if start < 0 {
+		start = 0
+	}
+	count := maxTasks
+	if count <= 0 || count > len(tasks)-start {
+		count = len(tasks) - start
+	}
+	complete := start+count >= len(tasks)
+	if complete {
+		delete(c.sourceProbes.probeRR, peer)
+	} else {
+		c.sourceProbes.probeRR[peer] = start + count
+	}
+	c.mu.Unlock()
+
+	out := make([]sourcePathProbeTask, 0, count)
+	for i := 0; i < count; i++ {
+		out = append(out, tasks[start+i])
+	}
+	return out, complete
 }
 
 func absDuration(d time.Duration) time.Duration {

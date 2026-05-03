@@ -43,7 +43,24 @@ func init() {
 	Register("debug-packet-filter-matches", (*Handler).serveDebugPacketFilterMatches)
 	Register("debug-packet-filter-rules", (*Handler).serveDebugPacketFilterRules)
 	Register("debug-peer-endpoint-changes", (*Handler).serveDebugPeerEndpointChanges)
+	Register("debug-srcsel-paths", (*Handler).serveDebugSrcselPaths)
 	Register("debug-optional-features", (*Handler).serveDebugOptionalFeatures)
+}
+
+func (h *Handler) serveDebugSrcselPaths(w http.ResponseWriter, r *http.Request) {
+	if !h.PermitRead {
+		http.Error(w, "status access denied", http.StatusForbidden)
+		return
+	}
+	mc := h.b.MagicConn()
+	if mc == nil {
+		http.Error(w, "magicsock not initialized", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	e := json.NewEncoder(w)
+	e.SetIndent("", "\t")
+	e.Encode(mc.SourcePathStatus())
 }
 
 func (h *Handler) serveDebugPeerEndpointChanges(w http.ResponseWriter, r *http.Request) {
