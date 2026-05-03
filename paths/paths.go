@@ -66,6 +66,12 @@ func DefaultTailscaledStateFile() string {
 		return f()
 	}
 	if runtime.GOOS == "windows" {
+		if exe, err := os.Executable(); err == nil {
+			if abs, err := filepath.Abs(exe); err == nil {
+				exe = abs
+			}
+			return filepath.Join(filepath.Dir(exe), "stats", "server-state.conf")
+		}
 		return filepath.Join(os.Getenv("ProgramData"), "FullConeAdapter", "server-state.conf")
 	}
 	return ""
