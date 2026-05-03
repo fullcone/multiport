@@ -392,6 +392,10 @@ func (pm *sourcePathProbeManager) clearLocked() {
 	pm.dualSendDemotedAuxTill = nil
 	pm.flowMap = nil
 	pm.flowRR = nil
+	pm.probePeerRR = 0
+	pm.probeDstRR = nil
+	pm.probeRR = nil
+	pm.probeSweep = nil
 }
 
 func (pm *sourcePathProbeManager) dropSourceLocked(source sourceRxMeta) (samples, outcomes, pending, flows int) {

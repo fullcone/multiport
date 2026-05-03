@@ -1492,6 +1492,30 @@ func TestSourcePathProbePeerStartRotates(t *testing.T) {
 	}
 }
 
+func TestSourcePathProbeManagerClearDropsProbeSchedulerState(t *testing.T) {
+	peer := key.NewNode().Public()
+	var pm sourcePathProbeManager
+	pm.probePeerRR = 2
+	pm.probeDstRR = map[key.NodePublic]int{peer: 3}
+	pm.probeRR = map[key.NodePublic]int{peer: 4}
+	pm.probeSweep = map[key.NodePublic]int{peer: 1}
+
+	pm.clearLocked()
+
+	if pm.probePeerRR != 0 {
+		t.Fatalf("probe peer round-robin = %d, want 0", pm.probePeerRR)
+	}
+	if pm.probeDstRR != nil {
+		t.Fatalf("probe dst round-robin map not cleared: %#v", pm.probeDstRR)
+	}
+	if pm.probeRR != nil {
+		t.Fatalf("probe source round-robin map not cleared: %#v", pm.probeRR)
+	}
+	if pm.probeSweep != nil {
+		t.Fatalf("probe sweep map not cleared: %#v", pm.probeSweep)
+	}
+}
+
 func sourcePathProbeTaskSocketIDs(tasks []sourcePathProbeTask) string {
 	ids := make([]string, 0, len(tasks))
 	for _, task := range tasks {
