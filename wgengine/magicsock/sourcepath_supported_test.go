@@ -599,6 +599,20 @@ func TestSourcePathProbeBurstDefaultScalesWithAuxSocketCount(t *testing.T) {
 	}
 }
 
+func TestSourcePathProbeGlobalBurstDefaultAndOverride(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST_GLOBAL", "")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST_GLOBAL", "") })
+
+	if got := sourcePathProbeGlobalBurstCount(); got != sourcePathProbeGlobalMaxBurst {
+		t.Fatalf("default global probe burst = %d, want %d", got, sourcePathProbeGlobalMaxBurst)
+	}
+
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST_GLOBAL", "123")
+	if got := sourcePathProbeGlobalBurstCount(); got != 123 {
+		t.Fatalf("explicit global probe burst = %d, want 123", got)
+	}
+}
+
 func TestSourcePathAuxSocketCountBoundaryDualStack(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1426,6 +1440,55 @@ func TestSourcePathProbeAvailableCapacityCountsPendingPerPeer(t *testing.T) {
 	}
 	if got, _ := c.sourcePathProbeAvailableCapacity(peerA, 3); got != 0 {
 		t.Fatalf("full peer A capacity = %d, want 0", got)
+	}
+}
+
+func TestSourcePathProbeAvailableCapacityHonorsGlobalPending(t *testing.T) {
+	var c Conn
+	peerA := key.NewDisco().Public()
+	peerB := key.NewDisco().Public()
+	now := mono.Now()
+	c.sourceProbes.pending = map[stun.TxID]sourcePathProbeTx{}
+	for i := 0; i < 7; i++ {
+		txid := stun.NewTxID()
+		txid[0] = byte(i + 1)
+		c.sourceProbes.pending[txid] = sourcePathProbeTx{dstDisco: peerB, at: now}
+	}
+
+	if got, _ := c.sourcePathProbeAvailableCapacityWithGlobal(peerA, 5, 10); got != 3 {
+		t.Fatalf("global-limited capacity = %d, want 3", got)
+	}
+	if got, _ := c.sourcePathProbeAvailableCapacityWithGlobal(peerA, 5, 7); got != 0 {
+		t.Fatalf("full global capacity = %d, want 0", got)
+	}
+}
+
+func TestSourcePathProbeGlobalAvailableCapacityCountsAllPeers(t *testing.T) {
+	var c Conn
+	peerA := key.NewDisco().Public()
+	peerB := key.NewDisco().Public()
+	now := mono.Now()
+	c.sourceProbes.pending = map[stun.TxID]sourcePathProbeTx{}
+	for i, peer := range []key.DiscoPublic{peerA, peerA, peerB} {
+		txid := stun.NewTxID()
+		txid[0] = byte(i + 1)
+		c.sourceProbes.pending[txid] = sourcePathProbeTx{dstDisco: peer, at: now}
+	}
+
+	if got, _ := c.sourcePathProbeGlobalAvailableCapacity(5); got != 2 {
+		t.Fatalf("global capacity = %d, want 2", got)
+	}
+	if got, _ := c.sourcePathProbeGlobalAvailableCapacity(3); got != 0 {
+		t.Fatalf("full global capacity = %d, want 0", got)
+	}
+}
+
+func TestSourcePathProbePeerStartRotates(t *testing.T) {
+	var c Conn
+	for i, want := range []int{0, 1, 2, 0, 1} {
+		if got := c.sourcePathProbePeerStart(3); got != want {
+			t.Fatalf("start %d = %d, want %d", i, got, want)
+		}
 	}
 }
 

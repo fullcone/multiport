@@ -50,6 +50,13 @@ const (
 	// TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST.
 	sourcePathProbeMaxBurst = 8
 
+	// sourcePathProbeGlobalMaxBurst is the default cap on simultaneously
+	// pending probes across all peers, and on new probes started in one tick.
+	// It keeps many-node clients from multiplying the per-peer burst budget
+	// without bound. Override via
+	// TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST_GLOBAL.
+	sourcePathProbeGlobalMaxBurst = 200
+
 	// sourcePathProbeHardPendingCap bounds the total number of pending
 	// probes across all peers. Unlike sourcePathProbeMaxPeers /
 	// sourcePathProbeMaxBurst this is a memory-safety hard cap, not a
@@ -178,6 +185,7 @@ type sourcePathProbeManager struct {
 	dualSendDemotedAuxTill map[sourcePathDualSendKey]mono.Time
 	flowMap                map[sourcePathFlowKey]sourcePathFlowState
 	flowRR                 map[epAddr]uint64
+	probePeerRR            int
 	probeDstRR             map[key.NodePublic]int
 	probeRR                map[key.NodePublic]int
 	probeSweep             map[key.NodePublic]int
@@ -845,7 +853,16 @@ func (c *Conn) sendSourcePathProbeTick() {
 	})
 	c.mu.Unlock()
 
-	for _, de := range endpoints {
+	globalCapacity, rotations := c.sourcePathProbeGlobalAvailableCapacity(sourcePathProbeGlobalBurstCount())
+	for _, rotation := range rotations {
+		c.rotateSourcePathAuxSocket(rotation.dst, rotation.source, rotation.reason, nil)
+	}
+	if globalCapacity <= 0 || len(endpoints) == 0 {
+		return
+	}
+	peerStart := c.sourcePathProbePeerStart(len(endpoints))
+	for i := 0; i < len(endpoints) && globalCapacity > 0; i++ {
+		de := endpoints[(peerStart+i)%len(endpoints)]
 		de.mu.Lock()
 		epDisco := de.disco.Load()
 		if epDisco == nil {
@@ -864,6 +881,9 @@ func (c *Conn) sendSourcePathProbeTick() {
 		if capacity <= 0 {
 			continue
 		}
+		if capacity > globalCapacity {
+			capacity = globalCapacity
+		}
 
 		dst, ok := c.sourcePathNextProbeDst(dstKey, dsts)
 		if !ok {
@@ -877,6 +897,7 @@ func (c *Conn) sendSourcePathProbeTick() {
 		for _, task := range tasks {
 			go c.sendSourcePathDiscoPing(task.source, task.dst, dstKey, dstDisco, stun.NewTxID(), 0, discoVerboseLog)
 		}
+		globalCapacity -= len(tasks)
 		if complete && c.sourcePathNoteProbeSweepComplete(dstKey, sourcePathMinSamplesForUse) {
 			c.sourcePathAdvanceProbeDst(dstKey, dsts)
 		}
@@ -884,6 +905,26 @@ func (c *Conn) sendSourcePathProbeTick() {
 }
 
 func (c *Conn) sourcePathProbeAvailableCapacity(dstDisco key.DiscoPublic, maxPending int) (int, []sourcePathAuxRotation) {
+	return c.sourcePathProbeAvailableCapacityWithGlobal(dstDisco, maxPending, 0)
+}
+
+func (c *Conn) sourcePathProbeGlobalAvailableCapacity(maxPending int) (int, []sourcePathAuxRotation) {
+	if maxPending <= 0 {
+		return 0, nil
+	}
+	now := mono.Now()
+	c.mu.Lock()
+	expired := c.sourceProbes.pruneExpiredLocked(now)
+	rotations := c.sourceProbes.noteProbeExpirationsLocked(expired, now)
+	pending := c.sourceProbes.pendingLenLocked()
+	c.mu.Unlock()
+	if pending >= maxPending {
+		return 0, rotations
+	}
+	return maxPending - pending, rotations
+}
+
+func (c *Conn) sourcePathProbeAvailableCapacityWithGlobal(dstDisco key.DiscoPublic, maxPending, globalMaxPending int) (int, []sourcePathAuxRotation) {
 	if maxPending <= 0 {
 		maxPending = sourcePathProbeMaxBurst
 	}
@@ -892,11 +933,35 @@ func (c *Conn) sourcePathProbeAvailableCapacity(dstDisco key.DiscoPublic, maxPen
 	expired := c.sourceProbes.pruneExpiredLocked(now)
 	rotations := c.sourceProbes.noteProbeExpirationsLocked(expired, now)
 	pending := c.sourceProbes.pendingForDiscoLocked(dstDisco)
+	globalPending := c.sourceProbes.pendingLenLocked()
 	c.mu.Unlock()
 	if pending >= maxPending {
 		return 0, rotations
 	}
-	return maxPending - pending, rotations
+	capacity := maxPending - pending
+	if globalMaxPending > 0 {
+		if globalPending >= globalMaxPending {
+			return 0, rotations
+		}
+		if globalRemaining := globalMaxPending - globalPending; capacity > globalRemaining {
+			capacity = globalRemaining
+		}
+	}
+	return capacity, rotations
+}
+
+func (c *Conn) sourcePathProbePeerStart(count int) int {
+	if count <= 1 {
+		return 0
+	}
+	c.mu.Lock()
+	start := c.sourceProbes.probePeerRR % count
+	if start < 0 {
+		start = 0
+	}
+	c.sourceProbes.probePeerRR = (start + 1) % count
+	c.mu.Unlock()
+	return start
 }
 
 func (c *Conn) sourcePathNextProbeDst(peer key.NodePublic, dsts []epAddr) (epAddr, bool) {

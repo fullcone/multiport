@@ -30,6 +30,8 @@ func sourcePathProbeMaxPeerCount() int { return sourcePathProbeMaxPeers }
 
 func sourcePathProbeMaxBurstCount() int { return sourcePathProbeMaxBurst }
 
+func sourcePathProbeGlobalBurstCount() int { return sourcePathProbeGlobalMaxBurst }
+
 func sourcePathProbeHardPendingCount() int { return sourcePathProbeHardPendingCap }
 
 func sourcePathProbeSampleLimitCount() int { return sourcePathProbeHistoryLimit }

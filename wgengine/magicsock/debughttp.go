@@ -199,6 +199,7 @@ type sourcePathDebugSnapshot struct {
 	auxSocketCount int
 	maxProbePeers  int
 	maxProbeBurst  int
+	maxProbeGlobal int
 	pendingProbes  int
 	samples        int
 	aux4           sourcePathSocketDebugSnapshot
@@ -219,6 +220,7 @@ type sourcePathSocketDebugSnapshot struct {
 type SourcePathStatus struct {
 	Generation     uint64                 `json:"generation"`
 	AuxSocketCount int                    `json:"aux_socket_count"`
+	MaxProbeGlobal int                    `json:"max_probe_burst_global"`
 	PendingProbes  int                    `json:"pending_probes"`
 	Samples        int                    `json:"samples"`
 	Peers          []SourcePathPeerStatus `json:"peers"`
@@ -254,6 +256,7 @@ func (c *Conn) SourcePathStatus() SourcePathStatus {
 	status := SourcePathStatus{
 		Generation:     uint64(socketSnapshot.generation),
 		AuxSocketCount: socketSnapshot.auxSocketCount,
+		MaxProbeGlobal: socketSnapshot.maxProbeGlobal,
 		PendingProbes:  socketSnapshot.pendingProbes,
 		Samples:        socketSnapshot.samples,
 	}
@@ -337,6 +340,7 @@ func (c *Conn) sourcePathDebugSnapshot() sourcePathDebugSnapshot {
 		auxSocketCount: sourcePathAuxSocketCount(),
 		maxProbePeers:  sourcePathProbeMaxPeerCount(),
 		maxProbeBurst:  sourcePathProbeMaxBurstCount(),
+		maxProbeGlobal: sourcePathProbeGlobalBurstCount(),
 		pendingProbes:  c.sourceProbes.pendingLenLocked(),
 		samples:        c.sourceProbes.samplesLenLocked(),
 	}
@@ -386,6 +390,7 @@ func (c *Conn) printSourcePathDebugHTML(w io.Writer) {
 	fmt.Fprintf(w, "<li>samples: %d</li>\n", s.samples)
 	fmt.Fprintf(w, "<li>probe peer budget: %d</li>\n", s.maxProbePeers)
 	fmt.Fprintf(w, "<li>probe burst budget: %d</li>\n", s.maxProbeBurst)
+	fmt.Fprintf(w, "<li>global probe burst budget: %d</li>\n", s.maxProbeGlobal)
 	sourcePathSocketDebugHTML(w, s.aux4)
 	sourcePathSocketDebugHTML(w, s.aux6)
 	for _, aux := range s.extraAux {

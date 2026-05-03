@@ -27,6 +27,7 @@ var (
 	envknobSrcSelAutoDataSource       = envknob.RegisterBool("TS_EXPERIMENTAL_SRCSEL_AUTO_DATA_SOURCE")
 	envknobSrcSelMaxPeers             = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PEERS")
 	envknobSrcSelMaxProbeBurst        = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST")
+	envknobSrcSelMaxProbeBurstGlobal  = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST_GLOBAL")
 	envknobSrcSelMaxPending           = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_PENDING")
 	envknobSrcSelMaxSamples           = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_SAMPLES")
 	envknobSrcSelMaxOutcomes          = envknob.RegisterInt("TS_EXPERIMENTAL_SRCSEL_MAX_OUTCOMES")
@@ -126,6 +127,14 @@ func sourcePathProbeMaxBurstCount() int {
 	n := envknobSrcSelMaxProbeBurst()
 	if n <= 0 {
 		return max(sourcePathProbeMaxBurst, sourcePathAuxSocketCount()*2)
+	}
+	return n
+}
+
+func sourcePathProbeGlobalBurstCount() int {
+	n := envknobSrcSelMaxProbeBurstGlobal()
+	if n <= 0 {
+		return sourcePathProbeGlobalMaxBurst
 	}
 	return n
 }
