@@ -134,18 +134,14 @@ func NewClient(opts ClientOpts) (*Client, error) {
 	addr, _ := netip.ParseAddr(u.Hostname())
 	isPrivateHost := addr.IsPrivate() || addr.IsLoopback() || u.Hostname() == "localhost"
 	if port := u.Port(); port != "" {
-		// If there is an explicit port specified, entirely rely on the scheme,
-		// unless it's http with a private host in which case we never try using HTTPS.
+		// If there is an explicit port specified, entirely rely on the scheme.
 		if u.Scheme == "https" {
 			httpPort = ""
 			httpsPort = port
 		} else if u.Scheme == "http" {
 			httpPort = port
-			httpsPort = "443"
-			if isPrivateHost {
-				logf("setting empty HTTPS port with http scheme and private host %s", u.Hostname())
-				httpsPort = ""
-			}
+			logf("setting empty HTTPS port with explicit http scheme and port %s", u.Host)
+			httpsPort = ""
 		}
 	} else if u.Scheme == "http" && isPrivateHost {
 		// Whenever the scheme is http and the hostname is an IP address, do not set the HTTPS port,

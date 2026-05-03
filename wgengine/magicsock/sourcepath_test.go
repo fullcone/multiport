@@ -1077,6 +1077,39 @@ func TestSourcePathPeerAwareEndpointCacheEvictsButKeepsPeerAware(t *testing.T) {
 	}
 }
 
+func TestSourcePathPeerAwareEndpointCorrectsStalePeerMap(t *testing.T) {
+	src := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:41642")}
+	oldKey := key.NewNode().Public()
+	newKey := key.NewNode().Public()
+	var c Conn
+	c.logf = logger.Discard
+	c.peerMap = newPeerMap()
+	oldEP := &endpoint{c: &c, publicKey: oldKey}
+	newEP := &endpoint{c: &c, publicKey: newKey}
+	c.peerMap.byNodeKey[oldKey] = newPeerInfo(oldEP)
+	c.peerMap.byNodeKey[newKey] = newPeerInfo(newEP)
+	c.peerMap.setNodeKeyForEpAddr(src, oldKey)
+
+	localAcceptedBefore := metricSourcePathLocalPath0WireGuardAccepted.Value()
+	remoteAcceptedBefore := metricSourcePathRemotePath0WireGuardAccepted.Value()
+	wrapper := oldEP.sourcePathPeerAwareEndpoint(src, primarySourceRxMeta)
+	wrapper.(*sourcePathPeerAwareEndpoint).FromPeer(newKey.Raw32())
+
+	gotEP, ok := c.peerMap.endpointForEpAddr(src)
+	if !ok {
+		t.Fatal("corrected epAddr missing from peerMap")
+	}
+	if gotEP != newEP {
+		t.Fatalf("corrected epAddr endpoint = %p, want new endpoint %p", gotEP, newEP)
+	}
+	if got := metricSourcePathLocalPath0WireGuardAccepted.Value() - localAcceptedBefore; got != 1 {
+		t.Fatalf("local path0 accepted metric delta = %d, want 1", got)
+	}
+	if got := metricSourcePathRemotePath0WireGuardAccepted.Value() - remoteAcceptedBefore; got != 1 {
+		t.Fatalf("remote path0 accepted metric delta = %d, want 1", got)
+	}
+}
+
 func TestSourcePathBestCandidateRequiresCurrentProbeSources(t *testing.T) {
 	var c Conn
 	now := mono.Now()

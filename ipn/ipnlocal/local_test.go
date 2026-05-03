@@ -34,6 +34,7 @@ import (
 	"tailscale.com/control/controlclient"
 	"tailscale.com/drive"
 	"tailscale.com/drive/driveimpl"
+	"tailscale.com/envknob"
 	"tailscale.com/feature"
 	_ "tailscale.com/feature/condregister/portmapper"
 	"tailscale.com/health"
@@ -493,6 +494,48 @@ func newTestLocalBackendWithSys(t testing.TB, sys *tsd.System) *LocalBackend {
 	}
 	t.Cleanup(lb.Shutdown)
 	return lb
+}
+
+func TestSrcSelPinWindowsUnattendedProfile(t *testing.T) {
+	envknob.Setenv("TS_DEBUG_FAKE_GOOS", "windows")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PIN_WINDOWS_UNATTENDED_PROFILE", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_DEBUG_FAKE_GOOS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_PIN_WINDOWS_UNATTENDED_PROFILE", "")
+	})
+
+	lb := newTestLocalBackend(t)
+	lb.pm.SetCurrentUserID("S-1-5-21-1-0-0-1001")
+	prefs := ipn.NewPrefs()
+	prefs.WantRunning = true
+	prefs.ForceDaemon = true
+	prefs.Persist = &persist.Persist{
+		NodeID: tailcfg.StableNodeID("node1"),
+		UserProfile: tailcfg.UserProfile{
+			ID:        1,
+			LoginName: "srcsel@example.com",
+		},
+	}
+	if err := lb.pm.SetPrefs(prefs.View(), ipn.NetworkProfile{}); err != nil {
+		t.Fatal(err)
+	}
+	wantProfileID := lb.pm.CurrentProfile().ID()
+	if wantProfileID == "" {
+		t.Fatal("test setup did not create a persisted profile")
+	}
+
+	lb.SetCurrentUser(&ipnauth.TestActor{
+		UID:  "S-1-5-21-1-0-0-2002",
+		Name: "OtherUser",
+		CID:  ipnauth.ClientIDFrom("cli"),
+	})
+
+	if gotProfileID := lb.pm.CurrentProfile().ID(); gotProfileID != wantProfileID {
+		t.Fatalf("CurrentProfile.ID = %q; want pinned unattended profile %q", gotProfileID, wantProfileID)
+	}
+	if !lb.pm.CurrentPrefs().ForceDaemon() {
+		t.Fatal("ForceDaemon was cleared after foreground LocalAPI user connected")
+	}
 }
 
 // Issue 1573: don't generate a machine key if we don't want to be running.

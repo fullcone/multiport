@@ -1586,6 +1586,7 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 	}
 
 	now := mono.Now()
+	useSourcePathDataSend := wireGuardBatchIsTransport(buffs, offset)
 	var dualEndpointAddrs []epAddr
 	var observedEndpointAddrs []epAddr
 	var dualSourcePaths []sourcePathSendPath
@@ -1594,7 +1595,7 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 	var udpAddr epAddr
 	var derpAddr netip.AddrPort
 	var startWGPing bool
-	if sourcePathDualEndpointStrategyEnabled() {
+	if useSourcePathDataSend && sourcePathDualEndpointStrategyEnabled() {
 		dualEndpointAddrs, startWGPing = de.dualEndpointAddrsForSendLocked(now)
 		if len(dualEndpointAddrs) > 0 {
 			udpAddr = dualEndpointAddrs[0]
@@ -1603,7 +1604,7 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 		}
 	} else {
 		udpAddr, derpAddr, startWGPing = de.addrForSendLocked(now)
-		if sourcePathDualSendEnabled() {
+		if useSourcePathDataSend && sourcePathDualSendEnabled() {
 			dualSendDstCandidates = de.sourcePathDualSendDstCandidatesLocked(now, udpAddr)
 			observedEndpointAddrs = de.dualSendObservedEndpointAddrsForSendLocked(udpAddr, now)
 		}
@@ -1613,7 +1614,7 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 		if startWGPing {
 			de.sendWireGuardOnlyPingsLocked(now)
 		}
-	} else if sourcePathDualEndpointStrategyEnabled() {
+	} else if useSourcePathDataSend && sourcePathDualEndpointStrategyEnabled() {
 		if startWGPing {
 			de.sendDiscoPingsLocked(now, true)
 			if de.wantUDPRelayPathDiscoveryLocked(now) {
@@ -1689,7 +1690,7 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 			}
 		}
 	} else if udpAddr.ap.IsValid() {
-		if source, activeBackupForced := de.c.sourcePathActiveBackupCandidate(udpAddr, now); activeBackupForced {
+		if source, activeBackupForced := de.c.sourcePathActiveBackupCandidate(udpAddr, now); useSourcePathDataSend && activeBackupForced {
 			if sourcePathDualSendEnabled() && udpAddr.isDirect() {
 				singleSendReason = "active-backup"
 			}
@@ -1701,14 +1702,14 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 			} else {
 				metricSourcePathDataSendAuxSucceeded.Add(1)
 			}
-		} else if aux, ok := de.c.sourcePathDualSendCandidate(udpAddr); ok {
+		} else if aux, ok := de.c.sourcePathDualSendCandidate(udpAddr); useSourcePathDataSend && ok {
 			dualSendMode = "aux-source"
 			res := de.c.sendUDPBatchDualSource(aux, udpAddr, buffs, offset)
 			err = res.err
 			if res.primaryErr != nil && res.auxErr != nil && isBadEndpointErr(res.primaryErr) {
 				de.noteBadEndpoint(udpAddr)
 			}
-		} else if sourcePathSingleSourceStrategyEnabled() {
+		} else if useSourcePathDataSend && sourcePathSingleSourceStrategyEnabled() {
 			if sourcePathDualSendEnabled() && udpAddr.isDirect() {
 				singleSendReason = "single-source-strategy"
 			}

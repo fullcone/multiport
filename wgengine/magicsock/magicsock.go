@@ -1493,17 +1493,31 @@ func (c *Conn) Send(buffs [][]byte, ep conn.Endpoint, offset int) (err error) {
 	case *endpoint:
 		return ep.send(buffs, offset)
 	case *sourcePathPeerAwareEndpoint:
+		if !wireGuardBatchIsTransport(buffs, offset) && ep.src.isDirect() {
+			return c.sendWireGuardBatchDirectTo(buffs, ep.src, offset)
+		}
 		return ep.endpoint.send(buffs, offset)
 	case *lazyEndpoint:
 		// A [*lazyEndpoint] may end up on this TX codepath when wireguard-go is
 		// deemed "under handshake load" and ends up transmitting a cookie reply
 		// using the received [conn.Endpoint] in [device.SendHandshakeCookie].
-		if ep.src.ap.Addr().Is6() {
-			return c.pconn6.WriteWireGuardBatchTo(buffs, ep.src, offset)
-		}
-		return c.pconn4.WriteWireGuardBatchTo(buffs, ep.src, offset)
+		return c.sendWireGuardBatchDirectTo(buffs, ep.src, offset)
 	}
 	return nil
+}
+
+func wireGuardBatchIsTransport(buffs [][]byte, offset int) bool {
+	if len(buffs) == 0 || offset < 0 || len(buffs[0])-offset < 4 {
+		return false
+	}
+	return binary.LittleEndian.Uint32(buffs[0][offset:]) == device.MessageTransportType
+}
+
+func (c *Conn) sendWireGuardBatchDirectTo(buffs [][]byte, dst epAddr, offset int) error {
+	if dst.ap.Addr().Is6() {
+		return c.pconn6.WriteWireGuardBatchTo(buffs, dst, offset)
+	}
+	return c.pconn4.WriteWireGuardBatchTo(buffs, dst, offset)
 }
 
 var errConnClosed = errors.New("Conn closed")
@@ -2315,6 +2329,23 @@ func (ep *endpoint) sourcePathPeerAwareEndpoint(src epAddr, rxMeta sourceRxMeta)
 func (ep *sourcePathPeerAwareEndpoint) FromPeer(peerPublicKey [32]byte) {
 	pubKey := key.NodePublicFromRaw32(mem.B(peerPublicKey[:]))
 	if pubKey.Compare(ep.publicKey) != 0 {
+		c := ep.c
+		if c == nil {
+			return
+		}
+		c.mu.Lock()
+		actualEP, ok := c.peerMap.endpointForNodeKey(pubKey)
+		if ok {
+			c.peerMap.setNodeKeyForEpAddr(ep.src, pubKey)
+		}
+		c.mu.Unlock()
+		if !ok {
+			return
+		}
+		noteSourcePathLocalWireGuardAccepted(ep.rxMeta)
+		noteSourcePathRemoteWireGuardAccepted(actualEP, ep.src)
+		c.logf("magicsock: sourcePathPeerAwareEndpoint.FromPeer(%v) corrected stale epAddr(%v) mapping from node(%v) to node(%v)",
+			pubKey.ShortString(), ep.src, ep.publicKey.ShortString(), actualEP.nodeAddr)
 		return
 	}
 	noteSourcePathLocalWireGuardAccepted(ep.rxMeta)
