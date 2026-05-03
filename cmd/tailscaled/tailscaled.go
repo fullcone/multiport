@@ -104,7 +104,7 @@ func defaultPort() uint16 {
 		}
 	}
 	if envknob.GOOS() == "windows" {
-		return 41641
+		return 41642
 	}
 	return 0
 }
