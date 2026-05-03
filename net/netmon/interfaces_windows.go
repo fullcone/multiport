@@ -121,6 +121,7 @@ func notTailscaleInterface(iface *winipcfg.IPAdapterAddresses) bool {
 	}
 	desc := iface.Description()
 	return !(strings.Contains(desc, tsconst.WintunInterfaceDesc) ||
+		strings.Contains(desc, tsconst.WintunInterfaceDescLegacy) ||
 		strings.Contains(desc, tsconst.WintunInterfaceDesc0_14))
 }
 

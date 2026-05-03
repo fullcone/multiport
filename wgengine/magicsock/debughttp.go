@@ -199,6 +199,7 @@ type sourcePathDebugSnapshot struct {
 	auxSocketCount int
 	maxProbePeers  int
 	maxProbeBurst  int
+	maxProbeGlobal int
 	pendingProbes  int
 	samples        int
 	aux4           sourcePathSocketDebugSnapshot
@@ -214,6 +215,123 @@ type sourcePathSocketDebugSnapshot struct {
 	localAddr  string
 }
 
+// SourcePathStatus is a LocalAPI/debug snapshot of source-selection state.
+// It is not a stable API.
+type SourcePathStatus struct {
+	Generation     uint64                 `json:"generation"`
+	AuxSocketCount int                    `json:"aux_socket_count"`
+	MaxProbeGlobal int                    `json:"max_probe_burst_global"`
+	PendingProbes  int                    `json:"pending_probes"`
+	Samples        int                    `json:"samples"`
+	Peers          []SourcePathPeerStatus `json:"peers"`
+}
+
+// SourcePathPeerStatus is a per-peer source-selection debug snapshot.
+type SourcePathPeerStatus struct {
+	NodeID         tailcfg.NodeID         `json:"node_id"`
+	NodeAddr       string                 `json:"node_addr,omitempty"`
+	PublicKey      string                 `json:"public_key"`
+	BestAddr       string                 `json:"best_addr,omitempty"`
+	CandidateCount int                    `json:"candidate_count"`
+	Active         []SourcePathPathStatus `json:"active"`
+	Standby        []SourcePathPathStatus `json:"standby"`
+}
+
+// SourcePathPathStatus is one remote endpoint + local source socket path.
+type SourcePathPathStatus struct {
+	Remote        string  `json:"remote"`
+	Source        string  `json:"source"`
+	SourceID      uint32  `json:"source_id"`
+	Generation    uint64  `json:"generation"`
+	HasLatency    bool    `json:"has_latency"`
+	LatencyMS     float64 `json:"latency_ms,omitempty"`
+	LastSampleAgo string  `json:"last_sample_ago,omitempty"`
+}
+
+// SourcePathStatus returns source-selection active/standby path state. It is
+// intentionally best-effort debug state and may omit peers with no path pool.
+func (c *Conn) SourcePathStatus() SourcePathStatus {
+	now := mono.Now()
+	socketSnapshot := c.sourcePathDebugSnapshot()
+	status := SourcePathStatus{
+		Generation:     uint64(socketSnapshot.generation),
+		AuxSocketCount: socketSnapshot.auxSocketCount,
+		MaxProbeGlobal: socketSnapshot.maxProbeGlobal,
+		PendingProbes:  socketSnapshot.pendingProbes,
+		Samples:        socketSnapshot.samples,
+	}
+
+	c.mu.Lock()
+	endpoints := make([]*endpoint, 0, c.peerMap.nodeCount())
+	c.peerMap.forEachEndpoint(func(ep *endpoint) {
+		endpoints = append(endpoints, ep)
+	})
+	c.mu.Unlock()
+
+	for _, ep := range endpoints {
+		ep.mu.Lock()
+		bestAddr := ep.bestAddr.epAddr
+		candidates := ep.sourcePathDualSendDstCandidatesLocked(now, bestAddr)
+		active := make([]sourcePathSendPath, 0, ep.sourcePathActiveCount)
+		for i := 0; i < ep.sourcePathActiveCount && i < len(ep.sourcePathActivePaths); i++ {
+			active = append(active, ep.sourcePathActivePaths[i])
+		}
+		peer := SourcePathPeerStatus{
+			NodeID:         ep.nodeID,
+			PublicKey:      ep.publicKey.ShortString(),
+			CandidateCount: len(candidates),
+		}
+		if ep.nodeAddr.IsValid() {
+			peer.NodeAddr = ep.nodeAddr.String()
+		}
+		if bestAddr.ap.IsValid() {
+			peer.BestAddr = bestAddr.ap.String()
+		}
+		ep.mu.Unlock()
+
+		ranked := c.sourcePathRankedDualSendPaths(candidates, now)
+		peer.Active = sourcePathStatusPaths(active, now)
+		peer.Standby = sourcePathStandbyStatusPaths(ranked, active, now)
+		if len(peer.Active) == 0 && len(peer.Standby) == 0 && peer.CandidateCount == 0 {
+			continue
+		}
+		status.Peers = append(status.Peers, peer)
+	}
+	return status
+}
+
+func sourcePathStandbyStatusPaths(ranked, active []sourcePathSendPath, now mono.Time) []SourcePathPathStatus {
+	var standby []sourcePathSendPath
+	for _, path := range ranked {
+		if sourcePathSendPathIndex(active, path) >= 0 {
+			continue
+		}
+		standby = append(standby, path)
+	}
+	return sourcePathStatusPaths(standby, now)
+}
+
+func sourcePathStatusPaths(paths []sourcePathSendPath, now mono.Time) []SourcePathPathStatus {
+	out := make([]SourcePathPathStatus, 0, len(paths))
+	for _, path := range paths {
+		item := SourcePathPathStatus{
+			Remote:     path.dst.ap.String(),
+			Source:     sourceSocketIDDebugString(path.source.socketID),
+			SourceID:   uint32(path.source.socketID),
+			Generation: uint64(path.source.generation),
+			HasLatency: path.hasLatency,
+		}
+		if path.hasLatency {
+			item.LatencyMS = float64(path.latency) / float64(time.Millisecond)
+		}
+		if !path.lastAt.IsZero() {
+			item.LastSampleAgo = now.Sub(path.lastAt).Round(time.Millisecond).String()
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
 func (c *Conn) sourcePathDebugSnapshot() sourcePathDebugSnapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -222,6 +340,7 @@ func (c *Conn) sourcePathDebugSnapshot() sourcePathDebugSnapshot {
 		auxSocketCount: sourcePathAuxSocketCount(),
 		maxProbePeers:  sourcePathProbeMaxPeerCount(),
 		maxProbeBurst:  sourcePathProbeMaxBurstCount(),
+		maxProbeGlobal: sourcePathProbeGlobalBurstCount(),
 		pendingProbes:  c.sourceProbes.pendingLenLocked(),
 		samples:        c.sourceProbes.samplesLenLocked(),
 	}
@@ -271,6 +390,7 @@ func (c *Conn) printSourcePathDebugHTML(w io.Writer) {
 	fmt.Fprintf(w, "<li>samples: %d</li>\n", s.samples)
 	fmt.Fprintf(w, "<li>probe peer budget: %d</li>\n", s.maxProbePeers)
 	fmt.Fprintf(w, "<li>probe burst budget: %d</li>\n", s.maxProbeBurst)
+	fmt.Fprintf(w, "<li>global probe burst budget: %d</li>\n", s.maxProbeGlobal)
 	sourcePathSocketDebugHTML(w, s.aux4)
 	sourcePathSocketDebugHTML(w, s.aux6)
 	for _, aux := range s.extraAux {

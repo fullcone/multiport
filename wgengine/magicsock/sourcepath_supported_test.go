@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -569,6 +570,15 @@ func TestSourcePathProbeIntervalFloor(t *testing.T) {
 	}
 }
 
+func TestSourcePathDualSendMaxSkewCanBeDisabled(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_MAX_SKEW_MS", "0")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND_MAX_SKEW_MS", "") })
+
+	if got := sourcePathDualSendMaxSkewValue(); got != 0 {
+		t.Fatalf("dual-send max skew = %v, want disabled", got)
+	}
+}
+
 func TestSourcePathProbeBurstDefaultScalesWithAuxSocketCount(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", strconv.Itoa(sourcePathMaxAuxSockets))
@@ -586,6 +596,20 @@ func TestSourcePathProbeBurstDefaultScalesWithAuxSocketCount(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST", "7")
 	if got := sourcePathProbeMaxBurstCount(); got != 7 {
 		t.Fatalf("explicit probe burst = %d, want 7", got)
+	}
+}
+
+func TestSourcePathProbeGlobalBurstDefaultAndOverride(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST_GLOBAL", "")
+	t.Cleanup(func() { envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST_GLOBAL", "") })
+
+	if got := sourcePathProbeGlobalBurstCount(); got != sourcePathProbeGlobalMaxBurst {
+		t.Fatalf("default global probe burst = %d, want %d", got, sourcePathProbeGlobalMaxBurst)
+	}
+
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_MAX_PROBE_BURST_GLOBAL", "123")
+	if got := sourcePathProbeGlobalBurstCount(); got != 123 {
+		t.Fatalf("explicit global probe burst = %d, want 123", got)
 	}
 }
 
@@ -868,6 +892,104 @@ func TestSourcePathDualEndpointStrategySendsTwoLowestLatencyEndpoints(t *testing
 	assertNoUDPConnPayload(t, dstSlow)
 }
 
+func TestSourcePathProbeDstsPrioritizesActiveAndBestEndpoints(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	})
+
+	now := mono.Now()
+	state := func(latency time.Duration) *endpointState {
+		st := &endpointState{}
+		st.addPongReplyLocked(pongReply{latency: latency, pongAt: now})
+		return st
+	}
+	addr := func(port uint16) epAddr {
+		return epAddr{ap: netip.AddrPortFrom(netip.MustParseAddr("192.0.2.1"), port)}
+	}
+
+	fast := addr(10001)
+	mid := addr(10002)
+	slow := addr(10003)
+	activeSlow := addr(10004)
+	activeSlower := addr(10005)
+	de := &endpoint{
+		endpointState: map[netip.AddrPort]*endpointState{
+			fast.ap:         state(10 * time.Millisecond),
+			mid.ap:          state(20 * time.Millisecond),
+			slow.ap:         state(30 * time.Millisecond),
+			activeSlow.ap:   state(40 * time.Millisecond),
+			activeSlower.ap: state(50 * time.Millisecond),
+		},
+		sourcePathActivePaths: [2]sourcePathSendPath{
+			{dst: activeSlower, source: primarySourceRxMeta, latency: 50 * time.Millisecond, hasLatency: true},
+			{dst: activeSlow, source: primarySourceRxMeta, latency: 40 * time.Millisecond, hasLatency: true},
+		},
+		sourcePathActiveCount: 2,
+	}
+
+	de.mu.Lock()
+	got := de.sourcePathProbeDstsLocked()
+	de.mu.Unlock()
+	want := []epAddr{activeSlower, activeSlow, fast, mid, slow}
+	if len(got) != len(want) {
+		t.Fatalf("probe dsts = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("probe dsts = %+v, want active endpoints first then fastest candidates %+v", got, want)
+		}
+	}
+}
+
+func TestSourcePathNextProbeDstAdvancesAfterEnoughSourceSweeps(t *testing.T) {
+	var c Conn
+	peer := key.NewNode()
+	dst := func(port uint16) epAddr {
+		return epAddr{ap: netip.AddrPortFrom(netip.MustParseAddr("192.0.2.1"), port)}
+	}
+	dsts := []epAddr{dst(10001), dst(10002), dst(10003)}
+	tasks := make([]sourcePathProbeTask, 2)
+	for i := range tasks {
+		tasks[i].source = sourceRxMeta{socketID: SourceSocketID(i + 1)}
+	}
+
+	for i, step := range []struct {
+		wantDst     epAddr
+		wantTaskIDs string
+		wantAdvance bool
+	}{
+		{dsts[0], "1,2", false},
+		{dsts[0], "1,2", false},
+		{dsts[0], "1,2", true},
+		{dsts[1], "1,2", false},
+	} {
+		got, ok := c.sourcePathNextProbeDst(peer.Public(), dsts)
+		if !ok {
+			t.Fatalf("iteration %d: sourcePathNextProbeDst returned !ok", i)
+		}
+		if got != step.wantDst {
+			t.Fatalf("iteration %d: got dst %v, want %v", i, got, step.wantDst)
+		}
+		gotTasks, complete := c.sourcePathNextProbeTasks(peer.Public(), tasks, 3)
+		if gotIDs := sourcePathProbeTaskSocketIDs(gotTasks); gotIDs != step.wantTaskIDs {
+			t.Fatalf("iteration %d: got task IDs %s, want %s", i, gotIDs, step.wantTaskIDs)
+		}
+		if !complete {
+			t.Fatalf("iteration %d: source sweep did not complete", i)
+		}
+		advance := c.sourcePathNoteProbeSweepComplete(peer.Public(), sourcePathMinSamplesForUse)
+		if advance != step.wantAdvance {
+			t.Fatalf("iteration %d: advance = %v, want %v", i, advance, step.wantAdvance)
+		}
+		if advance {
+			c.sourcePathAdvanceProbeDst(peer.Public(), dsts)
+		}
+	}
+}
+
 func TestSourcePathDualSendUsesObservedRemoteEndpoints(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
@@ -1136,7 +1258,7 @@ func TestSourcePathRankedDualSendPathsRequireWarmedSamples(t *testing.T) {
 	}
 }
 
-func TestSourcePathRankedDualSendPathsCapsWarmedPathPool(t *testing.T) {
+func TestSourcePathRankedDualSendPathsKeepsWarmedPathPool(t *testing.T) {
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
 	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
@@ -1161,7 +1283,8 @@ func TestSourcePathRankedDualSendPathsCapsWarmedPathPool(t *testing.T) {
 	aux := sources[0]
 
 	now := mono.Now()
-	candidates := make([]sourcePathDstCandidate, sourcePathMaxRankedPaths+8)
+	const candidateCount = 40
+	candidates := make([]sourcePathDstCandidate, candidateCount)
 	c.mu.Lock()
 	for i := range candidates {
 		dst := epAddr{ap: netip.AddrPortFrom(netip.MustParseAddr("198.51.100.20"), uint16(40000+i))}
@@ -1182,17 +1305,249 @@ func TestSourcePathRankedDualSendPathsCapsWarmedPathPool(t *testing.T) {
 	c.mu.Unlock()
 
 	ranked := c.sourcePathRankedDualSendPaths(candidates, now)
-	if len(ranked) != sourcePathMaxRankedPaths {
-		t.Fatalf("ranked path count = %d, want capped count %d", len(ranked), sourcePathMaxRankedPaths)
+	if len(ranked) != candidateCount {
+		t.Fatalf("ranked path count = %d, want one warmed auxiliary path per candidate", len(ranked))
 	}
+	perDst := map[epAddr]int{}
 	for _, path := range ranked {
-		if path.source != aux {
-			t.Fatalf("ranked path source = %+v, want fastest warmed aux paths only before slow primaries", path.source)
+		perDst[path.dst]++
+		if path.source.isPrimary() {
+			t.Fatalf("primary path entered warmed multi-endpoint pool: %+v", path)
 		}
-		if !path.hasLatency {
-			t.Fatalf("ranked path has no measured latency: %+v", path)
+		if path.source == aux && !path.hasLatency {
+			t.Fatalf("ranked aux path has no measured latency: %+v", path)
 		}
 	}
+	for _, candidate := range candidates {
+		if got := perDst[candidate.dst]; got != 1 {
+			t.Fatalf("ranked path count for %v = %d, want one warmed aux", candidate.dst, got)
+		}
+	}
+}
+
+func TestSourcePathRankedDualSendPathsPrimaryFallbackOnlyWhenNeeded(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 1
+	c.sourcePath.mu.Lock()
+	c.ensureSourcePathAuxSocketCountLocked(1)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+	c.sourcePath.mu.Unlock()
+
+	sources := c.sourcePathProbeSources(true)
+	if len(sources) != 1 {
+		t.Fatalf("IPv4 probe sources = %+v, want one aux candidate", sources)
+	}
+	aux := sources[0]
+
+	now := mono.Now()
+	warmDst := epAddr{ap: netip.MustParseAddrPort("198.51.100.10:41641")}
+	primaryOnlyDst := epAddr{ap: netip.MustParseAddrPort("198.51.100.11:41641")}
+	candidates := []sourcePathDstCandidate{
+		{dst: warmDst, primaryRTT: 25 * time.Millisecond, hasPrimaryRTT: true, allowPrimarySource: true},
+		{dst: primaryOnlyDst, primaryRTT: 30 * time.Millisecond, hasPrimaryRTT: true, allowPrimarySource: true},
+	}
+	c.mu.Lock()
+	for i := 0; i < sourcePathMinSamplesForUse; i++ {
+		c.sourceProbes.samples = append(c.sourceProbes.samples, sourcePathProbeSample{
+			dst:     warmDst,
+			source:  aux,
+			latency: 7 * time.Millisecond,
+			at:      now.Add(-time.Duration(i) * time.Millisecond),
+		})
+	}
+	c.mu.Unlock()
+
+	ranked := c.sourcePathRankedDualSendPaths(candidates, now)
+	if len(ranked) != 2 {
+		t.Fatalf("ranked paths = %+v, want aux plus primary fallback", ranked)
+	}
+	if ranked[0].source.isPrimary() {
+		t.Fatalf("best warmed path = %+v, want aux before primary fallback", ranked[0])
+	}
+	if !ranked[1].source.isPrimary() || ranked[1].dst != primaryOnlyDst {
+		t.Fatalf("fallback path = %+v, want primary-only candidate", ranked[1])
+	}
+}
+
+func TestSourcePathNextProbeTasksRotatesUnderBurstLimit(t *testing.T) {
+	var c Conn
+	var peer key.NodePublic
+	tasks := make([]sourcePathProbeTask, 7)
+	for i := range tasks {
+		tasks[i].source = sourceRxMeta{socketID: SourceSocketID(i + 1)}
+	}
+
+	got, complete := c.sourcePathNextProbeTasks(peer, tasks, 3)
+	if gotIDs := sourcePathProbeTaskSocketIDs(got); gotIDs != "1,2,3" {
+		t.Fatalf("first scheduled tasks = %s, want 1,2,3", gotIDs)
+	}
+	if complete {
+		t.Fatalf("first scheduled tasks completed sweep")
+	}
+	got, complete = c.sourcePathNextProbeTasks(peer, tasks, 3)
+	if gotIDs := sourcePathProbeTaskSocketIDs(got); gotIDs != "4,5,6" {
+		t.Fatalf("second scheduled tasks = %s, want 4,5,6", gotIDs)
+	}
+	if complete {
+		t.Fatalf("second scheduled tasks completed sweep")
+	}
+	got, complete = c.sourcePathNextProbeTasks(peer, tasks, 3)
+	if gotIDs := sourcePathProbeTaskSocketIDs(got); gotIDs != "7" {
+		t.Fatalf("final scheduled tasks = %s, want 7", gotIDs)
+	}
+	if !complete {
+		t.Fatalf("final scheduled tasks did not complete sweep")
+	}
+	got, complete = c.sourcePathNextProbeTasks(peer, tasks, 3)
+	if gotIDs := sourcePathProbeTaskSocketIDs(got); gotIDs != "1,2,3" {
+		t.Fatalf("new sweep scheduled tasks = %s, want 1,2,3", gotIDs)
+	}
+	if complete {
+		t.Fatalf("new sweep should not complete after first burst")
+	}
+}
+
+func TestSourcePathProbeAvailableCapacityCountsPendingPerPeer(t *testing.T) {
+	var c Conn
+	peerA := key.NewDisco().Public()
+	peerB := key.NewDisco().Public()
+	now := mono.Now()
+	c.sourceProbes.pending = map[stun.TxID]sourcePathProbeTx{}
+	for i := 0; i < 3; i++ {
+		txid := stun.NewTxID()
+		txid[0] = byte(i + 1)
+		c.sourceProbes.pending[txid] = sourcePathProbeTx{dstDisco: peerA, at: now}
+	}
+	txid := stun.NewTxID()
+	txid[0] = 99
+	c.sourceProbes.pending[txid] = sourcePathProbeTx{dstDisco: peerB, at: now}
+
+	if got, _ := c.sourcePathProbeAvailableCapacity(peerA, 5); got != 2 {
+		t.Fatalf("peer A capacity = %d, want 2", got)
+	}
+	if got, _ := c.sourcePathProbeAvailableCapacity(peerB, 5); got != 4 {
+		t.Fatalf("peer B capacity = %d, want 4", got)
+	}
+	if got, _ := c.sourcePathProbeAvailableCapacity(peerA, 3); got != 0 {
+		t.Fatalf("full peer A capacity = %d, want 0", got)
+	}
+}
+
+func TestSourcePathProbeAvailableCapacityHonorsGlobalPending(t *testing.T) {
+	var c Conn
+	peerA := key.NewDisco().Public()
+	peerB := key.NewDisco().Public()
+	now := mono.Now()
+	c.sourceProbes.pending = map[stun.TxID]sourcePathProbeTx{}
+	for i := 0; i < 7; i++ {
+		txid := stun.NewTxID()
+		txid[0] = byte(i + 1)
+		c.sourceProbes.pending[txid] = sourcePathProbeTx{dstDisco: peerB, at: now}
+	}
+
+	if got, _ := c.sourcePathProbeAvailableCapacityWithGlobal(peerA, 5, 10); got != 3 {
+		t.Fatalf("global-limited capacity = %d, want 3", got)
+	}
+	if got, _ := c.sourcePathProbeAvailableCapacityWithGlobal(peerA, 5, 7); got != 0 {
+		t.Fatalf("full global capacity = %d, want 0", got)
+	}
+}
+
+func TestSourcePathProbeGlobalAvailableCapacityCountsAllPeers(t *testing.T) {
+	var c Conn
+	peerA := key.NewDisco().Public()
+	peerB := key.NewDisco().Public()
+	now := mono.Now()
+	c.sourceProbes.pending = map[stun.TxID]sourcePathProbeTx{}
+	for i, peer := range []key.DiscoPublic{peerA, peerA, peerB} {
+		txid := stun.NewTxID()
+		txid[0] = byte(i + 1)
+		c.sourceProbes.pending[txid] = sourcePathProbeTx{dstDisco: peer, at: now}
+	}
+
+	if got, _ := c.sourcePathProbeGlobalAvailableCapacity(5); got != 2 {
+		t.Fatalf("global capacity = %d, want 2", got)
+	}
+	if got, _ := c.sourcePathProbeGlobalAvailableCapacity(3); got != 0 {
+		t.Fatalf("full global capacity = %d, want 0", got)
+	}
+}
+
+func TestSourcePathProbePeerStartRotates(t *testing.T) {
+	var c Conn
+	for i, want := range []int{0, 1, 2, 0, 1} {
+		if got := c.sourcePathProbePeerStart(3); got != want {
+			t.Fatalf("start %d = %d, want %d", i, got, want)
+		}
+	}
+}
+
+func TestSourcePathProbeManagerClearDropsProbeSchedulerState(t *testing.T) {
+	peer := key.NewNode().Public()
+	var pm sourcePathProbeManager
+	pm.probePeerRR = 2
+	pm.probeDstRR = map[key.NodePublic]int{peer: 3}
+	pm.probeRR = map[key.NodePublic]int{peer: 4}
+	pm.probeSweep = map[key.NodePublic]int{peer: 1}
+
+	pm.clearLocked()
+
+	if pm.probePeerRR != 0 {
+		t.Fatalf("probe peer round-robin = %d, want 0", pm.probePeerRR)
+	}
+	if pm.probeDstRR != nil {
+		t.Fatalf("probe dst round-robin map not cleared: %#v", pm.probeDstRR)
+	}
+	if pm.probeRR != nil {
+		t.Fatalf("probe source round-robin map not cleared: %#v", pm.probeRR)
+	}
+	if pm.probeSweep != nil {
+		t.Fatalf("probe sweep map not cleared: %#v", pm.probeSweep)
+	}
+}
+
+func TestSourcePathPruneProbeSchedulerPeersDropsRemovedPeers(t *testing.T) {
+	peerA := key.NewNode().Public()
+	peerB := key.NewNode().Public()
+	var c Conn
+	c.sourceProbes.probeDstRR = map[key.NodePublic]int{peerA: 1, peerB: 2}
+	c.sourceProbes.probeRR = map[key.NodePublic]int{peerA: 3, peerB: 4}
+	c.sourceProbes.probeSweep = map[key.NodePublic]int{peerA: 5, peerB: 6}
+
+	c.sourcePathPruneProbeSchedulerPeers(map[key.NodePublic]struct{}{peerA: {}})
+
+	if got := c.sourceProbes.probeDstRR; len(got) != 1 || got[peerA] != 1 {
+		t.Fatalf("probeDstRR after prune = %#v, want only peerA", got)
+	}
+	if got := c.sourceProbes.probeRR; len(got) != 1 || got[peerA] != 3 {
+		t.Fatalf("probeRR after prune = %#v, want only peerA", got)
+	}
+	if got := c.sourceProbes.probeSweep; len(got) != 1 || got[peerA] != 5 {
+		t.Fatalf("probeSweep after prune = %#v, want only peerA", got)
+	}
+
+	c.sourcePathPruneProbeSchedulerPeers(nil)
+	if c.sourceProbes.probeDstRR != nil || c.sourceProbes.probeRR != nil || c.sourceProbes.probeSweep != nil {
+		t.Fatalf("scheduler maps after empty prune = %#v %#v %#v, want nil", c.sourceProbes.probeDstRR, c.sourceProbes.probeRR, c.sourceProbes.probeSweep)
+	}
+}
+
+func sourcePathProbeTaskSocketIDs(tasks []sourcePathProbeTask) string {
+	ids := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		ids = append(ids, strconv.Itoa(int(task.source.socketID)))
+	}
+	return strings.Join(ids, ",")
 }
 
 func TestSourcePathActivePolicyHourlyRefreshAndPromotionCooldown(t *testing.T) {

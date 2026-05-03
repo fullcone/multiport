@@ -5,9 +5,11 @@
 // codebase.
 package tsconst
 
-// WintunInterfaceDesc is the description attached to Tailscale
-// interfaces on Windows. This is set by the WinTun driver.
-const WintunInterfaceDesc = "Tailscale Tunnel"
+// WintunInterfaceDesc is the description attached to AIDZPT interfaces
+// on Windows. This is set by the WinTun driver.
+const WintunInterfaceDesc = "AIDZPT Virtual Ethernet Adapter"
+const WindowsTUNInterfaceName = "AIDZPT Network Adapter"
+const WintunInterfaceDescLegacy = "Tailscale Tunnel"
 const WintunInterfaceDesc0_14 = "Wintun Userspace Tunnel"
 
 // TailnetLockNotTrustedMsg is the error message used by network lock

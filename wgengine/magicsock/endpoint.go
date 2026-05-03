@@ -659,8 +659,10 @@ func (de *endpoint) sourcePathRemoteSlotFreshLocked(addr epAddr, now mono.Time) 
 
 // sourcePathProbeDstsLocked returns the remote endpoints that should be
 // continuously probed from all auxiliary sockets. In fixed dual-send mode this
-// intentionally covers every direct endpoint, not just bestAddr, so standby
-// endpoint/source combinations have fresh samples before they are needed.
+// prioritizes the active endpoints, then walks the full direct endpoint
+// candidate set in ordinary disco RTT order. Source-port probing is paced by
+// sendSourcePathProbeTick so each endpoint gets a complete source sweep before
+// the next endpoint is attempted.
 //
 // de.mu must be held.
 func (de *endpoint) sourcePathProbeDstsLocked() []epAddr {
@@ -668,9 +670,20 @@ func (de *endpoint) sourcePathProbeDstsLocked() []epAddr {
 		return []epAddr{de.bestAddr.epAddr}
 	}
 	candidates, _ := de.sourcePathDirectEndpointCandidatesLocked(mono.Now())
-	dsts := make([]epAddr, 0, len(candidates))
+	dsts := make([]epAddr, 0, len(candidates)+de.sourcePathActiveCount)
+	seen := map[netip.AddrPort]bool{}
+	add := func(dst epAddr) {
+		if !dst.isDirect() || seen[dst.ap] {
+			return
+		}
+		seen[dst.ap] = true
+		dsts = append(dsts, dst)
+	}
+	for i := 0; i < de.sourcePathActiveCount && i < len(de.sourcePathActivePaths); i++ {
+		add(de.sourcePathActivePaths[i].dst)
+	}
 	for _, candidate := range candidates {
-		dsts = append(dsts, candidate.addr)
+		add(candidate.addr)
 	}
 	return dsts
 }
@@ -2059,7 +2072,7 @@ func (de *endpoint) startDiscoPingLocked(ep epAddr, now mono.Time, purpose disco
 		}
 		go de.sendDiscoPing(ep, epDisco.key, txid, s, logLevel)
 
-		if purpose != pingCLI && ep.isDirect() {
+		if purpose != pingCLI && ep.isDirect() && sourcePathProbeIntervalValue() <= 0 {
 			for _, source := range de.c.sourcePathProbeSources(ep.ap.Addr().Is4()) {
 				probeTxID := stun.NewTxID()
 				go de.c.sendSourcePathDiscoPing(source, ep, de.publicKey, epDisco.key, probeTxID, s, logLevel)

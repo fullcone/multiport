@@ -40,6 +40,7 @@ func TestPrintSourcePathDebugHTML(t *testing.T) {
 		`samples: 1`,
 		fmt.Sprintf("probe peer budget: %d", sourcePathProbeMaxPeerCount()),
 		fmt.Sprintf("probe burst budget: %d", sourcePathProbeMaxBurstCount()),
+		fmt.Sprintf("global probe burst budget: %d", sourcePathProbeGlobalBurstCount()),
 		`auxiliary IPv4: bound, socketID aux4, generation 7`,
 		`auxiliary IPv6: not bound, socketID aux6, generation 7`,
 	} {
