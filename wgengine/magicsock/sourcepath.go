@@ -122,6 +122,7 @@ const (
 	// the optional hot pool per address family.
 	sourcePathDefaultAuxSockets = 2
 	sourcePathMaxAuxSockets     = 32
+	sourcePathMaxRankedPaths    = 32
 
 	sourcePathActiveReplaceCooldown = time.Minute
 	sourcePathStandbyRefreshEvery   = time.Hour
@@ -245,8 +246,10 @@ type sourcePathCandidateScore struct {
 }
 
 type sourcePathDstCandidate struct {
-	dst        epAddr
-	primaryRTT time.Duration
+	dst                epAddr
+	primaryRTT         time.Duration
+	hasPrimaryRTT      bool
+	allowPrimarySource bool
 }
 
 type sourcePathSendPath struct {
@@ -664,6 +667,9 @@ func (c *Conn) sourcePathRankedDualSendPaths(candidates []sourcePathDstCandidate
 		paths = append(paths, ranked...)
 	}
 	slices.SortFunc(paths, compareSourcePathSendPath)
+	if len(paths) > sourcePathMaxRankedPaths {
+		paths = paths[:sourcePathMaxRankedPaths]
+	}
 	if len(paths) < 2 {
 		return nil
 	}
@@ -676,12 +682,15 @@ func (c *Conn) sourcePathRankedSendPathsForDst(candidate sourcePathDstCandidate,
 		return nil
 	}
 
-	paths := []sourcePathSendPath{{
-		dst:        dst,
-		source:     primarySourceRxMeta,
-		latency:    candidate.primaryRTT,
-		hasLatency: candidate.primaryRTT > 0,
-	}}
+	var paths []sourcePathSendPath
+	if candidate.allowPrimarySource || candidate.hasPrimaryRTT {
+		paths = append(paths, sourcePathSendPath{
+			dst:        dst,
+			source:     primarySourceRxMeta,
+			latency:    candidate.primaryRTT,
+			hasLatency: candidate.hasPrimaryRTT,
+		})
+	}
 
 	sources := c.sourcePathProbeSources(dst.ap.Addr().Is4())
 	if len(sources) > 0 {
@@ -691,20 +700,19 @@ func (c *Conn) sourcePathRankedSendPathsForDst(candidate sourcePathDstCandidate,
 			if c.sourceProbes.dualSendDemotedLocked(sourcePathDualSendKey{dst: dst, source: source}, now) {
 				continue
 			}
-			path := sourcePathSendPath{
-				dst:    dst,
-				source: source,
-			}
 			if score, ok := c.sourceProbes.candidateScoreLocked(dst, source, now, 0); ok {
 				if maxSkew > 0 && candidate.primaryRTT > 0 && absDuration(score.latency-candidate.primaryRTT) >= maxSkew {
 					metricSourcePathDualSendSkippedSkew.Add(1)
 					continue
 				}
-				path.latency = score.latency
-				path.hasLatency = true
-				path.lastAt = score.lastAt
+				paths = append(paths, sourcePathSendPath{
+					dst:        dst,
+					source:     source,
+					latency:    score.latency,
+					hasLatency: true,
+					lastAt:     score.lastAt,
+				})
 			}
-			paths = append(paths, path)
 		}
 		c.mu.Unlock()
 	}

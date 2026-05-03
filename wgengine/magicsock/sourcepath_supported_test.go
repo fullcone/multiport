@@ -1061,6 +1061,140 @@ func TestSourcePathDualSendPathPoolChoosesBestSourcePerEndpoint(t *testing.T) {
 	assertNoUDPConnPayload(t, dstStandby)
 }
 
+func TestSourcePathRankedDualSendPathsRequireWarmedSamples(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "2")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 1
+	c.sourcePath.mu.Lock()
+	c.ensureSourcePathAuxSocketCountLocked(2)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+	c.sourcePath.extraAux4[0].generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.extra4Bound[0] = true
+	c.sourcePath.mu.Unlock()
+
+	sources := c.sourcePathProbeSources(true)
+	if len(sources) != 2 {
+		t.Fatalf("IPv4 probe sources = %+v, want two aux candidates", sources)
+	}
+	aux1, aux2 := sources[0], sources[1]
+
+	now := mono.Now()
+	warmDst := epAddr{ap: netip.MustParseAddrPort("198.51.100.10:41641")}
+	coldDst := epAddr{ap: netip.MustParseAddrPort("198.51.100.11:41641")}
+	candidates := []sourcePathDstCandidate{
+		{dst: warmDst, primaryRTT: 25 * time.Millisecond, hasPrimaryRTT: true},
+		{dst: coldDst},
+	}
+
+	if ranked := c.sourcePathRankedDualSendPaths(candidates, now); len(ranked) != 0 {
+		t.Fatalf("ranked paths without warmed aux samples = %+v, want none", ranked)
+	}
+
+	c.mu.Lock()
+	for i := 0; i < sourcePathMinSamplesForUse; i++ {
+		c.sourceProbes.samples = append(c.sourceProbes.samples, sourcePathProbeSample{
+			dst:     warmDst,
+			source:  aux1,
+			latency: 7 * time.Millisecond,
+			at:      now.Add(-time.Duration(i) * time.Millisecond),
+		})
+	}
+	c.mu.Unlock()
+
+	ranked := c.sourcePathRankedDualSendPaths(candidates, now)
+	if len(ranked) != 2 {
+		t.Fatalf("ranked paths = %+v, want primary + one warmed aux path", ranked)
+	}
+	seenPrimary := false
+	seenAux1 := false
+	for _, path := range ranked {
+		if path.dst != warmDst {
+			t.Fatalf("ranked path dst = %v, want only warmed dst %v", path.dst, warmDst)
+		}
+		switch path.source {
+		case primarySourceRxMeta:
+			seenPrimary = true
+		case aux1:
+			seenAux1 = true
+		case aux2:
+			t.Fatalf("unprobed aux source entered ranked path pool: %+v", path)
+		default:
+			t.Fatalf("unexpected ranked path source: %+v", path)
+		}
+	}
+	if !seenPrimary || !seenAux1 {
+		t.Fatalf("ranked paths = %+v, want primary and warmed aux1", ranked)
+	}
+}
+
+func TestSourcePathRankedDualSendPathsCapsWarmedPathPool(t *testing.T) {
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "true")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "1")
+	envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "true")
+	t.Cleanup(func() {
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_ENABLE", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_AUX_SOCKETS", "")
+		envknob.Setenv("TS_EXPERIMENTAL_SRCSEL_DUAL_SEND", "")
+	})
+
+	var c Conn
+	c.sourcePath.generation = 1
+	c.sourcePath.mu.Lock()
+	c.ensureSourcePathAuxSocketCountLocked(1)
+	c.sourcePath.aux4.generation.Store(uint64(c.sourcePath.generation))
+	c.sourcePath.aux4Bound = true
+	c.sourcePath.mu.Unlock()
+
+	sources := c.sourcePathProbeSources(true)
+	if len(sources) != 1 {
+		t.Fatalf("IPv4 probe sources = %+v, want one aux candidate", sources)
+	}
+	aux := sources[0]
+
+	now := mono.Now()
+	candidates := make([]sourcePathDstCandidate, sourcePathMaxRankedPaths+8)
+	c.mu.Lock()
+	for i := range candidates {
+		dst := epAddr{ap: netip.AddrPortFrom(netip.MustParseAddr("198.51.100.20"), uint16(40000+i))}
+		candidates[i] = sourcePathDstCandidate{
+			dst:           dst,
+			primaryRTT:    80 * time.Millisecond,
+			hasPrimaryRTT: true,
+		}
+		for sample := 0; sample < sourcePathMinSamplesForUse; sample++ {
+			c.sourceProbes.samples = append(c.sourceProbes.samples, sourcePathProbeSample{
+				dst:     dst,
+				source:  aux,
+				latency: time.Duration(i+1) * time.Millisecond,
+				at:      now.Add(-time.Duration(sample) * time.Millisecond),
+			})
+		}
+	}
+	c.mu.Unlock()
+
+	ranked := c.sourcePathRankedDualSendPaths(candidates, now)
+	if len(ranked) != sourcePathMaxRankedPaths {
+		t.Fatalf("ranked path count = %d, want capped count %d", len(ranked), sourcePathMaxRankedPaths)
+	}
+	for _, path := range ranked {
+		if path.source != aux {
+			t.Fatalf("ranked path source = %+v, want fastest warmed aux paths only before slow primaries", path.source)
+		}
+		if !path.hasLatency {
+			t.Fatalf("ranked path has no measured latency: %+v", path)
+		}
+	}
+}
+
 func TestSourcePathActivePolicyHourlyRefreshAndPromotionCooldown(t *testing.T) {
 	now := mono.Now()
 	dstA := epAddr{ap: netip.MustParseAddrPort("192.0.2.10:41641")}

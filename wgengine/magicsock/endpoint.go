@@ -634,12 +634,27 @@ func (de *endpoint) sourcePathDualSendDstCandidatesLocked(now mono.Time, primary
 	}
 	dsts := make([]sourcePathDstCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
+		rtt := de.primaryRTTForLocked(candidate.addr)
+		allowPrimarySource := candidate.addr == primary || candidate.isBest || rtt > 0 || de.sourcePathRemoteSlotFreshLocked(candidate.addr, now)
 		dsts = append(dsts, sourcePathDstCandidate{
-			dst:        candidate.addr,
-			primaryRTT: de.primaryRTTForLocked(candidate.addr),
+			dst:                candidate.addr,
+			primaryRTT:         rtt,
+			hasPrimaryRTT:      rtt > 0,
+			allowPrimarySource: allowPrimarySource,
 		})
 	}
 	return dsts
+}
+
+func (de *endpoint) sourcePathRemoteSlotFreshLocked(addr epAddr, now mono.Time) bool {
+	for i, slot := range de.sourcePathRemoteSlots {
+		if slot != addr {
+			continue
+		}
+		seen := de.sourcePathRemoteSeen[i]
+		return !seen.IsZero() && now.Sub(seen) <= sessionActiveTimeout
+	}
+	return false
 }
 
 // sourcePathProbeDstsLocked returns the remote endpoints that should be
