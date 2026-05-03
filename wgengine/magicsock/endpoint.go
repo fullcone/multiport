@@ -761,12 +761,24 @@ func (de *endpoint) logSourcePathActivePolicyEvent(ev sourcePathActivePolicyEven
 	if de.c == nil || de.c.logf == nil {
 		return
 	}
+	peer := de.sourcePathPeerLogID()
 	if ev.refreshed {
-		de.c.logf("magicsock: srcsel: peer %s refreshed hot-standby path pool standby_candidates=%d refresh_interval=%v", de.publicKey.ShortString(), ev.standbyCandidates, sourcePathStandbyRefreshEvery)
+		de.c.logf("magicsock: srcsel: peer %s refreshed hot-standby path pool standby_candidates=%d refresh_interval=%v", peer, ev.standbyCandidates, sourcePathStandbyRefreshEvery)
 	}
 	if ev.replaced {
-		de.c.logf("magicsock: srcsel: peer %s promoted hot-standby path old=%s new=%s cooldown=%v", de.publicKey.ShortString(), ev.oldPath.logString(), ev.newPath.logString(), sourcePathActiveReplaceCooldown)
+		de.c.logf("magicsock: srcsel: peer %s promoted hot-standby path old=%s new=%s cooldown=%v", peer, ev.oldPath.logString(), ev.newPath.logString(), sourcePathActiveReplaceCooldown)
 	}
+}
+
+func (de *endpoint) sourcePathPeerLogID() string {
+	id := de.publicKey.ShortString()
+	if de.nodeID != 0 {
+		id += fmt.Sprintf(" node_id=%d", de.nodeID)
+	}
+	if de.nodeAddr.IsValid() {
+		id += " node_addr=" + de.nodeAddr.String()
+	}
+	return id
 }
 
 // sourcePathApplyActivePathPolicyLocked selects the two paths that fixed
@@ -953,7 +965,7 @@ func (de *endpoint) noteSourcePathObservedEndpointFailure(addr epAddr, err error
 	}
 	metricSourcePathDualEndpointObservedRemoved.Add(1)
 	if de.c.logf != nil {
-		de.c.logf("magicsock: srcsel: peer %s removed observed fanout endpoint slot=%d addr=%v after send failure: %v", de.publicKey.ShortString(), slot, addr, err)
+		de.c.logf("magicsock: srcsel: peer %s removed observed fanout endpoint slot=%d addr=%v after send failure: %v", de.sourcePathPeerLogID(), slot, addr, err)
 	}
 }
 
@@ -1011,7 +1023,7 @@ func (de *endpoint) noteSourcePathDualSendAvailability(now mono.Time, dualMode, 
 			metricSourcePathDualSendDegradedSinglePeriods.Add(1)
 			metricSourcePathDualSendDegradedSingleActivePeers.Add(1)
 			logFormat = "magicsock: srcsel: peer %s degraded to single-send reason=%s"
-			logArgs = []any{de.publicKey.ShortString(), singleReason}
+			logArgs = []any{de.sourcePathPeerLogID(), singleReason}
 		} else {
 			de.sourcePathSinglePkts += int64(packets)
 		}
@@ -1025,7 +1037,7 @@ func (de *endpoint) noteSourcePathDualSendAvailability(now mono.Time, dualMode, 
 		metricSourcePathDualSendDegradedSingleActivePeers.Add(-1)
 		metricSourcePathDualSendDegradedSingleDurationMS.Add(duration.Milliseconds())
 		logFormat = "magicsock: srcsel: peer %s recovered dual-send mode=%s single_duration=%v single_packets=%d"
-		logArgs = []any{de.publicKey.ShortString(), dualMode, duration.Round(time.Millisecond), singlePkts}
+		logArgs = []any{de.sourcePathPeerLogID(), dualMode, duration.Round(time.Millisecond), singlePkts}
 	}
 	de.mu.Unlock()
 

@@ -47,20 +47,20 @@ cd multiport
 git checkout main      # main is the merged + reviewed line
 
 # Linux server / client
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
     -o build/linux/tailscaled-srcsel ./cmd/tailscaled
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
     -o build/linux/tailscale-srcsel ./cmd/tailscale
 
 # Windows client
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
     -o build/windows/tailscaled-srcsel.exe ./cmd/tailscaled
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
     -o build/windows/tailscale-srcsel.exe ./cmd/tailscale
 
-# Verify commit hash
+# Verify version
 ./build/linux/tailscaled-srcsel --version
-# tailscale commit: <main HEAD SHA>
+# release builds intentionally omit VCS/build-id metadata
 ```
 
 Distribute:
@@ -378,7 +378,11 @@ $ErrorActionPreference = "Stop"
 $pack  = "E:\multiport-pack"
 $state = Join-Path $pack "state"
 $logs  = Join-Path $pack "logs"
-New-Item -ItemType Directory -Force -Path $state, $logs | Out-Null
+$debugLogs = $env:SRCSEL_CLIENT_DEBUG -eq "1"
+New-Item -ItemType Directory -Force -Path $state | Out-Null
+if ($debugLogs) {
+    New-Item -ItemType Directory -Force -Path $logs | Out-Null
+}
 
 # === srcsel data plane (fixed dual-send redundancy) ===
 $env:TS_EXPERIMENTAL_SRCSEL_ENABLE = "true"
@@ -404,9 +408,11 @@ $args = @(
     # Use port 41642 to avoid colliding with stock Tailscale on the same box.
     "--port=41642"
 )
+$stdoutPath = if ($debugLogs) { "$logs\tailscaled.log" } else { "NUL" }
+$stderrPath = if ($debugLogs) { "$logs\tailscaled.err" } else { "\\.\NUL" }
 $proc = Start-Process -FilePath $tsd -ArgumentList $args -PassThru -NoNewWindow `
-    -RedirectStandardOutput "$logs\tailscaled.log" `
-    -RedirectStandardError "$logs\tailscaled.err"
+    -RedirectStandardOutput $stdoutPath `
+    -RedirectStandardError $stderrPath
 Write-Host "tailscaled-srcsel pid=$($proc.Id)"
 Start-Sleep -Seconds 4
 
@@ -421,7 +427,9 @@ $tsCli = Join-Path $pack "tailscale-srcsel.exe"
     --accept-dns=$false `
     --unattended
 
-& $tsCli "--socket=\\.\pipe\srcsel" status
+if ($debugLogs) {
+    & $tsCli "--socket=\\.\pipe\srcsel" status
+}
 ```
 
 Run:
@@ -429,6 +437,11 @@ Run:
 ```powershell
 PowerShell -ExecutionPolicy Bypass -File E:\multiport-pack\start-srcsel.ps1
 ```
+
+The launcher is quiet by default for production clients: daemon stdout/stderr
+go to `NUL` and the final `status` dump is skipped. For a temporary diagnostic
+run, set `SRCSEL_CLIENT_DEBUG=1` before launching to write local
+`logs\tailscaled.log` / `logs\tailscaled.err` and print status.
 
 To run as a Windows service for auto-start, wrap with `nssm.exe` or
 similar; that's out of scope for this doc.
@@ -544,9 +557,9 @@ sudo systemctl restart tailscaled-srcsel
 # On dev/build host
 cd multiport
 git pull
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
     -o build/linux/tailscaled-srcsel ./cmd/tailscaled
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' \
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \
     -o build/linux/tailscale-srcsel ./cmd/tailscale
 
 # On each runtime host
