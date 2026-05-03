@@ -2247,6 +2247,9 @@ func (de *endpoint) setEndpointsLocked(eps interface {
 			de.c.logf("magicsock: bogus netmap endpoint from %v", eps)
 			continue
 		}
+		if omitEndpointAddrPort(ipp) {
+			continue
+		}
 		if st, ok := de.endpointState[ipp]; ok {
 			st.index = int16(i)
 		} else {
@@ -2279,6 +2282,10 @@ func (de *endpoint) setEndpointsLocked(eps interface {
 // This is called once we've already verified that we got a valid
 // discovery message from de via ep.
 func (de *endpoint) addCandidateEndpoint(ep netip.AddrPort, forRxPingTxID stun.TxID) (duplicatePing bool) {
+	if omitEndpointAddrPort(ep) {
+		return false
+	}
+
 	de.mu.Lock()
 	defer de.mu.Unlock()
 
@@ -2429,6 +2436,16 @@ func (de *endpoint) handlePongConnLocked(m *disco.Pong, di *discoInfo, src epAdd
 
 	now := mono.Now()
 	latency := now.Sub(sp.at)
+
+	if !isDerp && sp.to.isDirect() && omitEndpointAddrPort(sp.to.ap) {
+		de.debugUpdates.Add(EndpointChange{
+			When: time.Now(),
+			What: "handlePongConnLocked-omitted-endpoint",
+			From: sp.to,
+		})
+		de.deleteEndpointLocked("handlePongConnLocked-omitted", sp.to.ap)
+		return true
+	}
 
 	if !isDerp && !src.vni.IsSet() {
 		// Note: we check vni.isSet() as relay [epAddr]'s are not stored in
@@ -2743,6 +2760,9 @@ func (de *endpoint) handleCallMeMaybe(m *disco.CallMeMaybe) {
 			// We send these out, but ignore them for now.
 			// TODO: teach the ping code to ping on all interfaces
 			// for these.
+			continue
+		}
+		if omitEndpointAddrPort(ep) {
 			continue
 		}
 		mak.Set(&de.isCallMeMaybeEP, ep, true)

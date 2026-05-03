@@ -815,6 +815,8 @@ func TestSourcePathDualEndpointStrategySendsTwoLowestLatencyEndpoints(t *testing
 	primaryConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
 
 	var c Conn
+	c.metrics = new(metrics)
+	c.logf = func(string, ...any) {}
 	c.pconn4.mu.Lock()
 	c.pconn4.setConnLocked(primaryConn, "udp4", 1)
 	c.pconn4.mu.Unlock()
@@ -850,7 +852,7 @@ func TestSourcePathDualEndpointStrategySendsTwoLowestLatencyEndpoints(t *testing
 		t.Fatalf("dual endpoint candidates = %+v, want fast %v then mid %v", addrs, fast, mid)
 	}
 
-	payload := []byte("source-path-dual-endpoint")
+	payload := sourcePathTestTransportPacket(101, 1)
 	buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
 	copy(buf[packet.GeneveFixedHeaderLength:], payload)
 	before := metricSourcePathDualEndpointPackets.Value()
@@ -882,6 +884,8 @@ func TestSourcePathDualSendUsesObservedRemoteEndpoints(t *testing.T) {
 	auxConn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
 
 	var c Conn
+	c.metrics = new(metrics)
+	c.logf = func(string, ...any) {}
 	c.sourcePath.generation = 29
 	c.pconn4.mu.Lock()
 	c.pconn4.setConnLocked(primaryConn, "udp4", 1)
@@ -905,7 +909,7 @@ func TestSourcePathDualSendUsesObservedRemoteEndpoints(t *testing.T) {
 		sourcePathRemoteSeen:  [2]mono.Time{now, now},
 	}
 
-	payload := []byte("source-path-dual-send-observed-endpoints")
+	payload := sourcePathTestTransportPacket(102, 1)
 	buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
 	copy(buf[packet.GeneveFixedHeaderLength:], payload)
 	before := metricSourcePathDualSendPackets.Value()
@@ -956,6 +960,8 @@ func TestSourcePathDualSendPathPoolChoosesBestSourcePerEndpoint(t *testing.T) {
 	aux2Conn := listenUDPForSourcePathTest(t, "udp4", "127.0.0.1:0")
 
 	var c Conn
+	c.metrics = new(metrics)
+	c.logf = func(string, ...any) {}
 	c.sourcePath.generation = 39
 	c.pconn4.mu.Lock()
 	c.pconn4.setConnLocked(primaryConn, "udp4", 1)
@@ -1017,7 +1023,7 @@ func TestSourcePathDualSendPathPoolChoosesBestSourcePerEndpoint(t *testing.T) {
 		},
 	}
 
-	payload := []byte("source-path-dual-send-ranked-path-pool")
+	payload := sourcePathTestTransportPacket(103, 1)
 	buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
 	copy(buf[packet.GeneveFixedHeaderLength:], payload)
 	before := metricSourcePathDualSendPackets.Value()
@@ -1291,6 +1297,8 @@ func TestSourcePathDualEndpointStrategyInvalidatesBadEndpoints(t *testing.T) {
 	t.Cleanup(pl.clearFailures)
 
 	var c Conn
+	c.metrics = new(metrics)
+	c.logf = func(string, ...any) {}
 	c.pconn4.mu.Lock()
 	c.pconn4.setConnLocked(pc.(nettype.PacketConn), "udp4", 1)
 	c.pconn4.mu.Unlock()
@@ -1316,7 +1324,7 @@ func TestSourcePathDualEndpointStrategyInvalidatesBadEndpoints(t *testing.T) {
 		},
 	}
 
-	payload := []byte("source-path-dual-endpoint-bad")
+	payload := sourcePathTestTransportPacket(105, 1)
 	buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
 	copy(buf[packet.GeneveFixedHeaderLength:], payload)
 	if err := de.send([][]byte{buf}, packet.GeneveFixedHeaderLength); !isBadEndpointErr(err) {
@@ -1948,6 +1956,8 @@ func TestLazyEndpointSendIgnoresForcedAuxDataSourceDualStack(t *testing.T) {
 			auxConn := listenUDPForSourcePathTest(t, tt.network, tt.addr)
 
 			var c Conn
+			c.metrics = new(metrics)
+			c.logf = func(string, ...any) {}
 			c.sourcePath.generation = 17
 			tt.bindPrimaryConn(&c, primaryConn)
 			tt.bindAuxConn(&c, auxConn)
@@ -1958,7 +1968,7 @@ func TestLazyEndpointSendIgnoresForcedAuxDataSourceDualStack(t *testing.T) {
 				t.Fatalf("forced source socket = %d, want auxiliary socket %d", source.socketID, tt.socketID)
 			}
 
-			payload := []byte("source-path-lazy-" + tt.name)
+			payload := sourcePathTestTransportPacket(104, 1)
 			buf := make([]byte, packet.GeneveFixedHeaderLength+len(payload))
 			copy(buf[packet.GeneveFixedHeaderLength:], payload)
 			if err := c.Send([][]byte{buf}, &lazyEndpoint{src: dst}, packet.GeneveFixedHeaderLength); err != nil {

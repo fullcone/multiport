@@ -214,10 +214,16 @@ func extraEndpointsPollDuration() time.Duration {
 }
 
 // omitAdvertisedEndpoint reports whether ap should be suppressed from the
-// endpoint list advertised to the control plane. The knob is intentionally an
-// exact AddrPort list so operators can hide a known-bad or undesired public
-// mapping without suppressing unrelated IPv6, private, or extra endpoints.
+// endpoint list advertised to the control plane.
 func omitAdvertisedEndpoint(ap netip.AddrPort) bool {
+	return omitEndpointAddrPort(ap)
+}
+
+// omitEndpointAddrPort reports whether ap should be suppressed from advertised
+// and learned endpoint candidates. The knob is intentionally an exact AddrPort
+// list so operators can hide a known-bad or undesired public mapping without
+// suppressing unrelated IPv6, private, or extra endpoints.
+func omitEndpointAddrPort(ap netip.AddrPort) bool {
 	if !ap.IsValid() {
 		return false
 	}
