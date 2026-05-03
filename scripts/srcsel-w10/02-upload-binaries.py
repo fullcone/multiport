@@ -5,9 +5,9 @@ Looks for binaries in $SRCSEL_W7_BIN_DIR (default: <repo>/.w7-bins). Build them
 first with:
 
     cd <repo>
-    GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' \\
+    GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \\
         -o <bin-dir>/tailscaled-srcsel ./cmd/tailscaled
-    GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' \\
+    GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -ldflags='-s -w -buildid=' \\
         -o <bin-dir>/tailscale-srcsel  ./cmd/tailscale
 """
 from __future__ import annotations

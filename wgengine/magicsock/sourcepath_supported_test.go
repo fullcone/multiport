@@ -1296,7 +1296,7 @@ func TestSourcePathActivePolicyHourlyRefreshAndPromotionCooldown(t *testing.T) {
 	}
 }
 
-func TestSourcePathActivePolicyInitialSelectionUsesTwoFastestPaths(t *testing.T) {
+func TestSourcePathActivePolicyInitialSelectionPrefersDistinctEndpoints(t *testing.T) {
 	now := mono.Now()
 	dstA := epAddr{ap: netip.MustParseAddrPort("192.0.2.10:41641")}
 	dstB := epAddr{ap: netip.MustParseAddrPort("192.0.2.11:41641")}
@@ -1326,8 +1326,42 @@ func TestSourcePathActivePolicyInitialSelectionUsesTwoFastestPaths(t *testing.T)
 	if ev.replaced {
 		t.Fatalf("initial active selection replaced path unexpectedly")
 	}
+	if len(selected) != 2 || !sameSourcePathSendPath(selected[0], fastA) || !sameSourcePathSendPath(selected[1], slowerB) {
+		t.Fatalf("initial active paths = %+v, want fastest distinct dst paths", selected)
+	}
+}
+
+func TestSourcePathActivePolicySingleEndpointUsesTwoFastestSources(t *testing.T) {
+	now := mono.Now()
+	dstA := epAddr{ap: netip.MustParseAddrPort("192.0.2.10:41641")}
+	path := func(dst epAddr, source sourceRxMeta, latency time.Duration) sourcePathSendPath {
+		return sourcePathSendPath{
+			dst:        dst,
+			source:     source,
+			latency:    latency,
+			hasLatency: true,
+			lastAt:     now,
+		}
+	}
+
+	fastA := path(dstA, sourceRxMeta{socketID: sourceIPv4SocketID, generation: 1}, 5*time.Millisecond)
+	secondA := path(dstA, sourceRxMeta{socketID: sourceIPv4ExtraSocketIDBase, generation: 1}, 6*time.Millisecond)
+	slowerA := path(dstA, sourceRxMeta{socketID: sourceIPv4ExtraSocketIDBase + 1, generation: 1}, 25*time.Millisecond)
+
+	de := &endpoint{}
+	de.mu.Lock()
+	selected, ev := de.sourcePathApplyActivePathPolicyLocked(now, []sourcePathSendPath{
+		fastA,
+		secondA,
+		slowerA,
+	})
+	de.mu.Unlock()
+
+	if ev.replaced {
+		t.Fatalf("initial active selection replaced path unexpectedly")
+	}
 	if len(selected) != 2 || !sameSourcePathSendPath(selected[0], fastA) || !sameSourcePathSendPath(selected[1], secondA) {
-		t.Fatalf("initial active paths = %+v, want two fastest paths sharing dstA", selected)
+		t.Fatalf("initial active paths = %+v, want two fastest sources for single dst", selected)
 	}
 }
 
