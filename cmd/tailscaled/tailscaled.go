@@ -52,6 +52,7 @@ import (
 	"tailscale.com/paths"
 	"tailscale.com/safesocket"
 	"tailscale.com/syncs"
+	"tailscale.com/tsconst"
 	"tailscale.com/tsd"
 	"tailscale.com/types/flagtype"
 	"tailscale.com/types/key"
@@ -72,7 +73,7 @@ func defaultTunName() string {
 	case "openbsd":
 		return "tun"
 	case "windows":
-		return "Tailscale"
+		return tsconst.WindowsTUNInterfaceName
 	case "darwin":
 		// "utun" is recognized by wireguard-go/tun/tun_darwin.go
 		// as a magic value that uses/creates any free number.

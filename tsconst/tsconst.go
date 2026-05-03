@@ -8,6 +8,7 @@ package tsconst
 // WintunInterfaceDesc is the description attached to AIDZPT interfaces
 // on Windows. This is set by the WinTun driver.
 const WintunInterfaceDesc = "AIDZPT Virtual Ethernet Adapter"
+const WindowsTUNInterfaceName = "AIDZPT Network Adapter"
 const WintunInterfaceDescLegacy = "Tailscale Tunnel"
 const WintunInterfaceDesc0_14 = "Wintun Userspace Tunnel"
 
