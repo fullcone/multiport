@@ -857,6 +857,14 @@ func (c *Conn) sendSourcePathProbeTick() {
 	})
 	c.mu.Unlock()
 
+	livePeers := make(map[key.NodePublic]struct{}, len(endpoints))
+	for _, de := range endpoints {
+		de.mu.Lock()
+		livePeers[de.publicKey] = struct{}{}
+		de.mu.Unlock()
+	}
+	c.sourcePathPruneProbeSchedulerPeers(livePeers)
+
 	globalCapacity, rotations := c.sourcePathProbeGlobalAvailableCapacity(sourcePathProbeGlobalBurstCount())
 	for _, rotation := range rotations {
 		c.rotateSourcePathAuxSocket(rotation.dst, rotation.source, rotation.reason, nil)
@@ -966,6 +974,26 @@ func (c *Conn) sourcePathProbePeerStart(count int) int {
 	c.sourceProbes.probePeerRR = (start + 1) % count
 	c.mu.Unlock()
 	return start
+}
+
+func (c *Conn) sourcePathPruneProbeSchedulerPeers(live map[key.NodePublic]struct{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	prune := func(m map[key.NodePublic]int) map[key.NodePublic]int {
+		for peer := range m {
+			if _, ok := live[peer]; !ok {
+				delete(m, peer)
+			}
+		}
+		if len(m) == 0 {
+			return nil
+		}
+		return m
+	}
+	c.sourceProbes.probeDstRR = prune(c.sourceProbes.probeDstRR)
+	c.sourceProbes.probeRR = prune(c.sourceProbes.probeRR)
+	c.sourceProbes.probeSweep = prune(c.sourceProbes.probeSweep)
 }
 
 func (c *Conn) sourcePathNextProbeDst(peer key.NodePublic, dsts []epAddr) (epAddr, bool) {

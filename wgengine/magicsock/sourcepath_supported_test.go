@@ -1516,6 +1516,32 @@ func TestSourcePathProbeManagerClearDropsProbeSchedulerState(t *testing.T) {
 	}
 }
 
+func TestSourcePathPruneProbeSchedulerPeersDropsRemovedPeers(t *testing.T) {
+	peerA := key.NewNode().Public()
+	peerB := key.NewNode().Public()
+	var c Conn
+	c.sourceProbes.probeDstRR = map[key.NodePublic]int{peerA: 1, peerB: 2}
+	c.sourceProbes.probeRR = map[key.NodePublic]int{peerA: 3, peerB: 4}
+	c.sourceProbes.probeSweep = map[key.NodePublic]int{peerA: 5, peerB: 6}
+
+	c.sourcePathPruneProbeSchedulerPeers(map[key.NodePublic]struct{}{peerA: {}})
+
+	if got := c.sourceProbes.probeDstRR; len(got) != 1 || got[peerA] != 1 {
+		t.Fatalf("probeDstRR after prune = %#v, want only peerA", got)
+	}
+	if got := c.sourceProbes.probeRR; len(got) != 1 || got[peerA] != 3 {
+		t.Fatalf("probeRR after prune = %#v, want only peerA", got)
+	}
+	if got := c.sourceProbes.probeSweep; len(got) != 1 || got[peerA] != 5 {
+		t.Fatalf("probeSweep after prune = %#v, want only peerA", got)
+	}
+
+	c.sourcePathPruneProbeSchedulerPeers(nil)
+	if c.sourceProbes.probeDstRR != nil || c.sourceProbes.probeRR != nil || c.sourceProbes.probeSweep != nil {
+		t.Fatalf("scheduler maps after empty prune = %#v %#v %#v, want nil", c.sourceProbes.probeDstRR, c.sourceProbes.probeRR, c.sourceProbes.probeSweep)
+	}
+}
+
 func sourcePathProbeTaskSocketIDs(tasks []sourcePathProbeTask) string {
 	ids := make([]string, 0, len(tasks))
 	for _, task := range tasks {
